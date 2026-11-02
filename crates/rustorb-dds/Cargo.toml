@@ -1,0 +1,19 @@
+[package]
+name = "rustorb-dds"
+description = "DDS (Data Distribution Service) DCPS API in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+rustorb-rtps.workspace = true
+rustorb-xtypes.workspace = true
+
+[lints]
+workspace = true

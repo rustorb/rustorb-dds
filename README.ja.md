@@ -1,0 +1,32 @@
+# rustorb-dds
+
+Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://github.com/rustorb/rustorb) プロジェクトの一部です（[English](README.md)）。
+
+**現状: 始めたばかりで、まだ何も動きません。** 計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+
+## クレート構成
+
+| クレート | 役割 | ライセンス |
+|---|---|---|
+| `rustorb-dds` | DCPS API（DDS 1.4） | MIT OR Apache-2.0 |
+| `rustorb-rtps` | 通信路（DDSI-RTPS 2.5）: メッセージ、ディスカバリ、writer と reader | MIT OR Apache-2.0 |
+| `rustorb-xtypes` | 型系（DDS-XTypes 1.3）: TypeObject、型の互換判定、DynamicData | MIT OR Apache-2.0 |
+
+XCDR1/XCDR2 の符号化は `rustorb-cdr` に、IDL の生成器は `rustorb-idl` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。DDS のクレートが依存するのは `rustorb-cdr` だけです。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
+
+## 段階
+
+1. **D0**（rustorb 側）: `rustorb-cdr` の XCDR1/XCDR2、`rustorb-idl` による DDS の型サポートの出力
+2. **D1**: RTPS メッセージ、SPDP/SEDP、best-effort の writer/reader。Cyclone DDS・Fast DDS と hello world を双方向で通す
+3. **D2**: reliable、DATA_FRAG、キー付きインスタンス、History/Durability/Liveliness/Deadline、WaitSet。ROS 2 の talker/listener と接続
+4. **D3**: TypeObject、型の互換判定、TypeLookup、DynamicData、Python バインディング
+5. **D4**: C++/Java、OpenRTM-aist 2.0、TypeCode ⇄ TypeObject の橋渡し
+6. **後回し**: DDS Security、共有メモリ、Content Filtered Topic、DDS-RPC
+
+## clean-room
+
+OMG の仕様（DDS 1.4、DDSI-RTPS 2.5、DDS-XTypes 1.3、DDS Security、IDL4）と、他実装との黒箱の相互接続試験だけを根拠に実装します。他の DDS 実装のソースコードは読まず、写しません。詳しくは [CONTRIBUTING.md](CONTRIBUTING.md) を見てください。
+
+## ライセンス
+
+MIT OR Apache-2.0 のどちらかを選べます（[LICENSE-MIT](LICENSE-MIT)、[LICENSE-APACHE](LICENSE-APACHE)）。

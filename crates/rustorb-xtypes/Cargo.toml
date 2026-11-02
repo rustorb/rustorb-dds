@@ -1,0 +1,18 @@
+[package]
+name = "rustorb-xtypes"
+description = "DDS-XTypes type system (TypeObject, type assignability, DynamicData) for rustorb-dds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+rustorb-cdr.workspace = true
+
+[lints]
+workspace = true
