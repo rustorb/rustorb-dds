@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rustorb-xtypes",
+    "crates/rustorb-rtps",
+    "crates/rustorb-dds",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustorb/rustorb-dds"
+homepage = "https://github.com/rustorb/rustorb-dds"
+keywords = ["dds", "rtps", "ddsi", "pubsub", "ros2"]
+categories = ["network-programming"]
+
+[workspace.dependencies]
+rustorb-xtypes = { path = "crates/rustorb-xtypes" }
+rustorb-rtps = { path = "crates/rustorb-rtps" }
+# Until rustorb releases the shared parts (rustorb/rustorb#114), use the
+# main branch. Only rustorb-cdr (MIT OR Apache-2.0) is used, never the
+# GPL generator.
+rustorb-cdr = { git = "https://github.com/rustorb/rustorb", branch = "main" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
