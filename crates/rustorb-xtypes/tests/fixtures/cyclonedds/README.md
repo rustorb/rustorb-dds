@@ -14,8 +14,22 @@ black box: only its output is kept, and its sources are not read.
 
 `tests/cyclonedds.rs` checks that rustorb-xtypes reads every fixture and
 writes it back octet for octet, that each TypeObject hashes to its
-TypeIdentifier, and that describing the same types with
-`rustorb_xtypes::types` gives the same TypeObjects and TypeInformation.
+TypeIdentifier, and that describing the same types gives the same
+TypeObjects and TypeInformation, both by hand with `rustorb_xtypes::types`
+and with the descriptions rustorb-idl writes (`tests/generated/`).
+
+`Generated.idl` is `Fixtures.idl` without struct inheritance, which
+rustorb-idl does not support, and without `int8` and `uint8` (see below).
+`tests/generated/` is what rustorb-idl writes for it and for HelloWorld.idl
+and Keyed.idl:
+
+```sh
+for f in Generated HelloWorld Keyed; do
+  rustorb-idl -brust -Wbdds_only -Wbxtypes -Wbextensibility=final \
+    -C crates/rustorb-xtypes/tests/generated \
+    crates/rustorb-xtypes/tests/fixtures/cyclonedds/$f.idl
+done
+```
 
 What these fixtures show about Cyclone DDS 0.10.4:
 

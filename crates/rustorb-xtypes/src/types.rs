@@ -493,6 +493,14 @@ impl Default for UnionType {
     }
 }
 
+/// A Rust type that knows its DDS-XTypes description. rustorb-idl writes
+/// impls of it with `-Wbxtypes`.
+pub trait DescribeType {
+    /// The description of the type. Calls return the same description,
+    /// sharing its named types.
+    fn describe_type() -> Type;
+}
+
 // ---------- Building TypeObjects ---------------------------------------
 
 /// The TypeObjects of a type and of the types it depends on, and the
@@ -523,6 +531,11 @@ impl TypeObjects {
             complete,
             information,
         })
+    }
+
+    /// Builds the TypeObjects of `T`.
+    pub fn of<T: DescribeType>() -> Result<TypeObjects> {
+        TypeObjects::new(&T::describe_type())
     }
 
     /// The minimal TypeIdentifier of the type.

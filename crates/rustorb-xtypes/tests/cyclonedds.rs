@@ -429,7 +429,10 @@ fn built_like_cyclonedds() {
         ("Fx_All", fx.all),
         ("Fx_Top", fx.top),
     ];
-    assert_eq!(cases.len(), names().len());
+    assert_eq!(
+        cases.len(),
+        names().iter().filter(|n| !n.starts_with("Gen_")).count()
+    );
     for (name, ty) in cases {
         let (info, map, info_bytes, _) = type_map(name);
         let built = TypeObjects::new(&ty).unwrap();
@@ -476,4 +479,45 @@ fn mutated_type_objects() {
             }
         }
     }
+}
+
+// ---------- The same types, described by rustorb-idl -Wbxtypes -----------
+
+/// `rustorb-idl -brust -Wbdds_only -Wbxtypes -Wbextensibility=final` of the
+/// fixtures' IDL (Generated.idl is Fixtures.idl without the struct
+/// inheritance rustorb-idl does not support).
+#[allow(missing_docs, dead_code, clippy::all)]
+mod generated {
+    pub mod all {
+        include!("generated/generated.rs");
+    }
+    pub mod hello_world {
+        include!("generated/hello_world.rs");
+    }
+    pub mod keyed {
+        include!("generated/keyed.rs");
+    }
+}
+
+fn check_generated<T: DescribeType>(name: &str) {
+    let (info, map, _, _) = type_map(name);
+    let built = TypeObjects::of::<T>().unwrap();
+    assert_eq!(built.minimal, map.minimal, "{name}");
+    assert_eq!(built.complete, map.complete, "{name}");
+    assert_eq!(built.information, info, "{name}");
+}
+
+#[test]
+fn generated_like_cyclonedds() {
+    use generated::all::r#gen as g;
+    check_generated::<generated::hello_world::hello_world::Greeting>("HelloWorld_Greeting");
+    check_generated::<generated::keyed::keyed::Shape>("Keyed_Shape");
+    check_generated::<g::Plain>("Gen_Plain");
+    check_generated::<g::Inner>("Gen_Inner");
+    check_generated::<g::Mut>("Gen_Mut");
+    check_generated::<g::U>("Gen_U");
+    check_generated::<g::Ue>("Gen_UE");
+    check_generated::<g::Hashed>("Gen_Hashed");
+    check_generated::<g::All>("Gen_All");
+    check_generated::<g::Top>("Gen_Top");
 }
