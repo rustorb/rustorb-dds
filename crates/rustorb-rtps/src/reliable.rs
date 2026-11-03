@@ -365,6 +365,11 @@ impl ReliableWriter {
         self.history.remove(&sn).is_some()
     }
 
+    /// Whether the change `sn` is in the history.
+    pub fn contains(&self, sn: SequenceNumber) -> bool {
+        self.history.contains_key(&sn)
+    }
+
     /// The changes in the history, in order.
     pub fn changes(&self) -> impl Iterator<Item = &Change> {
         self.history.values()

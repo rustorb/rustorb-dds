@@ -1,0 +1,10 @@
+// A keyed type for the instance tests (rustorb-dds#17). rustorb-dds has a
+// hand-written type support for it in
+// crates/rustorb-dds/examples/keyed/shape.rs.
+module Keyed {
+    struct Shape {
+        @key unsigned long id;
+        unsigned long index;
+        string message;
+    };
+};

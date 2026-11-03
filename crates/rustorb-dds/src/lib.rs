@@ -7,7 +7,7 @@
 //! hand-written implementation works the same way.
 //!
 //! ```no_run
-//! # fn f<Greeting: rustorb_dds::TopicType>(hello: Greeting) -> rustorb_dds::Result<()> {
+//! # fn f<Greeting: rustorb_dds::TopicType + 'static>(hello: Greeting) -> rustorb_dds::Result<()> {
 //! use std::time::Duration;
 //! use rustorb_dds::DomainParticipant;
 //!
@@ -18,7 +18,9 @@
 //! writer.write(&hello)?;
 //! if reader.wait_for_data(Duration::from_secs(1)) {
 //!     for sample in reader.take() {
-//!         let _greeting: Greeting = sample.data;
+//!         // `None` when the sample only tells of a change in the state
+//!         // of its instance (disposed, no more writers).
+//!         let _greeting: Option<Greeting> = sample.data;
 //!     }
 //! }
 //! # Ok(())
@@ -27,28 +29,40 @@
 //!
 //! What works now (rustorb/rustorb#111, stages D1 and part of D2):
 //! discovery with SPDP and SEDP, and RELIABLE or BEST_EFFORT, VOLATILE
-//! writers and readers in the default partition, over UDPv4. Samples are
-//! written in XCDR1. Writers and readers in the same participant are
-//! matched with each other too.
+//! writers and readers in the default partition, over UDPv4. Keyed types
+//! have instances: writers register, write, dispose and unregister them;
+//! readers keep a history per instance with its states (DDS 1.4,
+//! 2.2.2.5.1). Samples are written in XCDR1. Writers and readers in the
+//! same participant are matched with each other too.
 //!
-//! Still to come in D2 (rustorb-dds#15): dispose and unregister,
-//! instances, more QoS (durability, liveliness, deadline, partitions in
-//! the API), DATA_FRAG for samples larger than a datagram, WaitSets; then
-//! the XTypes type information (D3).
+//! Still to come in D2 (rustorb-dds#15): more QoS (durability, liveliness,
+//! deadline, partitions in the API), DATA_FRAG for samples larger than a
+//! datagram, WaitSets; then the XTypes type information (D3).
 
 mod error;
+mod instance;
 mod participant;
 mod publisher;
 mod qos;
 mod subscriber;
+#[cfg(test)]
+#[path = "../examples/keyed/shape.rs"]
+mod test_shape;
 mod topic;
+mod typed;
 
 pub use error::{Error, Result};
+pub use instance::{
+    InstanceHandle, InstanceState, InstanceStateMask, SampleInfo, SampleState, SampleStateMask,
+    StateFilter, ViewState, ViewStateMask,
+};
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher};
-pub use qos::{DataReaderQos, DataWriterQos, History, Reliability, ResourceLimits};
+pub use qos::{
+    DataReaderQos, DataWriterQos, History, Reliability, ResourceLimits, WriterDataLifecycle,
+};
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
-pub use subscriber::{DataReader, Sample, SampleInfo, Subscriber};
+pub use subscriber::{DataReader, Sample, Subscriber};
 pub use topic::Topic;

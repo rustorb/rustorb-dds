@@ -47,6 +47,7 @@ fn keep_all_writer(max_samples: Option<usize>) -> DataWriterQos {
             max_samples,
             ..ResourceLimits::default()
         },
+        ..DataWriterQos::default()
     }
 }
 
@@ -71,7 +72,13 @@ fn take_n(reader: &DataReader<Greeting>, n: usize) -> Vec<u32> {
     let mut got = Vec::new();
     while got.len() < n && Instant::now() < deadline {
         if reader.wait_for_data(Duration::from_millis(50)) {
-            got.extend(reader.take().into_iter().map(|s| s.data.index));
+            got.extend(
+                reader
+                    .take()
+                    .into_iter()
+                    .filter_map(|s| s.data)
+                    .map(|d| d.index),
+            );
         }
     }
     got

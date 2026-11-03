@@ -19,6 +19,7 @@
 #   TIMEOUT    seconds a subscriber waits (default 30)
 #   RELIABLE   samples the reliable cases send; the subscriber must get
 #              all of them, in order (default 50)
+#   KEYED      samples the keyed cases send (default 30)
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -33,6 +34,7 @@ SEND=${SEND:-20}
 INTERVAL=${INTERVAL:-100}
 TIMEOUT=${TIMEOUT:-30}
 RELIABLE=${RELIABLE:-50}
+KEYED=${KEYED:-30}
 DROP=${DROP:-5}
 PEERS=("$@")
 [ ${#PEERS[@]} -eq 0 ] && PEERS=(cyclonedds fastdds)
@@ -65,9 +67,10 @@ cat "$OUT/versions.txt"
 
 # --- build -----------------------------------------------------------------
 
-log "building rustorb-dds hello_world"
-cargo build --quiet --example hello_world || exit 1
+log "building rustorb-dds hello_world and keyed"
+cargo build --quiet --example hello_world --example keyed || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
+RUST_KEYED="$ROOT/target/debug/examples/keyed"
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -79,7 +82,7 @@ build_peer() {
       ;;
     fastdds)
       mkdir -p "$dir/gen" &&
-        (cd "$dir/gen" && fastddsgen -replace -d . "$ROOT/interop/idl/HelloWorld.idl") \
+        (cd "$dir/gen" && fastddsgen -replace -d . "$ROOT/interop/idl/HelloWorld.idl" "$ROOT/interop/idl/Keyed.idl") \
           >"$dir/cmake.log" 2>&1 &&
         cmake -S "$src" -B "$dir" -DCMAKE_BUILD_TYPE=Release -DGEN_DIR="$dir/gen" \
           >>"$dir/cmake.log" 2>&1 &&
@@ -156,6 +159,14 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-reliable" \
     env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  # Keyed instances: writes to three instances, a dispose, an unregister.
+  K=$BUILD/$peer/keyed
+  run_case "$peer-to-rustorb-keyed" \
+    "$K" pub @D@ "$KEYED" 20 -- \
+    timeout $((TIMEOUT + 5)) "$RUST_KEYED" sub @D@ "$KEYED" "$TIMEOUT"
+  run_case "rustorb-to-$peer-keyed" \
+    "$RUST_KEYED" pub @D@ "$KEYED" 20 -- \
+    timeout $((TIMEOUT + 5)) "$K" sub @D@ "$KEYED" "$TIMEOUT"
 done
 
 printf '%s\n' "${RESULTS[@]}" | tee "$OUT/results.txt"

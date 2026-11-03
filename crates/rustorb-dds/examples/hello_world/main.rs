@@ -110,14 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("rustorb-dds: got {got} of {count} samples").into());
                 }
                 if reader.wait_for_data(Duration::from_millis(200)) {
-                    for s in reader.take() {
-                        if s.data.message != "Hello, world!" {
-                            return Err(format!("bad message {:?}", s.data.message).into());
+                    // Samples without data tell that the writer is gone.
+                    for s in reader.take().into_iter().filter_map(|s| s.data) {
+                        if s.message != "Hello, world!" {
+                            return Err(format!("bad message {:?}", s.message).into());
                         }
-                        println!("rustorb-dds: received {}", s.data.index);
+                        println!("rustorb-dds: received {}", s.index);
                         got += 1;
-                        if reliable && s.data.index != got {
-                            return Err(format!("expected {got}, got {}", s.data.index).into());
+                        if reliable && s.index != got {
+                            return Err(format!("expected {got}, got {}", s.index).into());
                         }
                     }
                 }

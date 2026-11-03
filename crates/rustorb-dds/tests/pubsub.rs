@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use greeting::Greeting;
-use rustorb_dds::{DataReaderQos, DomainParticipant, History, ParticipantConfig, TopicType};
+use rustorb_dds::{
+    DataReaderQos, DomainParticipant, History, ParticipantConfig, SampleState, TopicType, ViewState,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -78,10 +80,17 @@ fn same_participant() {
 
     let read = reader.read();
     assert_eq!(read.len(), 3);
-    assert!(!read[0].info.read);
-    assert!(reader.read()[0].info.read);
+    assert_eq!(read[0].info.sample_state, SampleState::NotRead);
+    assert_eq!(read[0].info.view_state, ViewState::New);
+    let again = reader.read();
+    assert_eq!(again[0].info.sample_state, SampleState::Read);
+    assert_eq!(again[0].info.view_state, ViewState::NotNew);
     assert!(!reader.wait_for_data(Duration::ZERO));
-    let taken: Vec<u32> = reader.take().into_iter().map(|s| s.data.index).collect();
+    let taken: Vec<u32> = reader
+        .take()
+        .into_iter()
+        .map(|s| s.data.unwrap().index)
+        .collect();
     assert_eq!(taken, [1, 2, 3]);
     assert!(reader.take().is_empty());
 
@@ -120,7 +129,11 @@ fn keep_last_keeps_the_newest() {
     for i in 1..=5 {
         writer.write(&greeting(i)).unwrap();
     }
-    let taken: Vec<u32> = reader.take().into_iter().map(|s| s.data.index).collect();
+    let taken: Vec<u32> = reader
+        .take()
+        .into_iter()
+        .map(|s| s.data.unwrap().index)
+        .collect();
     assert_eq!(taken, [4, 5]);
 }
 
@@ -163,7 +176,9 @@ fn two_participants_over_udp() {
         for s in reader.take() {
             assert_eq!(s.info.writer, writer.guid());
             assert!(s.info.source_timestamp.is_some());
-            got.push(s.data);
+            if let Some(d) = s.data {
+                got.push(d);
+            }
         }
     }
     assert_eq!(got, (1..=5).map(greeting).collect::<Vec<_>>());
