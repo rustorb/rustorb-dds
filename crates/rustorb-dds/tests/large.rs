@@ -85,6 +85,7 @@ fn reliable_keep_all() -> (DataWriterQos, DataReaderQos) {
         DataReaderQos {
             reliability: Reliability::reliable(),
             history: History::KeepAll,
+            ..DataReaderQos::default()
         },
     )
 }

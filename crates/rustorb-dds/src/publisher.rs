@@ -8,16 +8,18 @@ use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, Time, entity_kind};
 use rustorb_typesupport::{ByteOrder, Encoding, TopicType};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
 use crate::participant::{Shared, WriteOp};
-use crate::qos::DataWriterQos;
+use crate::qos::{DataWriterQos, DurabilityKind, PublisherQos, duration_to_rtps};
+use crate::status::IncompatibleQosStatus;
 use crate::topic::Topic;
 use crate::typed::instance_of;
 
 /// A DDS publisher (DDS 1.4, 2.2.2.4.1): creates data writers.
 pub struct Publisher {
     shared: Arc<Shared>,
+    qos: PublisherQos,
 }
 
 impl std::fmt::Debug for Publisher {
@@ -27,8 +29,13 @@ impl std::fmt::Debug for Publisher {
 }
 
 impl Publisher {
-    pub(crate) fn new(shared: Arc<Shared>) -> Self {
-        Publisher { shared }
+    pub(crate) fn new(shared: Arc<Shared>, qos: PublisherQos) -> Self {
+        Publisher { shared, qos }
+    }
+
+    /// The publisher's QoS.
+    pub fn qos(&self) -> &PublisherQos {
+        &self.qos
     }
 
     /// Creates a writer for `topic` with the default QoS: RELIABLE,
@@ -39,8 +46,10 @@ impl Publisher {
 
     /// Creates a writer for `topic`.
     ///
-    /// Writers are VOLATILE: a reader gets the samples written after it
-    /// was matched. A RELIABLE writer keeps samples until its reliable
+    /// A VOLATILE writer sends a reader the samples written after it was
+    /// matched; a TRANSIENT_LOCAL one also those it kept from before, to
+    /// TRANSIENT_LOCAL readers. TRANSIENT and PERSISTENT fail with
+    /// [`Error::Unsupported`]. A RELIABLE writer keeps samples until its reliable
     /// readers acknowledge them, and sends them again when asked; it also
     /// serves BEST_EFFORT readers. A BEST_EFFORT writer sends each sample
     /// once and matches only BEST_EFFORT readers.
@@ -54,9 +63,16 @@ impl Publisher {
         } else {
             entity_kind::USER_WRITER_NO_KEY
         };
+        if qos.durability > DurabilityKind::TransientLocal {
+            return Err(Error::Unsupported("TRANSIENT and PERSISTENT durability"));
+        }
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::writer(guid, topic.name(), T::TYPE_NAME);
         data.reliability = qos.reliability.to_rtps();
+        data.durability = qos.durability;
+        data.deadline = duration_to_rtps(qos.deadline);
+        data.liveliness = qos.liveliness.to_rtps();
+        data.partitions = self.qos.partition.clone();
         self.shared.add_writer(data, qos, T::KEYED)?;
         Ok(DataWriter {
             shared: self.shared.clone(),
@@ -195,6 +211,17 @@ impl<T: TopicType> DataWriter<T> {
         g.writers
             .get(&self.guid)
             .map(|w| w.matched.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// The OFFERED_INCOMPATIBLE_QOS status: readers of the same topic,
+    /// type and partition that this writer did not match because of its
+    /// QoS. Reading it resets `total_count_change`.
+    pub fn offered_incompatible_qos_status(&self) -> IncompatibleQosStatus {
+        let mut g = self.shared.lock_any();
+        g.writers
+            .get_mut(&self.guid)
+            .map(|w| w.incompatible.take())
             .unwrap_or_default()
     }
 

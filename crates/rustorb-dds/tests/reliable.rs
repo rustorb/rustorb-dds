@@ -33,6 +33,7 @@ fn reliable_reader() -> DataReaderQos {
     DataReaderQos {
         reliability: Reliability::reliable(),
         history: History::KeepAll,
+        ..DataReaderQos::default()
     }
 }
 
@@ -121,7 +122,9 @@ fn every_sample_arrives_in_order_despite_losses() {
 #[test]
 fn a_full_history_times_out() {
     let a = participant(82, None);
-    let b = participant(82, None);
+    // The reader's participant gets none of the writer's datagrams: its
+    // acknowledgments never come, and the writer's history fills up.
+    let b = participant(82, Some(1));
     let mut qos = keep_all_writer(Some(2));
     qos.reliability.max_blocking_time = Duration::from_millis(200);
     let writer = a
@@ -138,10 +141,6 @@ fn a_full_history_times_out() {
         )
         .unwrap();
     wait_matched(&writer, &reader);
-    // The reader's participant goes away without saying so: its last
-    // acknowledgments never come, and the writer's history fills up.
-    std::mem::forget(reader);
-    drop(b);
     writer.write(&greeting(1)).unwrap();
     writer.write(&greeting(2)).unwrap();
     let start = Instant::now();

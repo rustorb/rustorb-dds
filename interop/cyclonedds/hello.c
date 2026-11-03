@@ -2,8 +2,8 @@
  * Hello world publisher and subscriber for Cyclone DDS, written against
  * its public C API only. Used by interop/run.sh.
  *
- *   hello pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
- *   hello sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
+ *   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
+ *   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
  *
  * The publisher waits for a matched reader, then writes <count> samples.
  * The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -12,6 +12,10 @@
  * Best effort by default. When reliable, both sides keep every sample
  * (KEEP_ALL), the publisher waits for acknowledgments before it exits and
  * the subscriber checks that it gets 1, 2, 3... with none missing.
+ *
+ * transient_local is reliable and TRANSIENT_LOCAL: the publisher writes at
+ * once, before any subscriber is there, then waits for one and for its
+ * acknowledgments; the subscriber creates its reader two seconds late.
  *
  * The message is "Hello, world!", or with <size>, <size> letters that
  * depend on the index ('a' + (i + index) % 26 for the i-th), so that the
@@ -26,6 +30,7 @@
 #define MESSAGE "Hello, world!"
 
 static int reliable = 0;
+static int transient_local = 0;
 static long size = -1;
 
 /* The message of sample <index>, to be freed. */
@@ -45,8 +50,28 @@ static void set_reliability(dds_qos_t *qos)
   if (reliable) {
     dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
     dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, 0);
+    if (transient_local) {
+      dds_qset_durability(qos, DDS_DURABILITY_TRANSIENT_LOCAL);
+      /* Without this, Cyclone DDS keeps only the last sample of each
+         instance for late joiners: its DURABILITY_SERVICE history (by
+         default KEEP_LAST 1) bounds TRANSIENT_LOCAL too. */
+      dds_qset_durability_service(qos, 0, DDS_HISTORY_KEEP_ALL, 0,
+                                  DDS_LENGTH_UNLIMITED, DDS_LENGTH_UNLIMITED,
+                                  DDS_LENGTH_UNLIMITED);
+    }
   } else {
     dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+  }
+}
+
+static void wait_for_reader(dds_entity_t writer)
+{
+  for (int i = 0; i < 300; i++) {
+    dds_publication_matched_status_t st;
+    dds_get_publication_matched_status(writer, &st);
+    if (st.current_count > 0)
+      break;
+    dds_sleepfor(DDS_MSECS(100));
   }
 }
 
@@ -61,15 +86,11 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
     return 1;
   }
   dds_set_status_mask(writer, DDS_PUBLICATION_MATCHED_STATUS);
-  for (int i = 0; i < 300; i++) {
-    dds_publication_matched_status_t st;
-    dds_get_publication_matched_status(writer, &st);
-    if (st.current_count > 0)
-      break;
-    dds_sleepfor(DDS_MSECS(100));
+  if (!transient_local) {
+    wait_for_reader(writer);
+    /* Give the reader time to match this writer too. */
+    dds_sleepfor(DDS_MSECS(500));
   }
-  /* Give the reader time to match this writer too. */
-  dds_sleepfor(DDS_MSECS(500));
   for (int i = 1; i <= count; i++) {
     HelloWorld_Greeting g = { .index = (uint32_t)i, .message = message((uint32_t)i) };
     dds_return_t rc = dds_write(writer, &g);
@@ -82,6 +103,8 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
     fflush(stdout);
     dds_sleepfor(DDS_MSECS(interval_ms));
   }
+  if (transient_local)
+    wait_for_reader(writer);
   if (reliable) {
     dds_return_t rc = dds_wait_for_acks(writer, DDS_SECS(30));
     if (rc != DDS_RETCODE_OK) {
@@ -98,6 +121,8 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
   dds_qos_t *qos = dds_create_qos();
   set_reliability(qos);
   dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, 0);
+  if (transient_local)
+    dds_sleepfor(DDS_SECS(2)); /* join late */
   dds_entity_t reader = dds_create_reader(pp, topic, qos, NULL);
   dds_delete_qos(qos);
   if (reader < 0) {
@@ -143,10 +168,11 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
 int main(int argc, char **argv)
 {
   if (argc < 5 || argc > 7) {
-    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable [size]]\n", argv[0]);
+    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable|transient_local [size]]\n", argv[0]);
     return 2;
   }
-  reliable = argc >= 6 && strcmp(argv[5], "reliable") == 0;
+  transient_local = argc >= 6 && strcmp(argv[5], "transient_local") == 0;
+  reliable = transient_local || (argc >= 6 && strcmp(argv[5], "reliable") == 0);
   if (argc == 7)
     size = atol(argv[6]);
   dds_domainid_t domain = (dds_domainid_t)atoi(argv[2]);

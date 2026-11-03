@@ -28,23 +28,27 @@
 //! ```
 //!
 //! What works now (rustorb/rustorb#111, stages D1 and part of D2):
-//! discovery with SPDP and SEDP, and RELIABLE or BEST_EFFORT, VOLATILE
-//! writers and readers in the default partition, over UDPv4. Keyed types
+//! discovery with SPDP and SEDP, and RELIABLE or BEST_EFFORT, VOLATILE or
+//! TRANSIENT_LOCAL writers and readers, in partitions (with wildcards),
+//! over UDPv4. Endpoints whose QoS do not match are counted in the
+//! incompatible QoS statuses; readers reject samples beyond their
+//! RESOURCE_LIMITS. A participant that is deleted tells the others. Keyed types
 //! have instances: writers register, write, dispose and unregister them;
 //! readers keep a history per instance with its states (DDS 1.4,
 //! 2.2.2.5.1). Samples larger than a datagram go as DATA_FRAG, and lost
 //! fragments are repaired. Samples are written in XCDR1. Writers and
 //! readers in the same participant are matched with each other too.
 //!
-//! Still to come in D2 (rustorb-dds#15): more QoS (durability, liveliness,
-//! deadline, partitions in the API), WaitSets; then the XTypes type
-//! information (D3).
+//! Still to come in D2 (rustorb-dds#15): LIVELINESS and DEADLINE
+//! behaviour (they are announced and matched on already), WaitSets, ROS 2;
+//! then the XTypes type information (D3).
 
 mod error;
 mod instance;
 mod participant;
 mod publisher;
 mod qos;
+mod status;
 mod subscriber;
 #[cfg(test)]
 #[path = "../examples/keyed/shape.rs"]
@@ -60,10 +64,14 @@ pub use instance::{
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher};
 pub use qos::{
-    DataReaderQos, DataWriterQos, History, Reliability, ResourceLimits, WriterDataLifecycle,
+    DataReaderQos, DataWriterQos, DurabilityKind, History, Liveliness, LivelinessKind,
+    PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos, WriterDataLifecycle,
 };
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
+pub use status::{
+    IncompatibleQosStatus, QosPolicyCount, SampleRejectedReason, SampleRejectedStatus,
+};
 pub use subscriber::{DataReader, Sample, Subscriber};
 pub use topic::Topic;

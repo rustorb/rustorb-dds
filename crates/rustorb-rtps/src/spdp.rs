@@ -332,6 +332,46 @@ impl Spdp {
         msg
     }
 
+    /// The message that tells the others that the local participant is
+    /// going away, and the locators to send it to: a DATA with
+    /// `PID_STATUS_INFO` disposed and unregistered, the key hash in-line
+    /// and the key, `PID_PARTICIPANT_GUID`, as the payload (9.6.3.2). It
+    /// takes the next sequence number.
+    pub fn dispose(&mut self) -> (Vec<u8>, &[Locator]) {
+        self.sequence_number.0 += 1;
+        let e = Endianness::NATIVE;
+        let guid = self.local.guid();
+        let mut qos = ParameterList::new();
+        qos.push(crate::parameter::Parameter::new(
+            pid::KEY_HASH,
+            guid.to_bytes(),
+        ));
+        qos.push(crate::parameter::Parameter::new(
+            pid::STATUS_INFO,
+            [0, 0, 0, STATUS_DISPOSED | STATUS_UNREGISTERED],
+        ));
+        let mut key = ParameterList::new();
+        key.push(PlBuilder::new(e).guid(pid::PARTICIPANT_GUID, guid));
+        let mut msg = Message::new(Header::new(self.local.vendor_id, self.local.guid_prefix));
+        msg.submessages
+            .push(Submessage::InfoTimestamp(InfoTimestamp {
+                timestamp: Some(Time::now()),
+            }));
+        msg.submessages.push(Submessage::Data(Data {
+            reader_id: EntityId::UNKNOWN,
+            writer_id: EntityId::SPDP_BUILTIN_PARTICIPANT_ANNOUNCER,
+            writer_sn: self.sequence_number,
+            inline_qos: Some(qos),
+            serialized_payload: Some(SerializedPayload {
+                kind: PayloadKind::Key,
+                bytes: encode_pl_payload(&key, e),
+            }),
+            non_standard_payload: false,
+        }));
+        let bytes = msg.encode(e).expect("a dispose is always encodable");
+        (bytes, &self.config.announce_locators)
+    }
+
     /// If an announcement is due at `now`, returns the encoded message and
     /// the locators to send it to, and schedules the next one.
     pub fn poll_announce(&mut self, now: Instant) -> Option<(Vec<u8>, &[Locator])> {
@@ -678,6 +718,23 @@ mod tests {
             )]
         );
         assert_eq!(a.participants().count(), 0);
+    }
+
+    #[test]
+    fn our_dispose_removes() {
+        let mut a = spdp(1);
+        let mut b = spdp(2);
+        let t0 = Instant::now();
+        let (m, _) = b.poll_announce(t0).unwrap();
+        assert_eq!(a.handle_message(&m, t0).len(), 1);
+        let (bytes, _) = b.dispose();
+        assert_eq!(
+            a.handle_message(&bytes, t0),
+            [ParticipantEvent::Removed(
+                GuidPrefix([2; 12]),
+                RemovalReason::Disposed
+            )]
+        );
     }
 
     #[test]

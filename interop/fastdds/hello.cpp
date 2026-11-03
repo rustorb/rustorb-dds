@@ -1,8 +1,8 @@
 // Hello world publisher and subscriber for Fast DDS, written against its
 // public C++ API only. Used by interop/run.sh.
 //
-//   hello pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
-//   hello sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
+//   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
+//   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
 //
 // The publisher waits for a matched reader, then writes <count> samples.
 // The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -11,6 +11,10 @@
 // Best effort by default. When reliable, both sides keep every sample
 // (KEEP_ALL), the publisher waits for acknowledgments before it exits and
 // the subscriber checks that it gets 1, 2, 3... with none missing.
+//
+// transient_local is reliable and TRANSIENT_LOCAL: the publisher writes at
+// once, before any subscriber is there, then waits for one and for its
+// acknowledgments; the subscriber creates its reader two seconds late.
 //
 // The message is "Hello, world!", or with <size>, <size> letters that
 // depend on the index ('a' + (i + index) % 26 for the i-th), so that the
@@ -37,6 +41,19 @@ using namespace eprosima::fastdds::dds;
 
 static const char* MESSAGE = "Hello, world!";
 static bool reliable = false;
+static bool transient_local = false;
+
+static void wait_for_reader(DataWriter* writer)
+{
+    for (int i = 0; i < 300; i++) {
+        PublicationMatchedStatus st;
+        writer->get_publication_matched_status(st);
+        if (st.current_count > 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
 static long size = -1;
 
 static std::string message(uint32_t index)
@@ -61,21 +78,17 @@ static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_
     } else {
         qos.reliability().kind = BEST_EFFORT_RELIABILITY_QOS;
     }
+    qos.durability().kind = transient_local ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
     DataWriter* writer = pub->create_datawriter(topic, qos);
     if (writer == nullptr) {
         std::fprintf(stderr, "fastdds: create_datawriter failed\n");
         return 1;
     }
-    for (int i = 0; i < 300; i++) {
-        PublicationMatchedStatus st;
-        writer->get_publication_matched_status(st);
-        if (st.current_count > 0) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!transient_local) {
+        wait_for_reader(writer);
+        // Give the reader time to match this writer too.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    // Give the reader time to match this writer too.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     for (int i = 1; i <= count; i++) {
         HelloWorld::Greeting g;
         g.index(static_cast<uint32_t>(i));
@@ -87,6 +100,9 @@ static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_
         std::printf("fastdds: sent %d\n", i);
         std::fflush(stdout);
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+    if (transient_local) {
+        wait_for_reader(writer);
     }
     if (reliable) {
         if (writer->wait_for_acknowledgments(eprosima::fastrtps::Duration_t(30, 0)) !=
@@ -105,6 +121,10 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
     DataReaderQos qos = DATAREADER_QOS_DEFAULT;
     qos.reliability().kind = reliable ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
     qos.history().kind = KEEP_ALL_HISTORY_QOS;
+    qos.durability().kind = transient_local ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
+    if (transient_local) {
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // join late
+    }
     DataReader* reader = sub->create_datareader(topic, qos);
     if (reader == nullptr) {
         std::fprintf(stderr, "fastdds: create_datareader failed\n");
@@ -146,11 +166,12 @@ int main(int argc, char** argv)
 {
     if (argc < 5 || argc > 7) {
         std::fprintf(stderr,
-                     "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable [size]]\n",
+                     "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable|transient_local [size]]\n",
                      argv[0]);
         return 2;
     }
-    reliable = argc >= 6 && std::string(argv[5]) == "reliable";
+    transient_local = argc >= 6 && std::string(argv[5]) == "transient_local";
+    reliable = transient_local || (argc >= 6 && std::string(argv[5]) == "reliable");
     if (argc == 7) {
         size = std::atol(argv[6]);
     }

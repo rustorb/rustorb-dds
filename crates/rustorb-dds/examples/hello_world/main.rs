@@ -7,8 +7,8 @@
 //! `HelloWorld::Greeting`. The full form, used by `interop/run.sh`:
 //!
 //! ```text
-//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
-//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
+//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
+//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
 //! ```
 //!
 //! The publisher waits for a subscriber, then writes `count` samples. The
@@ -19,6 +19,11 @@
 //! default). When reliable, the publisher keeps every sample (KEEP_ALL)
 //! and waits for the subscriber to acknowledge them before it exits, and
 //! the subscriber checks that it gets 1, 2, 3... with none missing.
+//!
+//! `transient_local` is reliable and TRANSIENT_LOCAL: the publisher
+//! writes its samples at once, before any subscriber is there, then
+//! waits for one and for its acknowledgments; the subscriber creates its
+//! reader two seconds late, and must still get them all.
 //!
 //! The message is "Hello, world!", or with `size`, `size` letters that
 //! depend on the index (`a` + (i + index) % 26 for the i-th), so that a
@@ -34,7 +39,8 @@ use std::time::{Duration, Instant};
 
 use greeting::Greeting;
 use rustorb_dds::{
-    DataReaderQos, DataWriterQos, DomainParticipant, History, ParticipantConfig, Reliability,
+    DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, History, ParticipantConfig,
+    Reliability,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,10 +54,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let domain = num(2, 0)? as u32;
     let count = num(3, 10)? as u32;
-    let reliable = match args.get(5).map(String::as_str) {
-        None | Some("best_effort") => false,
-        Some("reliable") => true,
+    let (reliable, transient_local) = match args.get(5).map(String::as_str) {
+        None | Some("best_effort") => (false, false),
+        Some("reliable") => (true, false),
+        Some("transient_local") => (true, true),
         Some(other) => return Err(format!("unknown reliability {other:?}").into()),
+    };
+    let durability = if transient_local {
+        DurabilityKind::TransientLocal
+    } else {
+        DurabilityKind::Volatile
     };
     let size = match args.get(6) {
         Some(v) => Some(v.parse::<usize>()?),
@@ -78,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DataWriterQos {
                     reliability: Reliability::reliable(),
                     history: History::KeepAll,
+                    durability,
                     ..DataWriterQos::default()
                 }
             } else {
@@ -89,10 +102,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let writer = participant
                 .create_publisher()?
                 .create_datawriter_with_qos(&topic, qos)?;
-            println!("rustorb-dds: waiting for a subscriber...");
-            while !writer.wait_for_subscriptions(1, Duration::from_secs(1)) {}
-            // Give the subscriber time to match this writer too.
-            std::thread::sleep(Duration::from_millis(500));
+            if !transient_local {
+                println!("rustorb-dds: waiting for a subscriber...");
+                while !writer.wait_for_subscriptions(1, Duration::from_secs(1)) {}
+                // Give the subscriber time to match this writer too.
+                std::thread::sleep(Duration::from_millis(500));
+            }
             for index in 1..=count {
                 let g = Greeting {
                     index,
@@ -101,6 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 writer.write(&g)?;
                 println!("rustorb-dds: sent {index}");
                 std::thread::sleep(interval);
+            }
+            if transient_local {
+                println!("rustorb-dds: waiting for a subscriber...");
+                while !writer.wait_for_subscriptions(1, Duration::from_secs(1)) {}
             }
             if reliable {
                 writer.wait_for_acknowledgments(Duration::from_secs(30))?;
@@ -116,7 +135,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Reliability::best_effort()
                 },
                 history: History::KeepAll,
+                durability,
+                ..DataReaderQos::default()
             };
+            if transient_local {
+                // Join late: what was written before must still come.
+                std::thread::sleep(Duration::from_secs(2));
+            }
             let reader = participant
                 .create_subscriber()?
                 .create_datareader_with_qos(&topic, qos)?;

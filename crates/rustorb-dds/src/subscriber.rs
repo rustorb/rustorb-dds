@@ -11,13 +11,15 @@ use rustorb_typesupport::TopicType;
 use crate::error::Result;
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
 use crate::participant::Shared;
-use crate::qos::DataReaderQos;
+use crate::qos::{DataReaderQos, SubscriberQos, duration_to_rtps};
+use crate::status::{IncompatibleQosStatus, SampleRejectedStatus};
 use crate::topic::Topic;
 use crate::typed::{Typed, instance_of};
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
 pub struct Subscriber {
     shared: Arc<Shared>,
+    qos: SubscriberQos,
 }
 
 impl std::fmt::Debug for Subscriber {
@@ -27,8 +29,13 @@ impl std::fmt::Debug for Subscriber {
 }
 
 impl Subscriber {
-    pub(crate) fn new(shared: Arc<Shared>) -> Self {
-        Subscriber { shared }
+    pub(crate) fn new(shared: Arc<Shared>, qos: SubscriberQos) -> Self {
+        Subscriber { shared, qos }
+    }
+
+    /// The subscriber's QoS.
+    pub fn qos(&self) -> &SubscriberQos {
+        &self.qos
     }
 
     /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
@@ -59,6 +66,10 @@ impl Subscriber {
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
         data.reliability = qos.reliability.to_rtps();
+        data.durability = qos.durability;
+        data.deadline = duration_to_rtps(qos.deadline);
+        data.liveliness = qos.liveliness.to_rtps();
+        data.partitions = self.qos.partition.clone();
         self.shared
             .add_reader(data, qos, Arc::new(Typed::<T>::new()))?;
         Ok(DataReader {
@@ -283,6 +294,27 @@ impl<T: TopicType> DataReader<T> {
         g.readers
             .get(&self.guid)
             .map(|r| r.matched.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// The REQUESTED_INCOMPATIBLE_QOS status: writers of the same topic,
+    /// type and partition that this reader did not match because of
+    /// their QoS. Reading it resets `total_count_change`.
+    pub fn requested_incompatible_qos_status(&self) -> IncompatibleQosStatus {
+        let mut g = self.shared.lock_any();
+        g.readers
+            .get_mut(&self.guid)
+            .map(|r| r.incompatible.take())
+            .unwrap_or_default()
+    }
+
+    /// The SAMPLE_REJECTED status: samples dropped because of the
+    /// reader's RESOURCE_LIMITS. Reading it resets `total_count_change`.
+    pub fn sample_rejected_status(&self) -> SampleRejectedStatus {
+        let mut g = self.shared.lock_any();
+        g.readers
+            .get_mut(&self.guid)
+            .map(|r| r.samples.take_rejected_status())
             .unwrap_or_default()
     }
 

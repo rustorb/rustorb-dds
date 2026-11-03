@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 use rustorb_rtps::frag::{Keep, Reassembler, ReassemblyLimits};
 use rustorb_rtps::pl::pid;
-use rustorb_rtps::qos::ReliabilityKind;
+use rustorb_rtps::qos::{DurabilityKind, ReliabilityKind};
 use rustorb_rtps::receiver::receive;
 use rustorb_rtps::reliable::{
     Change, MatchedReader, ReaderConfig, ReliableReader, ReliableWriter, WriterConfig,
 };
-use rustorb_rtps::sedp::{EndpointData, Sedp, SedpConfig, SedpEvent, endpoints_match};
+use rustorb_rtps::sedp::{EndpointData, Match, Sedp, SedpConfig, SedpEvent, match_endpoints};
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
 use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
 use rustorb_rtps::{
@@ -27,7 +27,8 @@ use rustorb_typesupport::TopicType;
 use crate::error::{Error, Result};
 use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
-use crate::qos::{DataReaderQos, DataWriterQos, History};
+use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
+use crate::status::IncompatibleQosStatus;
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
 use crate::typed::KeyOps;
@@ -106,6 +107,8 @@ pub(crate) struct ReaderState {
     /// them in `rtps`).
     pub(crate) fragments: HashMap<Guid, Reassembler>,
     pub(crate) reassembly: ReassemblyLimits,
+    /// REQUESTED_INCOMPATIBLE_QOS.
+    pub(crate) incompatible: IncompatibleQosStatus,
     /// The samples and the instances.
     pub(crate) samples: ReaderHistory,
     pub(crate) keys: Arc<dyn KeyOps>,
@@ -204,6 +207,8 @@ pub(crate) struct WriterState {
     pub(crate) instances: BTreeMap<InstanceHandle, WriterInstance>,
     /// The instance of each change in the history.
     change_instance: HashMap<SequenceNumber, InstanceHandle>,
+    /// OFFERED_INCOMPATIBLE_QOS.
+    pub(crate) incompatible: IncompatibleQosStatus,
 }
 
 impl WriterState {
@@ -235,11 +240,17 @@ impl WriterState {
                 .is_some_and(|m| self.instance_changes(h) >= m.max(1))
     }
 
-    /// Drops what the history no longer needs: changes every reader has
-    /// (the writer is VOLATILE), and those beyond the KEEP_LAST depth of
-    /// their instance.
+    fn transient_local(&self) -> bool {
+        self.qos.durability >= DurabilityKind::TransientLocal
+    }
+
+    /// Drops what the history no longer needs: changes every reader has,
+    /// unless the writer is TRANSIENT_LOCAL and keeps them for later
+    /// readers, and those beyond the KEEP_LAST depth of their instance.
     fn trim(&mut self) {
-        self.rtps.remove_acknowledged();
+        if !self.transient_local() {
+            self.rtps.remove_acknowledged();
+        }
         if let History::KeepLast(depth) = self.qos.history {
             let handles: Vec<InstanceHandle> = self.instances.keys().copied().collect();
             for h in handles {
@@ -436,10 +447,18 @@ impl Shared {
         let inner = &mut *g;
         let guid = data.guid;
         let mut matched = BTreeSet::new();
+        let mut incompatible = IncompatibleQosStatus::default();
         for (rg, r) in inner.readers.iter_mut() {
-            if endpoints_match(&data, &r.data) {
-                matched.insert(*rg);
-                r.matched.insert(guid);
+            match match_endpoints(&data, &r.data) {
+                Match::Matched => {
+                    matched.insert(*rg);
+                    r.matched.insert(guid);
+                }
+                Match::Incompatible(policies) => {
+                    incompatible.add(&policies);
+                    r.incompatible.add(&policies);
+                }
+                Match::Unrelated => {}
             }
         }
         let rtps = ReliableWriter::new(guid, VENDOR_ID, inner.writer_config.clone());
@@ -453,6 +472,7 @@ impl Shared {
                 matched,
                 instances: BTreeMap::new(),
                 change_instance: HashMap::new(),
+                incompatible,
             },
         );
         let events = inner.sedp.add_writer(data);
@@ -472,10 +492,23 @@ impl Shared {
         let inner = &mut *g;
         let guid = data.guid;
         let mut matched = BTreeSet::new();
+        let mut incompatible = IncompatibleQosStatus::default();
+        // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL reader.
+        let mut kept = Vec::new();
         for (wg, w) in inner.writers.iter_mut() {
-            if endpoints_match(&w.data, &data) {
-                matched.insert(*wg);
-                w.matched.insert(guid);
+            match match_endpoints(&w.data, &data) {
+                Match::Matched => {
+                    matched.insert(*wg);
+                    w.matched.insert(guid);
+                    if w.transient_local() && qos.durability >= DurabilityKind::TransientLocal {
+                        kept.extend(w.rtps.changes().cloned());
+                    }
+                }
+                Match::Incompatible(policies) => {
+                    incompatible.add(&policies);
+                    w.incompatible.add(&policies);
+                }
+                Match::Unrelated => {}
             }
         }
         let rtps = (qos.reliability.kind == ReliabilityKind::Reliable)
@@ -488,11 +521,18 @@ impl Shared {
                 matched,
                 fragments: HashMap::new(),
                 reassembly: inner.reader_config.reassembly,
-                samples: ReaderHistory::new(qos.history),
+                incompatible,
+                samples: ReaderHistory::with_limits(qos.history, qos.resource_limits),
                 keys,
                 listener: None,
             },
         );
+        let st = inner.readers.get_mut(&guid).expect("inserted above");
+        for c in kept {
+            if let Some(c) = st.incoming(c) {
+                st.accept(c);
+            }
+        }
         let events = inner.sedp.add_reader(data);
         apply_sedp_events(inner, events, Instant::now(), &mut Notify::default());
         Ok(())
@@ -730,7 +770,10 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                                 unicast: d.unicast_locators.clone(),
                                 multicast: d.multicast_locators.clone(),
                                 reliable: d.reliability.kind == ReliabilityKind::Reliable,
-                                history: false,
+                                // A TRANSIENT_LOCAL writer sends what it
+                                // kept to the readers that ask for it.
+                                history: w.transient_local()
+                                    && d.durability >= DurabilityKind::TransientLocal,
                             },
                         );
                     }
@@ -764,6 +807,15 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                     if let Some(rtps) = r.rtps.as_mut() {
                         rtps.remove_writer(&remote);
                     }
+                }
+            }
+            SedpEvent::IncompatibleQos {
+                local, policies, ..
+            } => {
+                if let Some(w) = inner.writers.get_mut(&local) {
+                    w.incompatible.add(&policies);
+                } else if let Some(r) = inner.readers.get_mut(&local) {
+                    r.incompatible.add(&policies);
                 }
             }
             _ => {}
@@ -862,12 +914,22 @@ impl DomainParticipant {
 
     /// Creates a publisher in the default partition.
     pub fn create_publisher(&self) -> Result<Publisher> {
-        Ok(Publisher::new(self.shared.clone()))
+        self.create_publisher_with_qos(PublisherQos::default())
+    }
+
+    /// Creates a publisher with the given QoS (its partitions).
+    pub fn create_publisher_with_qos(&self, qos: PublisherQos) -> Result<Publisher> {
+        Ok(Publisher::new(self.shared.clone(), qos))
     }
 
     /// Creates a subscriber in the default partition.
     pub fn create_subscriber(&self) -> Result<Subscriber> {
-        Ok(Subscriber::new(self.shared.clone()))
+        self.create_subscriber_with_qos(SubscriberQos::default())
+    }
+
+    /// Creates a subscriber with the given QoS (its partitions).
+    pub fn create_subscriber_with_qos(&self, qos: SubscriberQos) -> Result<Subscriber> {
+        Ok(Subscriber::new(self.shared.clone(), qos))
     }
 
     /// The GUID prefixes of the other participants discovered.
@@ -887,7 +949,14 @@ impl Drop for DomainParticipant {
         }
         let mut g = self.shared.lock_any();
         g.deleted = true;
+        // Tell the others at once, rather than letting the lease run out
+        // (8.5.3.1).
+        let (bytes, to) = g.spdp.dispose();
+        let to = to.to_vec();
         drop(g);
+        for l in &to {
+            let _ = self.shared.transport.send(&bytes, l);
+        }
         self.shared.data_arrived.notify_all();
         self.shared.acknowledged.notify_all();
     }
