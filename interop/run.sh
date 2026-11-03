@@ -20,6 +20,9 @@
 #   RELIABLE   samples the reliable cases send; the subscriber must get
 #              all of them, in order (default 50)
 #   KEYED      samples the keyed cases send (default 30)
+#   LARGE      samples the large cases send (default 10)
+#   LARGE_SIZE the size of their message, in octets: more than a datagram
+#              holds, so that they go as DATA_FRAG (default 300000)
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -35,6 +38,8 @@ INTERVAL=${INTERVAL:-100}
 TIMEOUT=${TIMEOUT:-30}
 RELIABLE=${RELIABLE:-50}
 KEYED=${KEYED:-30}
+LARGE=${LARGE:-10}
+LARGE_SIZE=${LARGE_SIZE:-300000}
 DROP=${DROP:-5}
 PEERS=("$@")
 [ ${#PEERS[@]} -eq 0 ] && PEERS=(cyclonedds fastdds)
@@ -159,6 +164,23 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-reliable" \
     env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  # Large samples, as DATA_FRAG. Best effort: some of them must arrive
+  # whole.
+  run_case "$peer-to-rustorb-large-best-effort" \
+    "$P" pub @D@ "$SEND" "$INTERVAL" best_effort "$LARGE_SIZE" -- \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$COUNT" "$TIMEOUT" best_effort "$LARGE_SIZE"
+  run_case "rustorb-to-$peer-large-best-effort" \
+    "$RUST" pub @D@ "$SEND" "$INTERVAL" best_effort "$LARGE_SIZE" -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT" best_effort "$LARGE_SIZE"
+  # Reliable, with losses on the rustorb side: lost fragments are
+  # repaired.
+  run_case "$peer-to-rustorb-large" \
+    "$P" pub @D@ "$LARGE" 100 reliable "$LARGE_SIZE" -- \
+    env RUSTORB_DROP_ONE_IN="$DROP" \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$LARGE" "$TIMEOUT" reliable "$LARGE_SIZE"
+  run_case "rustorb-to-$peer-large" \
+    env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$LARGE" 100 reliable "$LARGE_SIZE" -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$LARGE" "$TIMEOUT" reliable "$LARGE_SIZE"
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
   run_case "$peer-to-rustorb-keyed" \

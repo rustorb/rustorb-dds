@@ -2,8 +2,8 @@
  * Hello world publisher and subscriber for Cyclone DDS, written against
  * its public C API only. Used by interop/run.sh.
  *
- *   hello pub <domain> <count> <interval_ms> [best_effort|reliable]
- *   hello sub <domain> <count> <timeout_s> [best_effort|reliable]
+ *   hello pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
+ *   hello sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
  *
  * The publisher waits for a matched reader, then writes <count> samples.
  * The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -12,6 +12,10 @@
  * Best effort by default. When reliable, both sides keep every sample
  * (KEEP_ALL), the publisher waits for acknowledgments before it exits and
  * the subscriber checks that it gets 1, 2, 3... with none missing.
+ *
+ * The message is "Hello, world!", or with <size>, <size> letters that
+ * depend on the index ('a' + (i + index) % 26 for the i-th), so that the
+ * sample is too large for a datagram.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +26,19 @@
 #define MESSAGE "Hello, world!"
 
 static int reliable = 0;
+static long size = -1;
+
+/* The message of sample <index>, to be freed. */
+static char *message(uint32_t index)
+{
+  if (size < 0)
+    return strdup(MESSAGE);
+  char *m = malloc((size_t)size + 1);
+  for (long i = 0; i < size; i++)
+    m[i] = (char)('a' + (i + index) % 26);
+  m[size] = 0;
+  return m;
+}
 
 static void set_reliability(dds_qos_t *qos)
 {
@@ -54,8 +71,9 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
   /* Give the reader time to match this writer too. */
   dds_sleepfor(DDS_MSECS(500));
   for (int i = 1; i <= count; i++) {
-    HelloWorld_Greeting g = { .index = (uint32_t)i, .message = MESSAGE };
+    HelloWorld_Greeting g = { .index = (uint32_t)i, .message = message((uint32_t)i) };
     dds_return_t rc = dds_write(writer, &g);
+    free(g.message);
     if (rc != DDS_RETCODE_OK) {
       fprintf(stderr, "cyclonedds: write: %s\n", dds_strretcode(-rc));
       return 1;
@@ -95,8 +113,12 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
     dds_return_t n = dds_take(reader, samples, infos, 1, 1);
     if (n > 0 && infos[0].valid_data) {
       HelloWorld_Greeting *g = samples[0];
-      if (strcmp(g->message, MESSAGE) != 0) {
-        fprintf(stderr, "cyclonedds: bad message \"%s\"\n", g->message);
+      char *want = message(g->index);
+      int ok = strcmp(g->message, want) == 0;
+      free(want);
+      if (!ok) {
+        fprintf(stderr, "cyclonedds: bad message \"%.40s\" (%zu octets) for %u\n",
+                g->message, strlen(g->message), (unsigned)g->index);
         return 1;
       }
       printf("cyclonedds: received %u\n", (unsigned)g->index);
@@ -120,11 +142,13 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
 
 int main(int argc, char **argv)
 {
-  if (argc != 5 && argc != 6) {
-    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable]\n", argv[0]);
+  if (argc < 5 || argc > 7) {
+    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable [size]]\n", argv[0]);
     return 2;
   }
-  reliable = argc == 6 && strcmp(argv[5], "reliable") == 0;
+  reliable = argc >= 6 && strcmp(argv[5], "reliable") == 0;
+  if (argc == 7)
+    size = atol(argv[6]);
   dds_domainid_t domain = (dds_domainid_t)atoi(argv[2]);
   int count = atoi(argv[3]);
   int arg = atoi(argv[4]);

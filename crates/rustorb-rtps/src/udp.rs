@@ -117,6 +117,17 @@ pub struct UdpConfig {
     /// Whether multicast datagrams sent are also delivered to this host,
     /// so that participants on the same host find each other.
     pub multicast_loopback: bool,
+    /// The receive buffer to ask for on each socket that receives
+    /// (`SO_RCVBUF`; the system may give less). A large sample comes as
+    /// a burst of datagrams, which a small buffer drops. `None` keeps
+    /// the system's default.
+    pub receive_buffer_size: Option<usize>,
+    /// The send buffer to ask for on each socket (`SO_SNDBUF`). On macOS
+    /// it also bounds the largest datagram a socket can send, 9216
+    /// octets by default, so it must be at least the largest message
+    /// sent (up to 64 KiB, see `rustorb_rtps::frag`). `None` keeps the
+    /// system's default.
+    pub send_buffer_size: Option<usize>,
 }
 
 impl UdpConfig {
@@ -131,6 +142,8 @@ impl UdpConfig {
             multicast_address: DEFAULT_MULTICAST_ADDRESS,
             multicast_ttl: 1,
             multicast_loopback: true,
+            receive_buffer_size: Some(4 * 1024 * 1024),
+            send_buffer_size: Some(1024 * 1024),
         }
     }
 }
@@ -418,10 +431,23 @@ fn new_udp_socket() -> io::Result<Socket> {
     Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
 }
 
+/// A socket with the buffers asked for. Failing to get them is not an
+/// error: the socket works with what it has.
+fn new_configured_socket(config: &UdpConfig) -> io::Result<Socket> {
+    let s = new_udp_socket()?;
+    if let Some(size) = config.receive_buffer_size {
+        let _ = s.set_recv_buffer_size(size);
+    }
+    if let Some(size) = config.send_buffer_size {
+        let _ = s.set_send_buffer_size(size);
+    }
+    Ok(s)
+}
+
 /// A socket on a multicast port. All participants of a domain on a host
 /// share the port, so the address is marked reusable.
 fn multicast_socket(config: &UdpConfig, port: u16) -> io::Result<UdpSocket> {
-    let s = new_udp_socket()?;
+    let s = new_configured_socket(config)?;
     s.set_reuse_address(true)?;
     #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
     s.set_reuse_port(true)?;
@@ -440,7 +466,7 @@ fn multicast_socket(config: &UdpConfig, port: u16) -> io::Result<UdpSocket> {
 }
 
 fn multicast_sender(config: &UdpConfig, interface: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
-    let s = new_udp_socket()?;
+    let s = new_configured_socket(config)?;
     s.set_multicast_ttl_v4(config.multicast_ttl)?;
     s.set_multicast_loop_v4(config.multicast_loopback)?;
     if let Some(i) = interface {
@@ -454,8 +480,8 @@ fn multicast_sender(config: &UdpConfig, interface: Option<Ipv4Addr>) -> io::Resu
 }
 
 /// A socket on a unicast port, not shared with anyone.
-fn unicast_socket(port: u16) -> io::Result<UdpSocket> {
-    let s = new_udp_socket()?;
+fn unicast_socket(config: &UdpConfig, port: u16) -> io::Result<UdpSocket> {
+    let s = new_configured_socket(config)?;
     // On Windows, SO_EXCLUSIVEADDRUSE would be needed to stop others
     // from taking the port; without SO_REUSEADDR the bind at least fails
     // when the port is already taken.
@@ -482,7 +508,7 @@ fn bind_unicast(config: &UdpConfig) -> io::Result<(u32, UdpSocket, UdpSocket)> {
         ) else {
             break;
         };
-        match (unicast_socket(disc), unicast_socket(user)) {
+        match (unicast_socket(config, disc), unicast_socket(config, user)) {
             (Ok(d), Ok(u)) => return Ok((pid, d, u)),
             (Err(e), _) | (_, Err(e)) => last_err = Some(e),
         }
