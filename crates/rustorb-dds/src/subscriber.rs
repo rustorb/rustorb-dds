@@ -5,13 +5,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustorb_rtps::sedp::EndpointData;
-use rustorb_rtps::{Guid, SequenceNumber, Time, entity_kind};
+use rustorb_rtps::{Guid, entity_kind};
 use rustorb_typesupport::TopicType;
 
 use crate::error::Result;
-use crate::participant::{RawSample, Shared};
+use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
+use crate::participant::Shared;
 use crate::qos::DataReaderQos;
 use crate::topic::Topic;
+use crate::typed::{Typed, instance_of};
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
 pub struct Subscriber {
@@ -31,7 +33,10 @@ impl Subscriber {
 
     /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
     /// KEEP_LAST(1), VOLATILE.
-    pub fn create_datareader<T: TopicType>(&self, topic: &Topic<T>) -> Result<DataReader<T>> {
+    pub fn create_datareader<T: TopicType + 'static>(
+        &self,
+        topic: &Topic<T>,
+    ) -> Result<DataReader<T>> {
         self.create_datareader_with_qos(topic, DataReaderQos::default())
     }
 
@@ -41,7 +46,7 @@ impl Subscriber {
     /// without gaps, asking for those lost on the way; it matches only
     /// RELIABLE writers. A BEST_EFFORT reader takes what arrives, in
     /// order, and matches any writer.
-    pub fn create_datareader_with_qos<T: TopicType>(
+    pub fn create_datareader_with_qos<T: TopicType + 'static>(
         &self,
         topic: &Topic<T>,
         qos: DataReaderQos,
@@ -54,7 +59,8 @@ impl Subscriber {
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
         data.reliability = qos.reliability.to_rtps();
-        self.shared.add_reader(data, qos)?;
+        self.shared
+            .add_reader(data, qos, Arc::new(Typed::<T>::new()))?;
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,
@@ -63,26 +69,13 @@ impl Subscriber {
     }
 }
 
-/// Information about a received sample (a part of DDS 1.4 `SampleInfo`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SampleInfo {
-    /// The writer that sent it (`publication_handle`).
-    pub writer: Guid,
-    /// Its sequence number from that writer.
-    pub sequence_number: SequenceNumber,
-    /// When the writer wrote it, if the writer said
-    /// (`source_timestamp`).
-    pub source_timestamp: Option<Time>,
-    /// Whether it was returned by [`DataReader::read`] before
-    /// (`sample_state` READ).
-    pub read: bool,
-}
-
 /// A sample with its information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sample<T> {
-    /// The value.
-    pub data: T,
+    /// The value; `None` for a sample without data
+    /// (`info.valid_data == false`), which only tells of a change in the
+    /// state of its instance.
+    pub data: Option<T>,
     /// The information.
     pub info: SampleInfo,
 }
@@ -107,17 +100,12 @@ impl<T: TopicType> std::fmt::Debug for DataReader<T> {
     }
 }
 
-fn decode<T: TopicType>(s: &RawSample) -> Option<Sample<T>> {
-    let data = T::from_payload(&s.payload).ok()?;
-    Some(Sample {
-        data,
-        info: SampleInfo {
-            writer: s.writer,
-            sequence_number: s.sequence_number,
-            source_timestamp: s.source_timestamp,
-            read: s.read,
-        },
-    })
+fn decode<T: TopicType>((payload, info): Selected) -> Option<Sample<T>> {
+    let data = match payload {
+        Some(p) => Some(T::from_payload(&p).ok()?),
+        None => None,
+    };
+    Some(Sample { data, info })
 }
 
 impl<T: TopicType> DataReader<T> {
@@ -126,30 +114,112 @@ impl<T: TopicType> DataReader<T> {
         self.guid
     }
 
-    /// Removes and returns the samples received, oldest first.
-    pub fn take(&self) -> Vec<Sample<T>> {
-        let raw: Vec<RawSample> = {
+    fn select(
+        &self,
+        filter: StateFilter,
+        instance: Option<InstanceHandle>,
+        take: bool,
+    ) -> Vec<Sample<T>> {
+        let raw = {
             let mut g = self.shared.lock_any();
             match g.readers.get_mut(&self.guid) {
-                Some(r) => r.queue.drain(..).collect(),
+                Some(r) => r.samples.select(filter, instance, take),
                 None => Vec::new(),
             }
         };
-        raw.iter().filter_map(decode).collect()
+        raw.into_iter().filter_map(decode).collect()
     }
 
-    /// Returns the samples received, oldest first, and leaves them in the
-    /// reader, marked as read.
+    /// Removes and returns the samples received, in the order they
+    /// arrived.
+    pub fn take(&self) -> Vec<Sample<T>> {
+        self.select(StateFilter::ANY, None, true)
+    }
+
+    /// Returns the samples received, in the order they arrived, and
+    /// leaves them in the reader, marked as read.
     pub fn read(&self) -> Vec<Sample<T>> {
-        let mut g = self.shared.lock_any();
-        let Some(r) = g.readers.get_mut(&self.guid) else {
-            return Vec::new();
+        self.select(StateFilter::ANY, None, false)
+    }
+
+    /// Like [`Self::take`], for the samples whose states pass `filter`.
+    pub fn take_with(&self, filter: StateFilter) -> Vec<Sample<T>> {
+        self.select(filter, None, true)
+    }
+
+    /// Like [`Self::read`], for the samples whose states pass `filter`.
+    pub fn read_with(&self, filter: StateFilter) -> Vec<Sample<T>> {
+        self.select(filter, None, false)
+    }
+
+    /// Takes the samples of one instance (`take_instance`).
+    pub fn take_instance(&self, instance: InstanceHandle) -> Vec<Sample<T>> {
+        self.select(StateFilter::ANY, Some(instance), true)
+    }
+
+    /// Reads the samples of one instance (`read_instance`).
+    pub fn read_instance(&self, instance: InstanceHandle) -> Vec<Sample<T>> {
+        self.select(StateFilter::ANY, Some(instance), false)
+    }
+
+    /// Takes the samples of the instance after `previous`, in handle
+    /// order, that has samples passing `filter`; from the first instance
+    /// when `previous` is `None` (`take_next_instance`). Empty when there
+    /// is no such instance.
+    pub fn take_next_instance(
+        &self,
+        previous: Option<InstanceHandle>,
+        filter: StateFilter,
+    ) -> Vec<Sample<T>> {
+        self.next_instance(previous, filter, true)
+    }
+
+    /// Like [`Self::take_next_instance`], reading (`read_next_instance`).
+    pub fn read_next_instance(
+        &self,
+        previous: Option<InstanceHandle>,
+        filter: StateFilter,
+    ) -> Vec<Sample<T>> {
+        self.next_instance(previous, filter, false)
+    }
+
+    fn next_instance(
+        &self,
+        previous: Option<InstanceHandle>,
+        filter: StateFilter,
+        take: bool,
+    ) -> Vec<Sample<T>> {
+        let raw = {
+            let mut g = self.shared.lock_any();
+            let Some(r) = g.readers.get_mut(&self.guid) else {
+                return Vec::new();
+            };
+            match r.samples.next_instance(previous, filter) {
+                Some(h) => r.samples.select(filter, Some(h), take),
+                None => Vec::new(),
+            }
         };
-        let out = r.queue.iter().filter_map(decode).collect();
-        for s in r.queue.iter_mut() {
-            s.read = true;
-        }
-        out
+        raw.into_iter().filter_map(decode).collect()
+    }
+
+    /// The handle of the instance of `instance` (`lookup_instance`), if
+    /// the reader has it.
+    pub fn lookup_instance(&self, instance: &T) -> Option<InstanceHandle> {
+        let h = instance_of(instance).ok()?;
+        let g = self.shared.lock_any();
+        let r = g.readers.get(&self.guid)?;
+        r.samples.has_instance(&h).then_some(h)
+    }
+
+    /// The key of an instance (`get_key_value`): the last value received
+    /// for it, whose key members identify it. `None` if the reader has
+    /// not received a value for it, or has forgotten the instance: one
+    /// with no samples left and no writers is forgotten at the read or
+    /// take after the one that emptied it.
+    pub fn get_key_value(&self, instance: InstanceHandle) -> Option<T> {
+        let g = self.shared.lock_any();
+        let r = g.readers.get(&self.guid)?;
+        T::from_payload(r.samples.last_value(&instance)?).ok()
     }
 
     /// Waits until there is a sample not yet read, or `timeout` passes.
@@ -161,7 +231,7 @@ impl<T: TopicType> DataReader<T> {
             let has = g
                 .readers
                 .get(&self.guid)
-                .is_some_and(|r| r.queue.iter().any(|s| !s.read));
+                .is_some_and(|r| r.samples.has_unread());
             if has {
                 return true;
             }

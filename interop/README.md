@@ -3,7 +3,8 @@
 `run.sh` runs a hello world between rustorb-dds and other DDS
 implementations on one host, in both directions, and checks that the
 subscriber receives the samples (rustorb-dds#8), best-effort and reliable
-(rustorb-dds#16).
+(rustorb-dds#16), and keyed instances with dispose and unregister
+(rustorb-dds#17).
 
 | Peer | Where it comes from | Program |
 |---|---|---|
@@ -11,9 +12,11 @@ subscriber receives the samples (rustorb-dds#8), best-effort and reliable
 | Fast DDS | Ubuntu 24.04 packages `libfastrtps-dev`, `fastddsgen` | `fastdds/hello.cpp`, type code from `fastddsgen` |
 
 The peers are black boxes: the programs use their public APIs and the
-code their generators make from `idl/HelloWorld.idl`. Their source code is
-not read (see [CONTRIBUTING.md](../CONTRIBUTING.md)). The rustorb-dds side
-is the `hello_world` example of the `rustorb-dds` crate.
+code their generators make from `idl/HelloWorld.idl` and `idl/Keyed.idl`.
+Their source code is not read (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+The rustorb-dds side is the `hello_world` and `keyed` examples of the
+`rustorb-dds` crate (`cyclonedds/keyed.c` and `fastdds/keyed.cpp` on the
+peers' side).
 
 ## Running
 
@@ -41,6 +44,13 @@ received is dropped at random, so that lost DATA, HEARTBEAT and ACKNACK
 must be repaired: when rustorb-dds subscribes, the peer's writer repairs;
 when it publishes, its own writer does. `DROP=0` turns this off.
 
+The `-keyed` cases use `Keyed::Shape`, whose key is `id`, RELIABLE and
+KEEP_ALL. The publisher writes `KEYED` samples (default 30) to the
+instances id 1, 2, 3 in turn, then disposes id 2 and unregisters id 3
+(without autodispose). The subscriber must get every sample, each
+instance's in order, then see id 2 NOT_ALIVE_DISPOSED and id 3
+NOT_ALIVE_NO_WRITERS.
+
 Results go to `target/interop` (or `$OUT`):
 
 - `versions.txt`: the versions of rustc and of the peers' packages
@@ -59,6 +69,7 @@ as an artifact.
 |---|---|---|---|---|
 | 2026-11-03 | rustorb-dds#8 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 4 cases pass |
 | 2026-11-03 | rustorb-dds#16 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 8 cases pass (DROP 5, four runs; DROP 2 once) |
+| 2026-11-03 | rustorb-dds#17 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 12 cases pass |
 
 Found on the way:
 
@@ -79,3 +90,13 @@ Found on the way:
 - A drop pattern that repeats (every n-th datagram) lines up with how the
   peers send (Cyclone DDS sends new data and a repair in two datagrams in
   a row) and loses the same kind each time, so the drops are random.
+- Keyed (rustorb-dds#17): neither peer puts `PID_KEY_HASH` in a DATA
+  with a value, so rustorb-dds finds the instance from the value's key
+  members. For a dispose or an unregister, Cyclone DDS 0.10.4 sends a
+  DATA with the K flag, `PID_STATUS_INFO` and a key payload (the key
+  holder in XCDR1, `CDR_LE`) and no key hash; rustorb-dds matches the key
+  payload against the instances it knows. Fast DDS 2.11.2 sends
+  `PID_KEY_HASH` and `PID_STATUS_INFO` in-line with no payload. Fast DDS
+  takes the wrong instance for a dispose that carries a key payload, even
+  with the key hash in-line, so rustorb-dds sends the key hash and the
+  status alone, which both peers accept.

@@ -7,8 +7,7 @@ use rustorb_rtps::qos::ReliabilityKind;
 /// The HISTORY of a writer or a reader (DDS 1.4, 2.2.3.18): how many
 /// samples it keeps.
 ///
-/// For now the depth applies to the whole writer or reader, not to each
-/// instance (rustorb-dds#17).
+/// The depth applies to each instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum History {
     /// Keep the latest `n` samples (at least 1).
@@ -67,9 +66,10 @@ impl Reliability {
 /// The RESOURCE_LIMITS of a writer or a reader (DDS 1.4, 2.2.3.19).
 /// `None` is `LENGTH_UNLIMITED`, the default.
 ///
-/// For now only `max_samples` is used, by writers with KEEP_ALL history.
-/// The others come with instances and the rest of the QoS
-/// (rustorb-dds#17, #19).
+/// For now writers use them: a RELIABLE, KEEP_ALL writer waits when it
+/// has `max_samples` samples, or `max_samples_per_instance` of the
+/// instance it writes; registering an instance beyond `max_instances`
+/// fails. Readers come with the rest of the QoS (rustorb-dds#19).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResourceLimits {
     /// The most samples kept.
@@ -80,16 +80,34 @@ pub struct ResourceLimits {
     pub max_samples_per_instance: Option<usize>,
 }
 
+/// The WRITER_DATA_LIFECYCLE of a writer (DDS 1.4, 2.2.3.21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriterDataLifecycle {
+    /// Whether unregistering an instance, which deleting the writer does
+    /// for all of them, disposes it too. TRUE by default.
+    pub autodispose_unregistered_instances: bool,
+}
+
+impl Default for WriterDataLifecycle {
+    fn default() -> Self {
+        WriterDataLifecycle {
+            autodispose_unregistered_instances: true,
+        }
+    }
+}
+
 /// The QoS of a [`crate::DataWriter`] that can be set for now. The
 /// writer is VOLATILE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DataWriterQos {
     /// RELIABILITY; RELIABLE by default.
     pub reliability: Reliability,
-    /// HISTORY; KEEP_LAST(1) by default.
+    /// HISTORY; KEEP_LAST(1) by default. The depth is for each instance.
     pub history: History,
     /// RESOURCE_LIMITS.
     pub resource_limits: ResourceLimits,
+    /// WRITER_DATA_LIFECYCLE.
+    pub writer_data_lifecycle: WriterDataLifecycle,
 }
 
 impl Default for DataWriterQos {
@@ -99,6 +117,7 @@ impl Default for DataWriterQos {
             reliability: Reliability::reliable(),
             history: History::default(),
             resource_limits: ResourceLimits::default(),
+            writer_data_lifecycle: WriterDataLifecycle::default(),
         }
     }
 }
@@ -109,7 +128,7 @@ impl Default for DataWriterQos {
 pub struct DataReaderQos {
     /// RELIABILITY; BEST_EFFORT by default.
     pub reliability: Reliability,
-    /// HISTORY; KEEP_LAST(1) by default.
+    /// HISTORY; KEEP_LAST(1) by default. The depth is for each instance.
     pub history: History,
 }
 

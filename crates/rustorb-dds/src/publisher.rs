@@ -5,13 +5,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustorb_rtps::sedp::EndpointData;
-use rustorb_rtps::{Guid, entity_kind};
+use rustorb_rtps::{Guid, Time, entity_kind};
 use rustorb_typesupport::{ByteOrder, Encoding, TopicType};
 
 use crate::error::Result;
-use crate::participant::Shared;
+use crate::instance::InstanceHandle;
+use crate::participant::{Shared, WriteOp};
 use crate::qos::DataWriterQos;
 use crate::topic::Topic;
+use crate::typed::instance_of;
 
 /// A DDS publisher (DDS 1.4, 2.2.2.4.1): creates data writers.
 pub struct Publisher {
@@ -55,7 +57,7 @@ impl Publisher {
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::writer(guid, topic.name(), T::TYPE_NAME);
         data.reliability = qos.reliability.to_rtps();
-        self.shared.add_writer(data, qos)?;
+        self.shared.add_writer(data, qos, T::KEYED)?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
@@ -95,14 +97,88 @@ impl<T: TopicType> DataWriter<T> {
     /// waits, when its history is full, for its readers to acknowledge
     /// samples; after `max_blocking_time` it fails with
     /// [`Error::Timeout`](crate::Error::Timeout).
+    ///
+    /// Writing registers the sample's instance if it is not yet. KEEP_LAST
+    /// keeps the newest samples of each instance.
     pub fn write(&self, sample: &T) -> Result<()> {
+        self.write_w_timestamp(sample, Time::now())
+    }
+
+    /// Like [`Self::write`], with the source timestamp given.
+    pub fn write_w_timestamp(&self, sample: &T, timestamp: Time) -> Result<()> {
         let payload = sample.to_payload(Encoding::Xcdr1, ByteOrder::NATIVE)?;
-        let key_hash = if T::KEYED {
-            Some(sample.key_hash()?)
-        } else {
-            None
-        };
-        self.shared.write(self.guid, payload, key_hash)
+        self.shared.write(
+            self.guid,
+            instance_of(sample)?,
+            WriteOp::Value(payload),
+            timestamp,
+        )
+    }
+
+    /// Registers the instance of `instance` (whose key members are what
+    /// counts) and returns its handle (`register_instance`). This sends
+    /// nothing: readers learn of the instance when it is written.
+    pub fn register_instance(&self, instance: &T) -> Result<InstanceHandle> {
+        let h = instance_of(instance)?;
+        self.shared.register_instance(&self.guid, h)?;
+        Ok(h)
+    }
+
+    /// Unregisters an instance (`unregister_instance`): this writer has
+    /// nothing more to say about it. A reader's instance becomes
+    /// NOT_ALIVE_NO_WRITERS once no writer has it registered, or
+    /// NOT_ALIVE_DISPOSED when `autodispose_unregistered_instances` is
+    /// set. Fails with
+    /// [`Error::PreconditionNotMet`](crate::Error::PreconditionNotMet)
+    /// when the instance is not registered.
+    pub fn unregister_instance(&self, instance: &T) -> Result<()> {
+        self.unregister_instance_w_timestamp(instance, Time::now())
+    }
+
+    /// Like [`Self::unregister_instance`], with the source timestamp
+    /// given.
+    pub fn unregister_instance_w_timestamp(&self, instance: &T, timestamp: Time) -> Result<()> {
+        let dispose = self.shared.autodispose_of(&self.guid);
+        self.shared.write(
+            self.guid,
+            instance_of(instance)?,
+            WriteOp::Lifecycle {
+                dispose,
+                unregister: true,
+            },
+            timestamp,
+        )
+    }
+
+    /// Disposes an instance (`dispose`): readers see it
+    /// NOT_ALIVE_DISPOSED until it is written again. The instance stays
+    /// registered (or is registered).
+    pub fn dispose(&self, instance: &T) -> Result<()> {
+        self.dispose_w_timestamp(instance, Time::now())
+    }
+
+    /// Like [`Self::dispose`], with the source timestamp given.
+    pub fn dispose_w_timestamp(&self, instance: &T, timestamp: Time) -> Result<()> {
+        self.shared.write(
+            self.guid,
+            instance_of(instance)?,
+            WriteOp::Lifecycle {
+                dispose: true,
+                unregister: false,
+            },
+            timestamp,
+        )
+    }
+
+    /// The handle of the instance of `instance` if it is registered
+    /// (`lookup_instance`).
+    pub fn lookup_instance(&self, instance: &T) -> Option<InstanceHandle> {
+        let h = instance_of(instance).ok()?;
+        let g = self.shared.lock_any();
+        g.writers
+            .get(&self.guid)
+            .filter(|w| w.instances.contains_key(&h))
+            .map(|_| h)
     }
 
     /// Waits until every matched RELIABLE reader has acknowledged every

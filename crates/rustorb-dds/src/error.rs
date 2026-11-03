@@ -18,6 +18,9 @@ pub enum Error {
     /// room in its history within `max_blocking_time`, or its readers
     /// did not acknowledge in time.
     Timeout,
+    /// The operation is not allowed in this state: unregistering an
+    /// instance that is not registered.
+    PreconditionNotMet,
 }
 
 impl fmt::Display for Error {
@@ -28,6 +31,7 @@ impl fmt::Display for Error {
             Error::AlreadyDeleted => f.write_str("the participant was deleted"),
             Error::OutOfResources => f.write_str("no more entity ids"),
             Error::Timeout => f.write_str("timed out"),
+            Error::PreconditionNotMet => f.write_str("the instance is not registered"),
         }
     }
 }

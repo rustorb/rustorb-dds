@@ -1,13 +1,14 @@
 //! `DomainParticipant` and the thread that runs discovery and receives
 //! data for it.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use rustorb_rtps::pl::pid;
 use rustorb_rtps::qos::ReliabilityKind;
 use rustorb_rtps::receiver::receive;
 use rustorb_rtps::reliable::{
@@ -15,7 +16,7 @@ use rustorb_rtps::reliable::{
 };
 use rustorb_rtps::sedp::{EndpointData, Sedp, SedpConfig, SedpEvent, endpoints_match};
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
-use rustorb_rtps::udp::{Channel, Datagram, Incoming, UdpConfig, UdpTransport};
+use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
 use rustorb_rtps::{
     EntityId, Guid, GuidPrefix, Locator, Parameter, ParameterList, PayloadKind, SequenceNumber,
     SerializedPayload, Submessage, Time, VendorId,
@@ -23,10 +24,12 @@ use rustorb_rtps::{
 use rustorb_typesupport::TopicType;
 
 use crate::error::{Error, Result};
+use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History};
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
+use crate::typed::KeyOps;
 
 /// The vendor id sent in RTPS headers. rustorb has no vendor id from the
 /// OMG yet, so this is `VENDORID_UNKNOWN` (DDSI-RTPS 2.5, 8.3.3.1.3).
@@ -84,86 +87,265 @@ impl ParticipantConfig {
     }
 }
 
-/// A sample as it arrived, before it is deserialized.
-#[derive(Debug)]
-pub(crate) struct RawSample {
-    pub(crate) payload: Vec<u8>,
-    pub(crate) writer: Guid,
-    pub(crate) sequence_number: SequenceNumber,
-    pub(crate) source_timestamp: Option<Time>,
-    pub(crate) read: bool,
-}
-
 pub(crate) type Listener = Arc<dyn Fn() + Send + Sync>;
+
+/// `StatusInfo_t` flags (DDSI-RTPS 2.5, 9.6.4.9).
+const STATUS_DISPOSED: u8 = 0x01;
+const STATUS_UNREGISTERED: u8 = 0x02;
 
 pub(crate) struct ReaderState {
     pub(crate) data: EndpointData,
-    pub(crate) history: History,
     /// The reliable protocol state, for a RELIABLE reader: it orders the
     /// changes of each remote writer and asks for what is missing.
     pub(crate) rtps: Option<ReliableReader>,
     /// Matched writers, local and remote.
     pub(crate) matched: BTreeSet<Guid>,
-    /// The highest sequence number taken from each writer: a best-effort
-    /// reader drops older ones (DDSI-RTPS 2.5, 8.4.11).
-    pub(crate) last_sn: HashMap<Guid, SequenceNumber>,
-    pub(crate) queue: VecDeque<RawSample>,
+    /// The samples and the instances.
+    pub(crate) samples: ReaderHistory,
+    pub(crate) keys: Arc<dyn KeyOps>,
     pub(crate) listener: Option<Listener>,
 }
 
 impl ReaderState {
-    /// Takes a sample in; returns whether it was kept.
-    fn accept(&mut self, s: RawSample) -> bool {
-        if !self.matched.contains(&s.writer) {
+    /// Takes a change in; returns whether a sample was added.
+    fn accept(&mut self, c: Incoming) -> bool {
+        if !self.matched.contains(&c.writer) {
             return false;
         }
-        let last = self.last_sn.entry(s.writer).or_insert(SequenceNumber(0));
-        if s.sequence_number <= *last {
-            return false;
-        }
-        *last = s.sequence_number;
-        if let History::KeepLast(depth) = self.history {
-            while self.queue.len() >= depth.max(1) {
-                self.queue.pop_front();
+        self.samples.accept(c)
+    }
+
+    /// Reads a change received from a remote writer: its instance from
+    /// the in-line key hash, or else from the value or the key payload,
+    /// and what it does to the instance. `None` when it cannot be placed.
+    fn incoming(&self, c: Change) -> Option<Incoming> {
+        let mut key_hash = None;
+        let mut status = 0u8;
+        if let Some(q) = &c.inline_qos {
+            for p in &q.parameters {
+                if p.id == pid::KEY_HASH && p.value.len() >= 16 {
+                    key_hash = Some(InstanceHandle(p.value[..16].try_into().expect("16 octets")));
+                } else if p.id == pid::STATUS_INFO && p.value.len() >= 4 {
+                    // An octet array: the flags are in the last octet.
+                    status = p.value[3];
+                }
             }
         }
-        self.queue.push_back(s);
-        true
+        let lifecycle = status & (STATUS_DISPOSED | STATUS_UNREGISTERED) != 0;
+        let payload = c.payload;
+        let change = if lifecycle {
+            instance::Change::Lifecycle {
+                disposed: status & STATUS_DISPOSED != 0,
+                unregistered: status & STATUS_UNREGISTERED != 0,
+            }
+        } else {
+            match &payload {
+                Some(p) if p.kind == PayloadKind::Data => instance::Change::Write(p.bytes.clone()),
+                _ => return None,
+            }
+        };
+        let instance = if !self.keys.keyed() {
+            InstanceHandle::KEYLESS
+        } else if let Some(h) = key_hash {
+            h
+        } else {
+            match (&change, &payload) {
+                (instance::Change::Write(v), _) => self.keys.instance_of_value(v)?,
+                (_, Some(p)) => self
+                    .samples
+                    .last_values()
+                    .find(|(_, v)| self.keys.key_matches(&p.bytes, v))
+                    .map(|(h, _)| h)?,
+                _ => return None,
+            }
+        };
+        Some(Incoming {
+            writer: c.writer,
+            sequence_number: c.sequence_number,
+            source_timestamp: c.timestamp,
+            instance,
+            change,
+        })
     }
+}
+
+/// An instance a writer has registered.
+#[derive(Debug)]
+pub(crate) struct WriterInstance {
+    /// Its changes still in the history, oldest first.
+    changes: VecDeque<SequenceNumber>,
+}
+
+/// What a writer does to an instance.
+#[derive(Debug)]
+pub(crate) enum WriteOp {
+    /// `write`: a value payload.
+    Value(Vec<u8>),
+    /// `dispose` and/or `unregister_instance`.
+    Lifecycle { dispose: bool, unregister: bool },
 }
 
 pub(crate) struct WriterState {
     pub(crate) data: EndpointData,
     pub(crate) qos: DataWriterQos,
+    keyed: bool,
     /// The history and the remote readers. Local readers get each sample
     /// directly when it is written.
     pub(crate) rtps: ReliableWriter,
     /// Matched readers, local and remote.
     pub(crate) matched: BTreeSet<Guid>,
+    /// The registered instances.
+    pub(crate) instances: BTreeMap<InstanceHandle, WriterInstance>,
+    /// The instance of each change in the history.
+    change_instance: HashMap<SequenceNumber, InstanceHandle>,
 }
 
 impl WriterState {
-    /// Whether the history has no room for one more change, so that a
-    /// write must wait (a reliable KEEP_ALL writer at `max_samples`).
-    fn is_full(&self) -> bool {
-        self.qos.reliability.kind == ReliabilityKind::Reliable
-            && self.qos.history == History::KeepAll
-            && self
-                .qos
-                .resource_limits
-                .max_samples
-                .is_some_and(|m| self.rtps.len() >= m.max(1))
+    /// The changes of an instance still in the history.
+    fn instance_changes(&mut self, h: &InstanceHandle) -> usize {
+        let Some(i) = self.instances.get_mut(h) else {
+            return 0;
+        };
+        let rtps = &self.rtps;
+        i.changes.retain(|sn| rtps.contains(*sn));
+        i.changes.len()
+    }
+
+    /// Whether the history has no room for one more change of instance
+    /// `h`, so that a write must wait: a reliable KEEP_ALL writer at
+    /// `max_samples` or `max_samples_per_instance`.
+    fn is_full(&mut self, h: &InstanceHandle) -> bool {
+        if self.qos.reliability.kind != ReliabilityKind::Reliable
+            || self.qos.history != History::KeepAll
+        {
+            return false;
+        }
+        let limits = self.qos.resource_limits;
+        limits
+            .max_samples
+            .is_some_and(|m| self.rtps.len() >= m.max(1))
+            || limits
+                .max_samples_per_instance
+                .is_some_and(|m| self.instance_changes(h) >= m.max(1))
     }
 
     /// Drops what the history no longer needs: changes every reader has
-    /// (the writer is VOLATILE), and those beyond the KEEP_LAST depth.
+    /// (the writer is VOLATILE), and those beyond the KEEP_LAST depth of
+    /// their instance.
     fn trim(&mut self) {
         self.rtps.remove_acknowledged();
         if let History::KeepLast(depth) = self.qos.history {
-            while self.rtps.len() > depth.max(1) {
-                self.rtps.remove_oldest();
+            let handles: Vec<InstanceHandle> = self.instances.keys().copied().collect();
+            for h in handles {
+                while self.instance_changes(&h) > depth.max(1) {
+                    let i = self.instances.get_mut(&h).expect("listed above");
+                    if let Some(sn) = i.changes.pop_front() {
+                        self.rtps.remove_change(sn);
+                    }
+                }
             }
         }
+        let rtps = &self.rtps;
+        self.change_instance.retain(|sn, _| rtps.contains(*sn));
+    }
+
+    /// Registers an instance, if it is not already.
+    fn register(&mut self, h: InstanceHandle) -> Result<()> {
+        if self.instances.contains_key(&h) {
+            return Ok(());
+        }
+        if self
+            .qos
+            .resource_limits
+            .max_instances
+            .is_some_and(|m| self.instances.len() >= m)
+        {
+            return Err(Error::OutOfResources);
+        }
+        self.instances.insert(
+            h,
+            WriterInstance {
+                changes: VecDeque::new(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Adds a change for instance `h` to the history, registering the
+    /// instance or unregistering it as `op` says. Returns the change for
+    /// the local readers.
+    fn add(
+        &mut self,
+        h: InstanceHandle,
+        op: WriteOp,
+        timestamp: Time,
+    ) -> Result<(SequenceNumber, instance::Change)> {
+        let unregister = matches!(
+            op,
+            WriteOp::Lifecycle {
+                unregister: true,
+                ..
+            }
+        );
+        if !self.instances.contains_key(&h) {
+            if unregister {
+                return Err(Error::PreconditionNotMet);
+            }
+            self.register(h)?;
+        }
+        let mut q = ParameterList::new();
+        if self.keyed {
+            q.push(Parameter::new(pid::KEY_HASH, h.0));
+        }
+        let (payload, change) = match op {
+            WriteOp::Value(v) => (
+                Some(SerializedPayload {
+                    kind: PayloadKind::Data,
+                    bytes: v.clone(),
+                }),
+                instance::Change::Write(v),
+            ),
+            WriteOp::Lifecycle {
+                dispose,
+                unregister,
+            } => {
+                let mut flags = 0;
+                if dispose {
+                    flags |= STATUS_DISPOSED;
+                }
+                if unregister {
+                    flags |= STATUS_UNREGISTERED;
+                }
+                q.push(Parameter::new(pid::STATUS_INFO, [0, 0, 0, flags]));
+                // The key hash alone tells the instance: no key payload
+                // goes with it. Fast DDS 2.11.2 takes the wrong instance
+                // for a DATA with a key payload, even with the key hash
+                // inline, while Cyclone DDS 0.10.4 and Fast DDS both
+                // accept this form.
+                (
+                    None,
+                    instance::Change::Lifecycle {
+                        disposed: dispose,
+                        unregistered: unregister,
+                    },
+                )
+            }
+        };
+        let inline_qos = (!q.parameters.is_empty()).then_some(q);
+        let sn = self
+            .rtps
+            .add_change_at(inline_qos, payload, Some(timestamp));
+        self.change_instance.insert(sn, h);
+        if unregister {
+            self.instances.remove(&h);
+        } else {
+            self.instances
+                .get_mut(&h)
+                .expect("registered above")
+                .changes
+                .push_back(sn);
+        }
+        Ok((sn, change))
     }
 }
 
@@ -238,7 +420,12 @@ impl Shared {
 
     /// Adds a local writer: announces it, and matches it with the local
     /// readers.
-    pub(crate) fn add_writer(&self, data: EndpointData, qos: DataWriterQos) -> Result<()> {
+    pub(crate) fn add_writer(
+        &self,
+        data: EndpointData,
+        qos: DataWriterQos,
+        keyed: bool,
+    ) -> Result<()> {
         let mut g = self.lock()?;
         let inner = &mut *g;
         let guid = data.guid;
@@ -255,18 +442,26 @@ impl Shared {
             WriterState {
                 data: data.clone(),
                 qos,
+                keyed,
                 rtps,
                 matched,
+                instances: BTreeMap::new(),
+                change_instance: HashMap::new(),
             },
         );
         let events = inner.sedp.add_writer(data);
-        apply_sedp_events(inner, events, Instant::now());
+        apply_sedp_events(inner, events, Instant::now(), &mut Notify::default());
         Ok(())
     }
 
     /// Adds a local reader: announces it, and matches it with the local
     /// writers.
-    pub(crate) fn add_reader(&self, data: EndpointData, qos: DataReaderQos) -> Result<()> {
+    pub(crate) fn add_reader(
+        &self,
+        data: EndpointData,
+        qos: DataReaderQos,
+        keys: Arc<dyn KeyOps>,
+    ) -> Result<()> {
         let mut g = self.lock()?;
         let inner = &mut *g;
         let guid = data.guid;
@@ -283,32 +478,84 @@ impl Shared {
             guid,
             ReaderState {
                 data: data.clone(),
-                history: qos.history,
                 rtps,
                 matched,
-                last_sn: HashMap::new(),
-                queue: VecDeque::new(),
+                samples: ReaderHistory::new(qos.history),
+                keys,
                 listener: None,
             },
         );
         let events = inner.sedp.add_reader(data);
-        apply_sedp_events(inner, events, Instant::now());
+        apply_sedp_events(inner, events, Instant::now(), &mut Notify::default());
         Ok(())
     }
 
+    /// Deletes a local writer. Deleting a writer unregisters its
+    /// instances (DDS 1.4, 2.2.3.21), disposing them too when
+    /// `autodispose_unregistered_instances` is set; then its readers lose
+    /// it.
     pub(crate) fn remove_writer(&self, guid: &Guid) {
-        let mut g = self.lock_any();
-        let inner = &mut *g;
-        if inner.writers.remove(guid).is_none() {
-            return;
+        let handles: Vec<InstanceHandle> = {
+            let g = self.lock_any();
+            match g.writers.get(guid) {
+                Some(w) if !g.deleted => w.instances.keys().copied().collect(),
+                _ => Vec::new(),
+            }
+        };
+        for h in handles {
+            let _ = self.write(
+                *guid,
+                h,
+                WriteOp::Lifecycle {
+                    dispose: self.autodispose_of(guid),
+                    unregister: true,
+                },
+                Time::now(),
+            );
         }
-        for r in inner.readers.values_mut() {
-            r.matched.remove(guid);
-            r.last_sn.remove(guid);
+        let mut listeners = Vec::new();
+        let mut delivered = false;
+        {
+            let mut g = self.lock_any();
+            let inner = &mut *g;
+            if inner.writers.remove(guid).is_none() {
+                return;
+            }
+            for r in inner.readers.values_mut() {
+                if r.matched.remove(guid) && r.samples.writer_gone(guid) {
+                    delivered = true;
+                    if let Some(l) = &r.listener {
+                        listeners.push(l.clone());
+                    }
+                }
+            }
+            if !inner.deleted {
+                inner.sedp.remove_writer(guid);
+            }
         }
-        if !inner.deleted {
-            inner.sedp.remove_writer(guid);
+        if delivered {
+            self.data_arrived.notify_all();
         }
+        for l in listeners {
+            l();
+        }
+    }
+
+    /// Registers an instance of a local writer, as a write would.
+    pub(crate) fn register_instance(&self, writer: &Guid, h: InstanceHandle) -> Result<()> {
+        let mut g = self.lock()?;
+        let Some(w) = g.writers.get_mut(writer) else {
+            return Ok(());
+        };
+        w.register(h)
+    }
+
+    pub(crate) fn autodispose_of(&self, writer: &Guid) -> bool {
+        self.lock_any().writers.get(writer).is_some_and(|w| {
+            w.qos
+                .writer_data_lifecycle
+                .autodispose_unregistered_instances
+        })
     }
 
     pub(crate) fn remove_reader(&self, guid: &Guid) {
@@ -327,19 +574,20 @@ impl Shared {
         self.acknowledged.notify_all();
     }
 
-    /// Writes a serialized sample from a local writer: delivers it to the
-    /// matched local readers, adds it to the writer's history and sends
-    /// it to the matched remote readers.
+    /// Writes a change of instance `h` from a local writer (a value, a
+    /// dispose or an unregister): delivers it to the matched local
+    /// readers, adds it to the writer's history and sends it to the
+    /// matched remote readers.
     ///
     /// A reliable KEEP_ALL writer whose history is full waits up to
     /// `max_blocking_time` for its readers to acknowledge changes.
     pub(crate) fn write(
         &self,
         writer: Guid,
-        payload: Vec<u8>,
-        key_hash: Option<[u8; 16]>,
+        h: InstanceHandle,
+        op: WriteOp,
+        timestamp: Time,
     ) -> Result<()> {
-        let timestamp = Time::now();
         let mut listeners = Vec::new();
         let out;
         {
@@ -353,10 +601,10 @@ impl Shared {
             };
             let deadline = Instant::now() + blocking;
             loop {
-                let Some(w) = g.writers.get(&writer) else {
+                let Some(w) = g.writers.get_mut(&writer) else {
                     return Ok(());
                 };
-                if !w.is_full() {
+                if !w.is_full(&h) {
                     break;
                 }
                 let now = Instant::now();
@@ -373,19 +621,7 @@ impl Shared {
             }
             let inner = &mut *g;
             let w = inner.writers.get_mut(&writer).expect("checked above");
-            let inline_qos = key_hash.map(|h| {
-                let mut q = ParameterList::new();
-                q.push(Parameter::new(rustorb_rtps::pl::pid::KEY_HASH, h));
-                q
-            });
-            let sn = w.rtps.add_change_at(
-                inline_qos,
-                Some(SerializedPayload {
-                    kind: PayloadKind::Data,
-                    bytes: payload.clone(),
-                }),
-                Some(timestamp),
-            );
+            let (sn, change) = w.add(h, op, timestamp)?;
             let now = Instant::now();
             out = w.rtps.poll(now);
             w.trim();
@@ -396,14 +632,14 @@ impl Shared {
                     continue;
                 }
                 if let Some(st) = inner.readers.get_mut(&r) {
-                    let s = RawSample {
-                        payload: payload.clone(),
+                    let c = Incoming {
                         writer,
                         sequence_number: sn,
                         source_timestamp: Some(timestamp),
-                        read: false,
+                        instance: h,
+                        change: change.clone(),
                     };
-                    if st.accept(s) {
+                    if st.accept(c) {
                         delivered = true;
                         if let Some(l) = &st.listener {
                             listeners.push(l.clone());
@@ -463,10 +699,17 @@ impl Shared {
     }
 }
 
+/// Readers that got samples, to signal.
+#[derive(Default)]
+struct Notify {
+    delivered: bool,
+    listeners: Vec<Listener>,
+}
+
 /// Applies SEDP match events to the local endpoints: a local writer
 /// starts or stops sending to a remote reader, a local reliable reader
 /// starts or stops tracking a remote writer.
-fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
+fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, notify: &mut Notify) {
     for e in events {
         match e {
             SedpEvent::Matched { local, remote } => {
@@ -503,8 +746,12 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                     w.rtps.remove_reader(&remote);
                     w.trim();
                 } else if let Some(r) = inner.readers.get_mut(&local) {
-                    r.matched.remove(&remote);
-                    r.last_sn.remove(&remote);
+                    if r.matched.remove(&remote) && r.samples.writer_gone(&remote) {
+                        notify.delivered = true;
+                        if let Some(l) = &r.listener {
+                            notify.listeners.push(l.clone());
+                        }
+                    }
                     if let Some(rtps) = r.rtps.as_mut() {
                         rtps.remove_writer(&remote);
                     }
@@ -640,7 +887,7 @@ impl Drop for DomainParticipant {
 /// The longest the thread sleeps, so that it sees the stop flag.
 const MAX_WAIT: Duration = Duration::from_millis(50);
 
-fn run(shared: Arc<Shared>, incoming: Incoming) {
+fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
     while !shared.stop.load(Ordering::Relaxed) {
         let wait = {
             let g = shared.lock_any();
@@ -679,14 +926,15 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         let inner = &mut *g;
         let mut delivered = false;
         let mut acked = false;
+        let mut notify = Notify::default();
         for d in datagrams {
             match d.channel {
                 Channel::DiscoveryMulticast | Channel::DiscoveryUnicast => {
                     for e in inner.spdp.handle_message(&d.data, now) {
-                        participant_event(inner, e, now);
+                        participant_event(inner, e, now, &mut notify);
                     }
                     let events = inner.sedp.handle_message(&d.data, now);
-                    apply_sedp_events(inner, events, now);
+                    apply_sedp_events(inner, events, now, &mut notify);
                 }
                 Channel::UserMulticast | Channel::UserUnicast => {
                     if shared.should_drop() {
@@ -699,8 +947,10 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
             }
         }
         for e in inner.spdp.remove_expired(now) {
-            participant_event(inner, e, now);
+            participant_event(inner, e, now, &mut notify);
         }
+        delivered |= notify.delivered;
+        listeners.append(&mut notify.listeners);
         if let Some((bytes, to)) = inner.spdp.poll_announce(now) {
             out.push((bytes, to.to_vec()));
         }
@@ -739,14 +989,14 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
     }
 }
 
-fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
+fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant, notify: &mut Notify) {
     match e {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
             inner.sedp.add_participant(&p, now);
         }
         ParticipantEvent::Removed(prefix, _) => {
             let events = inner.sedp.remove_participant(&prefix);
-            apply_sedp_events(inner, events, now);
+            apply_sedp_events(inner, events, now, notify);
         }
     }
 }
@@ -793,7 +1043,7 @@ fn user_traffic(
                         None => vec![Change {
                             writer,
                             sequence_number: d.writer_sn,
-                            inline_qos: None,
+                            inline_qos: d.inline_qos.clone(),
                             payload: d.serialized_payload.clone(),
                             timestamp: r.timestamp,
                         }],
@@ -849,19 +1099,10 @@ fn for_readers(
             continue;
         }
         for c in f(st) {
-            // Only values: dispose and unregister come with instances
-            // (rustorb-dds#17).
-            let Some(p) = c.payload.filter(|p| p.kind == PayloadKind::Data) else {
+            let Some(c) = st.incoming(c) else {
                 continue;
             };
-            let s = RawSample {
-                payload: p.bytes,
-                writer: c.writer,
-                sequence_number: c.sequence_number,
-                source_timestamp: c.timestamp,
-                read: false,
-            };
-            if st.accept(s) {
+            if st.accept(c) {
                 result.delivered = true;
                 if let Some(l) = &st.listener {
                     listeners.push(l.clone());
