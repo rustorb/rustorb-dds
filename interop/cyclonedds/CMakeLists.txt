@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(rustorb_interop_cyclonedds C)
+find_package(CycloneDDS REQUIRED)
+idlc_generate(TARGET hello_type FILES ../idl/HelloWorld.idl)
+add_executable(hello hello.c)
+target_link_libraries(hello hello_type CycloneDDS::ddsc)

@@ -649,3 +649,36 @@ fn check_stable(m1: &Message) {
         assert_eq!(Message::decode(&b3).unwrap(), m2);
     }
 }
+
+/// An ACKNACK whose readerSNState has base 0 and no bits, as some
+/// implementations send before they have received anything: taken as
+/// base 1. Base 0 with bits stays invalid (8.3.5.5).
+#[test]
+fn acknack_with_empty_base_zero() {
+    let ack = |num_bits: u32| {
+        let mut b = header_bytes();
+        // ACKNACK, little endian, not final, 24 octets.
+        b.extend_from_slice(&[0x06, 0x01, 24 + 4 * num_bits.div_ceil(32) as u8, 0]);
+        b.extend_from_slice(&READER.to_bytes());
+        b.extend_from_slice(&WRITER.to_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // base 0
+        b.extend_from_slice(&num_bits.to_le_bytes());
+        if num_bits > 0 {
+            b.extend_from_slice(&[0, 0, 0, 0x80]);
+        }
+        b.extend_from_slice(&3i32.to_le_bytes());
+        b
+    };
+    let msg = Message::decode(&ack(0)).unwrap();
+    let Submessage::AckNack(a) = &msg.submessages[0] else {
+        panic!("{:?}", msg.submessages)
+    };
+    assert_eq!(a.reader_sn_state.base(), SequenceNumber(1));
+    assert_eq!(a.reader_sn_state.num_bits(), 0);
+    assert_eq!(a.count, Count(3));
+    assert!(!a.final_flag);
+    assert!(matches!(
+        Message::decode(&ack(1)),
+        Err(DecodeError::InvalidSubmessage { id: 0x06, .. })
+    ));
+}
