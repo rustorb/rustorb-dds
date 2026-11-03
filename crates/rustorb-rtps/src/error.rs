@@ -32,6 +32,16 @@ pub enum DecodeError {
     },
     /// A parameter list is malformed (DDSI-RTPS 2.5, 9.4.2.11).
     InvalidParameterList(&'static str),
+    /// A parameter value is too short or not valid for its type.
+    InvalidParameterValue(crate::parameter::ParameterId),
+    /// A required parameter is missing.
+    MissingParameter(crate::parameter::ParameterId),
+    /// A parameter that is not understood has the must-understand bit set
+    /// (DDSI-RTPS 2.5, Table 9.6).
+    MustUnderstand(crate::parameter::ParameterId),
+    /// A serialized payload uses a representation that is not supported
+    /// here (DDSI-RTPS 2.5, clause 10).
+    UnknownRepresentation([u8; 2]),
 }
 
 impl fmt::Display for DecodeError {
@@ -50,6 +60,16 @@ impl fmt::Display for DecodeError {
             }
             DecodeError::InvalidParameterList(reason) => {
                 write!(f, "invalid parameter list: {reason}")
+            }
+            DecodeError::InvalidParameterValue(id) => {
+                write!(f, "invalid value for parameter 0x{:04x}", id.0)
+            }
+            DecodeError::MissingParameter(id) => write!(f, "missing parameter 0x{:04x}", id.0),
+            DecodeError::MustUnderstand(id) => {
+                write!(f, "parameter 0x{:04x} must be understood but is not", id.0)
+            }
+            DecodeError::UnknownRepresentation(r) => {
+                write!(f, "unknown payload representation {r:02x?}")
             }
         }
     }

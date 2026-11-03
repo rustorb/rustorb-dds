@@ -2,7 +2,8 @@
 //!
 //! What is here so far: reading and writing RTPS messages and
 //! submessages (DDSI-RTPS 2.5 clauses 8.3 and 9.4, rustorb-dds#3), and the
-//! UDP transport (9.6.2, rustorb-dds#4).
+//! UDP transport (9.6.2, rustorb-dds#4), and participant discovery (SPDP,
+//! 8.5.3, rustorb-dds#5) in [`spdp`] with the PL_CDR helpers in [`pl`].
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -37,13 +38,15 @@
 //! assert_eq!(Message::decode(&bytes).unwrap(), msg);
 //! ```
 //!
-//! Still to come (rustorb/rustorb#111, stages D1 and D2): SPDP/SEDP
+//! Still to come (rustorb/rustorb#111, stages D1 and D2): SEDP
 //! discovery, and best-effort then reliable writers
 //! and readers.
 
 mod error;
 mod message;
 mod parameter;
+pub mod pl;
+pub mod spdp;
 mod submessage;
 mod types;
 pub mod udp;
@@ -58,8 +61,8 @@ pub use submessage::{
     NackFrag, Pad, PayloadKind, SerializedPayload, Submessage, UnknownSubmessage, submessage_id,
 };
 pub use types::{
-    ChangeCount, Count, EntityId, FragmentNumber, FragmentNumberSet, GroupDigest, Guid, GuidPrefix,
-    Locator, LocatorUdpV4, ProtocolVersion, SequenceNumber, SequenceNumberSet, Time, VendorId,
-    entity_kind,
+    BuiltinEndpointSet, ChangeCount, Count, Duration, EntityId, FragmentNumber, FragmentNumberSet,
+    GroupDigest, Guid, GuidPrefix, Locator, LocatorUdpV4, ProtocolVersion, SequenceNumber,
+    SequenceNumberSet, Time, VendorId, entity_kind,
 };
 pub use wire::Endianness;
