@@ -223,3 +223,4 @@ What a ROS 2 (Jazzy) node puts on DDS, seen from outside (with
 | Date | rustorb-dds | ROS 2 | Result |
 |---|---|---|---|
 | 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.6), `osrf/ros:jazzy-desktop` | both cases pass |
+| 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.7) and rmw_cyclonedds_cpp 2.2.4 (Cyclone DDS 0.10.5), CI job `ros2` | all 4 cases pass |
