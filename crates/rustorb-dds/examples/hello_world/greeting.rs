@@ -77,3 +77,24 @@ impl ::rustorb_typesupport::TopicType for Greeting {
         ::rustorb_typesupport::Extensibility::Final;
     const KEYED: bool = false;
 }
+
+/// The DDS-XTypes description, as `rustorb-idl -Wbxtypes` writes it:
+/// what `DomainParticipant::register_type` announces.
+impl ::rustorb_xtypes::types::DescribeType for Greeting {
+    fn describe_type() -> ::rustorb_xtypes::types::Type {
+        use ::rustorb_xtypes::types::*;
+        static TYPE: ::std::sync::OnceLock<Type> = ::std::sync::OnceLock::new();
+        TYPE.get_or_init(|| {
+            Type::from(StructType {
+                name: "HelloWorld::Greeting".into(),
+                extensibility: Extensibility::Final,
+                members: vec![
+                    StructMember::new("index", 0, Type::Primitive(Primitive::Uint32)),
+                    StructMember::new("message", 1, Type::string()),
+                ],
+                ..Default::default()
+            })
+        })
+        .clone()
+    }
+}

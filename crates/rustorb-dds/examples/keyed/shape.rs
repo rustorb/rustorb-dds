@@ -72,3 +72,27 @@ impl ::rustorb_typesupport::TopicType for Shape {
         ::rustorb_typesupport::Extensibility::Final;
     const KEYED: bool = true;
 }
+
+/// The DDS-XTypes description, as `rustorb-idl -Wbxtypes` writes it.
+impl ::rustorb_xtypes::types::DescribeType for Shape {
+    fn describe_type() -> ::rustorb_xtypes::types::Type {
+        use ::rustorb_xtypes::types::*;
+        static TYPE: ::std::sync::OnceLock<Type> = ::std::sync::OnceLock::new();
+        TYPE.get_or_init(|| {
+            Type::from(StructType {
+                name: "Keyed::Shape".into(),
+                extensibility: Extensibility::Final,
+                members: vec![
+                    StructMember {
+                        key: true,
+                        ..StructMember::new("id", 0, Type::Primitive(Primitive::Uint32))
+                    },
+                    StructMember::new("index", 1, Type::Primitive(Primitive::Uint32)),
+                    StructMember::new("message", 2, Type::string()),
+                ],
+                ..Default::default()
+            })
+        })
+        .clone()
+    }
+}

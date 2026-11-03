@@ -195,6 +195,25 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-large" \
     env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$LARGE" 100 reliable "$LARGE_SIZE" -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$LARGE" "$TIMEOUT" reliable "$LARGE_SIZE"
+  # XTypes. rustorb announces the TypeInformation of its types (and both
+  # sides match by it when the peer does too); without it, by type name.
+  run_case "$peer-to-rustorb-no-type-information" \
+    "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+    env RUSTORB_NO_TYPE_INFORMATION=1 \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$COUNT" "$TIMEOUT"
+  run_case "rustorb-to-$peer-no-type-information" \
+    env RUSTORB_NO_TYPE_INFORMATION=1 "$RUST" pub @D@ "$SEND" "$INTERVAL" -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+  # XCDR2 data (DATA_REPRESENTATION). The Fast DDS peer requests XCDR
+  # only.
+  if [ "$peer" = cyclonedds ]; then
+    run_case "$peer-to-rustorb-xcdr2" \
+      env HELLO_XCDR2=1 "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "rustorb-to-$peer-xcdr2" \
+      env RUSTORB_XCDR2=1 "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  fi
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
   run_case "$peer-to-rustorb-keyed" \

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::qos::{DurabilityKind, LivelinessKind, QosPolicyId};
+pub use rustorb_rtps::sedp::data_representation;
+pub use rustorb_xtypes::assignability::{TypeConsistency, TypeConsistencyKind};
 
 /// The HISTORY of a writer or a reader (DDS 1.4, 2.2.3.18): how many
 /// samples it keeps.
@@ -192,6 +194,12 @@ pub struct DataWriterQos {
     /// other participants, for the application. Empty by default. ROS 2
     /// reads `typehash=...;` here.
     pub user_data: Vec<u8>,
+    /// DATA_REPRESENTATION (DDS-XTypes 1.3, 7.6.3.1): the writer
+    /// serializes its samples in the first
+    /// ([`data_representation::XCDR`] or [`data_representation::XCDR2`])
+    /// and offers it to readers. Empty, the default, is XCDR, which every
+    /// reader accepts; it is then not announced.
+    pub data_representation: Vec<i16>,
 }
 
 impl Default for DataWriterQos {
@@ -206,6 +214,7 @@ impl Default for DataWriterQos {
             deadline: None,
             liveliness: Liveliness::default(),
             user_data: Vec::new(),
+            data_representation: Vec::new(),
         }
     }
 }
@@ -234,6 +243,17 @@ pub struct DataReaderQos {
     /// USER_DATA: octets the reader announces to the other
     /// participants. Empty by default.
     pub user_data: Vec<u8>,
+    /// DATA_REPRESENTATION (DDS-XTypes 1.3, 7.6.3.1): the representations
+    /// the reader accepts; XCDR and XCDR2 by default, which it can both
+    /// read. An empty list is XCDR only.
+    pub data_representation: Vec<i16>,
+    /// TYPE_CONSISTENCY_ENFORCEMENT (DDS-XTypes 1.3, 7.6.3.4): how far the
+    /// writer's type may differ from the reader's. By default, the
+    /// reader's type must be assignable from the writer's, ignoring
+    /// sequence and string bounds. It applies when both announce their
+    /// types ([`crate::DomainParticipant::register_type`]); otherwise the
+    /// type names must be the same.
+    pub type_consistency: TypeConsistency,
 }
 
 impl Default for DataReaderQos {
@@ -247,6 +267,8 @@ impl Default for DataReaderQos {
             deadline: None,
             liveliness: Liveliness::default(),
             user_data: Vec::new(),
+            data_representation: vec![data_representation::XCDR, data_representation::XCDR2],
+            type_consistency: TypeConsistency::default(),
         }
     }
 }

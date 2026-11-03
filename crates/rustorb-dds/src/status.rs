@@ -55,6 +55,31 @@ impl IncompatibleQosStatus {
     }
 }
 
+/// INCONSISTENT_TOPIC of a topic (DDS 1.4, 2.2.4.1): writers or readers
+/// of the topic found in other participants whose types are not
+/// consistent with the local ones (DDS-XTypes 1.3, 7.6.3.4.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InconsistentTopicStatus {
+    /// How many such endpoints were found.
+    pub total_count: u32,
+    /// How many since the status was last read.
+    pub total_count_change: u32,
+}
+
+impl InconsistentTopicStatus {
+    pub(crate) fn add(&mut self) {
+        self.total_count += 1;
+        self.total_count_change += 1;
+    }
+
+    /// Returns the status and resets the change count.
+    pub(crate) fn take(&mut self) -> Self {
+        let s = self.clone();
+        self.total_count_change = 0;
+        s
+    }
+}
+
 /// Why a reader rejected a sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleRejectedReason {

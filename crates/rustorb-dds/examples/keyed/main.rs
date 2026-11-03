@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let domain = num(2, 0)? as u32;
     let count = num(3, 30)? as u32;
     let participant = DomainParticipant::new(domain)?;
+    participant.register_type::<Shape>()?;
     let topic = participant.create_topic::<Shape>("keyed")?;
     let shape = |id, index| Shape {
         id,

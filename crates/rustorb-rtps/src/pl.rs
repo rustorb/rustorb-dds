@@ -123,6 +123,12 @@ pub mod pid {
     pub const KEY_HASH: ParameterId = ParameterId(0x0070);
     /// `PID_STATUS_INFO`.
     pub const STATUS_INFO: ParameterId = ParameterId(0x0071);
+    /// `PID_DATA_REPRESENTATION` (DDS-XTypes 1.3, 7.6.3.1).
+    pub const DATA_REPRESENTATION: ParameterId = ParameterId(0x0073);
+    /// `PID_TYPE_CONSISTENCY_ENFORCEMENT` (DDS-XTypes 1.3, 7.6.3.4).
+    pub const TYPE_CONSISTENCY_ENFORCEMENT: ParameterId = ParameterId(0x0074);
+    /// `PID_TYPE_INFORMATION` (DDS-XTypes 1.3, 7.6.3.2.2).
+    pub const TYPE_INFORMATION: ParameterId = ParameterId(0x0075);
     /// `PID_BUILTIN_ENDPOINT_QOS`.
     pub const BUILTIN_ENDPOINT_QOS: ParameterId = ParameterId(0x0077);
     /// `PID_DOMAIN_TAG`.

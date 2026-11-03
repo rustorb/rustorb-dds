@@ -6,10 +6,17 @@
 //! - [`types`]: a description of a type (7.2.2, the type system model)
 //!   and the TypeObjects and TypeInformation built from it.
 //!
+//! - [`registry`]: the TypeObjects a participant knows.
+//! - [`assignability`]: whether one type is assignable from another
+//!   (7.2.4), and the type consistency enforcement of endpoint matching
+//!   (7.6.3.4).
+//!
 //! The XCDR1/XCDR2 encodings themselves are in rustorb-cdr, shared with
-//! rustorb. Still to come (rustorb/rustorb-dds#29): type assignability,
-//! TypeLookup and DynamicData.
+//! rustorb. Still to come (rustorb/rustorb-dds#29): TypeLookup and
+//! DynamicData.
 
+pub mod assignability;
+pub mod registry;
 pub mod type_object;
 pub mod types;
 pub mod xcdr2;

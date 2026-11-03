@@ -8,10 +8,16 @@
 //! [`crate::reliable`]. The optional topic endpoints (8.5.4.3) are not
 //! provided.
 //!
-//! [`Sedp`] also matches local and remote endpoints: same topic name and
-//! type name, compatible RELIABILITY, DURABILITY, DEADLINE and LIVELINESS,
-//! and a shared partition ([`crate::qos`]). A pair that would match but
-//! for its QoS is reported as [`SedpEvent::IncompatibleQos`].
+//! [`Sedp`] also matches local and remote endpoints: the same topic name,
+//! consistent types (DDS-XTypes 1.3, 7.6.3.4: the reader's type
+//! assignable from the writer's when both announce `PID_TYPE_INFORMATION`,
+//! else the same type name), compatible RELIABILITY, DURABILITY, DEADLINE,
+//! LIVELINESS and DATA_REPRESENTATION, and a shared partition
+//! ([`crate::qos`]). A pair that would match but for its QoS is reported as
+//! [`SedpEvent::IncompatibleQos`], one whose types are not consistent as
+//! [`SedpEvent::InconsistentTopic`]. Assignability is decided on the
+//! TypeObjects in the [`TypeRegistry`] ([`Sedp::registry_mut`]); a pair
+//! whose types are not all there waits, unmatched, until they are.
 //!
 //! The caller connects it to SPDP: [`Sedp::add_participant`] when a
 //! participant is discovered or updated, [`Sedp::remove_participant`]
@@ -38,6 +44,24 @@ use crate::types::{
     BuiltinEndpointSet, Duration, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, VendorId,
 };
 use crate::wire::Endianness;
+
+use rustorb_cdr::{ByteOrder, Decoder, Encoding};
+use rustorb_xtypes::assignability::{
+    Consistency, EndpointType, TypeConsistency, TypeConsistencyKind, check_consistency,
+};
+use rustorb_xtypes::registry::TypeRegistry;
+use rustorb_xtypes::type_object::{TypeIdentifier, TypeInformation};
+use rustorb_xtypes::xcdr2::Xcdr2;
+
+/// Data representation identifiers (DDS-XTypes 1.3, 7.6.3.1.1).
+pub mod data_representation {
+    /// `XCDR_DATA_REPRESENTATION`: Extended CDR, encoding version 1.
+    pub const XCDR: i16 = 0;
+    /// `XML_DATA_REPRESENTATION`.
+    pub const XML: i16 = 1;
+    /// `XCDR2_DATA_REPRESENTATION`: Extended CDR, encoding version 2.
+    pub const XCDR2: i16 = 2;
+}
 
 /// `DiscoveredWriterData` or `DiscoveredReaderData` (8.5.4.4, 9.6.3.2):
 /// the parts of `PublicationBuiltinTopicData` or
@@ -72,6 +96,13 @@ pub struct EndpointData {
     pub multicast_locators: Vec<Locator>,
     /// `expectsInlineQos` (readers only).
     pub expects_inline_qos: bool,
+    /// `type_information` (DDS-XTypes 1.3, 7.6.3.2.2), when announced.
+    pub type_information: Option<TypeInformation>,
+    /// DATA_REPRESENTATION ([`data_representation`]): a writer uses and
+    /// offers the first, a reader accepts any. Empty means XCDR only.
+    pub data_representation: Vec<i16>,
+    /// TYPE_CONSISTENCY_ENFORCEMENT (readers only), when announced.
+    pub type_consistency: Option<TypeConsistency>,
 }
 
 impl EndpointData {
@@ -100,6 +131,48 @@ impl EndpointData {
             unicast_locators: Vec::new(),
             multicast_locators: Vec::new(),
             expects_inline_qos: false,
+            type_information: None,
+            data_representation: Vec::new(),
+            type_consistency: None,
+        }
+    }
+
+    /// The data representation a writer uses: the first it offers, XCDR
+    /// when it offers none.
+    pub fn offered_representation(&self) -> i16 {
+        self.data_representation
+            .first()
+            .copied()
+            .unwrap_or(data_representation::XCDR)
+    }
+
+    /// Whether a reader accepts the data representation `id`.
+    pub fn accepts_representation(&self, id: i16) -> bool {
+        if self.data_representation.is_empty() {
+            id == data_representation::XCDR
+        } else {
+            self.data_representation.contains(&id)
+        }
+    }
+
+    /// The reader's type consistency enforcement as matching applies it:
+    /// what it announced; when it announced none, the default if it
+    /// announced its type information (an implementation of DDS-XTypes
+    /// 1.2 or later, such as Cyclone DDS 0.10, which leaves the policy out
+    /// when it has its default value), and otherwise
+    /// [`TypeConsistency::NOT_ANNOUNCED`] (7.6.3.4.1).
+    pub fn effective_type_consistency(&self) -> TypeConsistency {
+        match (&self.type_consistency, &self.type_information) {
+            (Some(c), _) => *c,
+            (None, Some(_)) => TypeConsistency::default(),
+            (None, None) => TypeConsistency::NOT_ANNOUNCED,
+        }
+    }
+
+    fn endpoint_type(&self) -> EndpointType<'_> {
+        EndpointType {
+            name: &self.type_name,
+            information: self.type_information.as_ref(),
         }
     }
 
@@ -135,6 +208,43 @@ impl EndpointData {
         }
         if self.expects_inline_qos {
             l.push(b.bool(pid::EXPECTS_INLINE_QOS, true));
+        }
+        let order = byte_order(endianness);
+        if !self.data_representation.is_empty() {
+            let mut v = Vec::new();
+            put_u32(&mut v, self.data_representation.len() as u32, order);
+            for id in &self.data_representation {
+                put_u16(&mut v, *id as u16, order);
+            }
+            v.resize(v.len().next_multiple_of(4), 0);
+            l.push(Parameter::new(pid::DATA_REPRESENTATION, v));
+        }
+        if let Some(c) = &self.type_consistency {
+            let mut v = Vec::new();
+            let kind = match c.kind {
+                TypeConsistencyKind::DisallowTypeCoercion => 0,
+                TypeConsistencyKind::AllowTypeCoercion => 1,
+            };
+            put_u16(&mut v, kind, order);
+            v.extend(
+                [
+                    c.ignore_sequence_bounds,
+                    c.ignore_string_bounds,
+                    c.ignore_member_names,
+                    c.prevent_type_widening,
+                    c.force_type_validation,
+                ]
+                .map(u8::from),
+            );
+            v.resize(8, 0);
+            l.push(Parameter::new(pid::TYPE_CONSISTENCY_ENFORCEMENT, v));
+        }
+        if let Some(info) = &self.type_information {
+            // An XCDR2 stream of its own, as Cyclone DDS 0.10 writes it.
+            if let Ok(mut v) = info.to_bytes(order) {
+                v.resize(v.len().next_multiple_of(4), 0);
+                l.push(Parameter::new(pid::TYPE_INFORMATION, v));
+            }
         }
         l
     }
@@ -187,6 +297,18 @@ impl EndpointData {
                 pid::UNICAST_LOCATOR => d.unicast_locators.push(v.locator(p)?),
                 pid::MULTICAST_LOCATOR => d.multicast_locators.push(v.locator(p)?),
                 pid::EXPECTS_INLINE_QOS => d.expects_inline_qos = v.bool(p)?,
+                // The XTypes parameters are optional: one that cannot be
+                // read is left out, as though not sent.
+                pid::DATA_REPRESENTATION => {
+                    d.data_representation =
+                        read_representations(&p.value, endianness).unwrap_or_default()
+                }
+                pid::TYPE_CONSISTENCY_ENFORCEMENT => {
+                    d.type_consistency = read_type_consistency(&p.value, endianness)
+                }
+                pid::TYPE_INFORMATION => {
+                    d.type_information = read_type_information(&p.value, endianness)
+                }
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }
@@ -217,28 +339,55 @@ impl EndpointData {
     }
 }
 
+/// `DATA_REPRESENTATION_QOS_POLICY_ID` (DDS-XTypes 1.3, Annex D).
+pub const DATA_REPRESENTATION_QOS_POLICY_ID: QosPolicyId = QosPolicyId(23);
+
 /// How a writer and a reader stand towards each other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Match {
     /// They match.
     Matched,
-    /// Same topic, type and a shared partition, but the QoS the writer
-    /// offers does not satisfy the reader for these policies.
+    /// Same topic, consistent types and a shared partition, but the QoS
+    /// the writer offers does not satisfy the reader for these policies.
     Incompatible(Vec<QosPolicyId>),
-    /// Different topics, types or partitions: nothing to report.
+    /// Same topic, but types that are not consistent (DDS-XTypes 1.3,
+    /// 7.6.3.4.2): an INCONSISTENT_TOPIC.
+    Inconsistent,
+    /// Same topic, but the TypeObjects of these types are needed to tell
+    /// whether the types are consistent.
+    Unresolved(Vec<TypeIdentifier>),
+    /// Different topics or partitions: nothing to report.
     Unrelated,
 }
 
-/// Whether a writer and a reader match, and if not, whether for their
-/// QoS (DDS 1.4, 2.2.3).
-pub fn match_endpoints(writer: &EndpointData, reader: &EndpointData) -> Match {
-    if writer.topic_name != reader.topic_name
-        || writer.type_name != reader.type_name
-        || !partitions_match(&writer.partitions, &reader.partitions)
-    {
+/// Whether a writer and a reader match, and if not, why (DDS 1.4,
+/// 2.2.3; DDS-XTypes 1.3, 7.6.3.4.2). `registry` holds the TypeObjects
+/// known, for when the types differ.
+pub fn match_endpoints(
+    writer: &EndpointData,
+    reader: &EndpointData,
+    registry: &TypeRegistry,
+) -> Match {
+    if writer.topic_name != reader.topic_name {
         return Match::Unrelated;
     }
-    let bad = incompatible_policies(&writer.rxo(), &reader.rxo());
+    match check_consistency(
+        writer.endpoint_type(),
+        reader.endpoint_type(),
+        &reader.effective_type_consistency(),
+        registry,
+    ) {
+        Consistency::Consistent => {}
+        Consistency::Inconsistent => return Match::Inconsistent,
+        Consistency::Unknown(missing) => return Match::Unresolved(missing),
+    }
+    if !partitions_match(&writer.partitions, &reader.partitions) {
+        return Match::Unrelated;
+    }
+    let mut bad = incompatible_policies(&writer.rxo(), &reader.rxo());
+    if !reader.accepts_representation(writer.offered_representation()) {
+        bad.push(DATA_REPRESENTATION_QOS_POLICY_ID);
+    }
     if bad.is_empty() {
         Match::Matched
     } else {
@@ -246,10 +395,78 @@ pub fn match_endpoints(writer: &EndpointData, reader: &EndpointData) -> Match {
     }
 }
 
-/// Whether a writer and a reader match: same topic and type names,
-/// compatible QoS, and a shared partition.
+/// Whether a writer and a reader match, with no TypeObjects known: the
+/// same topic, the same type (by name, or by TypeIdentifier when both
+/// announce one), compatible QoS, and a shared partition.
 pub fn endpoints_match(writer: &EndpointData, reader: &EndpointData) -> bool {
-    match_endpoints(writer, reader) == Match::Matched
+    match_endpoints(writer, reader, &TypeRegistry::new()) == Match::Matched
+}
+
+fn byte_order(e: Endianness) -> ByteOrder {
+    match e {
+        Endianness::Big => ByteOrder::Big,
+        Endianness::Little => ByteOrder::Little,
+    }
+}
+
+fn put_u16(v: &mut Vec<u8>, x: u16, order: ByteOrder) {
+    v.extend(match order {
+        ByteOrder::Big => x.to_be_bytes(),
+        ByteOrder::Little => x.to_le_bytes(),
+    });
+}
+
+fn put_u32(v: &mut Vec<u8>, x: u32, order: ByteOrder) {
+    v.extend(match order {
+        ByteOrder::Big => x.to_be_bytes(),
+        ByteOrder::Little => x.to_le_bytes(),
+    });
+}
+
+/// `DataRepresentationQosPolicy`: a `sequence<short>` (in PL_CDR, an
+/// APPENDABLE struct has no header).
+fn read_representations(value: &[u8], e: Endianness) -> Option<Vec<i16>> {
+    let mut dec = Decoder::new(value, byte_order(e), Encoding::Xcdr1);
+    let n = dec.read_u32().ok()? as usize;
+    if n > value.len() / 2 {
+        return None;
+    }
+    (0..n).map(|_| dec.read_i16().ok()).collect()
+}
+
+/// `TypeConsistencyEnforcementQosPolicy`: the kind (16 bits) and five
+/// booleans. Booleans that are not there keep their defaults.
+fn read_type_consistency(value: &[u8], e: Endianness) -> Option<TypeConsistency> {
+    let mut dec = Decoder::new(value, byte_order(e), Encoding::Xcdr1);
+    let kind = match dec.read_u16().ok()? {
+        0 => TypeConsistencyKind::DisallowTypeCoercion,
+        1 => TypeConsistencyKind::AllowTypeCoercion,
+        _ => return None,
+    };
+    let mut c = TypeConsistency {
+        kind,
+        ..TypeConsistency::default()
+    };
+    for field in [
+        &mut c.ignore_sequence_bounds,
+        &mut c.ignore_string_bounds,
+        &mut c.ignore_member_names,
+        &mut c.prevent_type_widening,
+        &mut c.force_type_validation,
+    ] {
+        match dec.read_octet() {
+            Ok(b) => *field = b != 0,
+            Err(_) => break,
+        }
+    }
+    Some(c)
+}
+
+/// `TypeInformation`: XCDR2, followed by up to 3 octets of padding.
+fn read_type_information(value: &[u8], e: Endianness) -> Option<TypeInformation> {
+    let mut dec = Decoder::new(value, byte_order(e), Encoding::Xcdr2);
+    let info = TypeInformation::decode(&mut dec).ok()?;
+    (dec.remaining() < 4).then_some(info)
 }
 
 /// Settings of [`Sedp`]: the timing of its reliable endpoints.
@@ -285,6 +502,14 @@ pub enum SedpEvent {
     },
     /// A local endpoint no longer matches a remote one.
     Unmatched {
+        /// The local writer or reader.
+        local: Guid,
+        /// The remote reader or writer.
+        remote: Guid,
+    },
+    /// A local endpoint and a remote one are on the same topic with types
+    /// that are not consistent (reported when the pair becomes so).
+    InconsistentTopic {
         /// The local writer or reader.
         local: Guid,
         /// The remote reader or writer.
@@ -337,6 +562,13 @@ pub struct Sedp {
     matches: HashSet<(Guid, Guid)>,
     /// (local, remote) pairs that are incompatible, already reported.
     incompatible: HashSet<(Guid, Guid)>,
+    /// (local, remote) pairs whose types are inconsistent, already
+    /// reported.
+    inconsistent: HashSet<(Guid, Guid)>,
+    /// (local, remote) pairs waiting for TypeObjects.
+    unresolved: HashMap<(Guid, Guid), Vec<TypeIdentifier>>,
+    /// The TypeObjects known.
+    registry: TypeRegistry,
 }
 
 impl Sedp {
@@ -379,6 +611,9 @@ impl Sedp {
             remote_readers: HashMap::new(),
             matches: HashSet::new(),
             incompatible: HashSet::new(),
+            inconsistent: HashSet::new(),
+            unresolved: HashMap::new(),
+            registry: TypeRegistry::new(),
         }
     }
 
@@ -503,6 +738,47 @@ impl Sedp {
     /// Looks up a remote reader.
     pub fn remote_reader(&self, guid: &Guid) -> Option<&EndpointData> {
         self.remote_readers.get(guid)
+    }
+
+    /// The TypeObjects known.
+    pub fn registry(&self) -> &TypeRegistry {
+        &self.registry
+    }
+
+    /// The TypeObjects known, to add to. Call
+    /// [`Sedp::rematch_unresolved`] after adding.
+    pub fn registry_mut(&mut self) -> &mut TypeRegistry {
+        &mut self.registry
+    }
+
+    /// The TypeIdentifiers whose TypeObjects pairs of endpoints wait for,
+    /// with a remote endpoint that announced each (the one to ask).
+    pub fn unresolved_types(&self) -> Vec<(TypeIdentifier, Guid)> {
+        let mut out: Vec<(TypeIdentifier, Guid)> = Vec::new();
+        for ((_, remote), ids) in &self.unresolved {
+            for id in ids {
+                if !out.iter().any(|(i, _)| i == id) {
+                    out.push((id.clone(), *remote));
+                }
+            }
+        }
+        out
+    }
+
+    /// Matches again the pairs that waited for TypeObjects.
+    pub fn rematch_unresolved(&mut self) -> Vec<SedpEvent> {
+        let mut pairs: Vec<(Guid, Guid)> = self.unresolved.keys().copied().collect();
+        pairs.sort();
+        let mut events = Vec::new();
+        for (local, remote) in pairs {
+            let kind = if self.local_writers.contains_key(&local) {
+                Kind::Writer
+            } else {
+                Kind::Reader
+            };
+            self.update_match(kind, local, remote, &mut events);
+        }
+        events
     }
 
     /// The remote endpoints that match a local one.
@@ -658,6 +934,8 @@ impl Sedp {
         };
         writer.remove_change(old.sn);
         self.incompatible.retain(|(l, _)| l != guid);
+        self.inconsistent.retain(|(l, _)| l != guid);
+        self.unresolved.retain(|(l, _), _| l != guid);
         // A dispose: the key in-line and as a key-only payload (9.6.3.2).
         let e = Endianness::NATIVE;
         let b = PlBuilder::new(e);
@@ -761,6 +1039,8 @@ impl Sedp {
             return;
         }
         self.incompatible.retain(|(_, r)| *r != guid);
+        self.inconsistent.retain(|(_, r)| *r != guid);
+        self.unresolved.retain(|(_, r), _| *r != guid);
         let mut pairs: Vec<(Guid, Guid)> = self
             .matches
             .iter()
@@ -789,21 +1069,31 @@ impl Sedp {
                 self.local_writers.get(&local),
                 self.remote_readers.get(&remote),
             ) {
-                (Some(w), Some(r)) => match_endpoints(&w.data, r),
+                (Some(w), Some(r)) => match_endpoints(&w.data, r, &self.registry),
                 _ => Match::Unrelated,
             },
             Kind::Reader => match (
                 self.remote_writers.get(&remote),
                 self.local_readers.get(&local),
             ) {
-                (Some(w), Some(r)) => match_endpoints(w, &r.data),
+                (Some(w), Some(r)) => match_endpoints(w, &r.data, &self.registry),
                 _ => Match::Unrelated,
             },
         };
         let now = m == Match::Matched;
+        let pair = (local, remote);
+        if !matches!(m, Match::Incompatible(_)) {
+            self.incompatible.remove(&pair);
+        }
+        if m != Match::Inconsistent {
+            self.inconsistent.remove(&pair);
+        }
+        if !matches!(m, Match::Unresolved(_)) {
+            self.unresolved.remove(&pair);
+        }
         match m {
             Match::Incompatible(policies) => {
-                if self.incompatible.insert((local, remote)) {
+                if self.incompatible.insert(pair) {
                     events.push(SedpEvent::IncompatibleQos {
                         local,
                         remote,
@@ -811,9 +1101,15 @@ impl Sedp {
                     });
                 }
             }
-            _ => {
-                self.incompatible.remove(&(local, remote));
+            Match::Inconsistent => {
+                if self.inconsistent.insert(pair) {
+                    events.push(SedpEvent::InconsistentTopic { local, remote });
+                }
             }
+            Match::Unresolved(missing) => {
+                self.unresolved.insert(pair, missing);
+            }
+            Match::Matched | Match::Unrelated => {}
         }
         let was = self.matches.contains(&(local, remote));
         if now && !was {
@@ -1139,5 +1435,199 @@ mod tests {
             assert!(a.handle_message(&o.bytes, t).is_empty());
         }
         assert!(a.handle_message(b"junk", t).is_empty());
+    }
+
+    fn appendable(name: &str, members: &[&str]) -> rustorb_xtypes::types::TypeObjects {
+        use rustorb_xtypes::types::*;
+        let ty: Type = StructType {
+            name: name.into(),
+            members: members
+                .iter()
+                .enumerate()
+                .map(|(i, m)| StructMember::new(*m, i as u32, Type::Primitive(Primitive::Int32)))
+                .collect(),
+            ..Default::default()
+        }
+        .into();
+        TypeObjects::new(&ty).unwrap()
+    }
+
+    #[test]
+    fn xtypes_parameters_round_trip() {
+        let mut d = EndpointData::reader(rguid(1), "T", "X");
+        d.type_information = Some(appendable("X", &["a", "b"]).information);
+        d.data_representation = vec![data_representation::XCDR, data_representation::XCDR2];
+        d.type_consistency = Some(TypeConsistency {
+            ignore_member_names: true,
+            ..Default::default()
+        });
+        for e in [Endianness::Big, Endianness::Little] {
+            assert_eq!(
+                EndpointData::from_payload(&d.to_payload(e), false).unwrap(),
+                d
+            );
+        }
+    }
+
+    /// The XTypes parameters of a Cyclone DDS 0.10.4 reader of
+    /// `HelloWorld::Greeting` (interop/idl/HelloWorld.idl), from a capture.
+    #[test]
+    fn cyclonedds_parameters() {
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let e = Endianness::Little;
+        let b = PlBuilder::new(e);
+        let mut l = ParameterList::new();
+        l.push(b.guid(pid::ENDPOINT_GUID, rguid(3)));
+        l.push(b.string(pid::TOPIC_NAME, "hello_world"));
+        l.push(b.string(pid::TYPE_NAME, "HelloWorld::Greeting"));
+        l.push(Parameter::new(
+            pid::DATA_REPRESENTATION,
+            hex("0200000000000200"),
+        ));
+        l.push(Parameter::new(
+            pid::TYPE_INFORMATION,
+            hex(concat!(
+                "6000000001100040280000002400000014000000f14c98d3b709b9631e344fd7",
+                "0a3402003800000000000000040000000000000002100040280000002400000014",
+                "000000f2d8dede3f3e15043e059145548d1b006600000000000000040000000000",
+                "0000"
+            )),
+        ));
+        let d = EndpointData::from_parameter_list(&l, e, false).unwrap();
+        assert_eq!(d.data_representation, vec![0, 2]);
+        assert!(d.accepts_representation(data_representation::XCDR));
+        assert!(d.accepts_representation(data_representation::XCDR2));
+        let info = d.type_information.as_ref().unwrap();
+        assert_eq!(
+            info.minimal.typeid_with_size.type_id,
+            TypeIdentifier::Minimal(hex("4c98d3b709b9631e344fd70a3402").try_into().unwrap())
+        );
+        assert_eq!(info.minimal.typeid_with_size.typeobject_serialized_size, 56);
+        // No TYPE_CONSISTENCY_ENFORCEMENT: the default, since it announced
+        // its type.
+        assert_eq!(d.type_consistency, None);
+        assert_eq!(d.effective_type_consistency(), TypeConsistency::default());
+        // A parameter that cannot be read is left out.
+        let mut l2 = l.clone();
+        l2.parameters.retain(|p| p.id != pid::TYPE_INFORMATION);
+        l2.push(Parameter::new(pid::TYPE_INFORMATION, vec![1, 2, 3, 4]));
+        let d2 = EndpointData::from_parameter_list(&l2, e, false).unwrap();
+        assert_eq!(d2.type_information, None);
+        assert_eq!(
+            d2.effective_type_consistency(),
+            TypeConsistency::NOT_ANNOUNCED
+        );
+    }
+
+    #[test]
+    fn type_and_representation_rules() {
+        let registry = TypeRegistry::new();
+        let v1 = appendable("X", &["a"]);
+        let mut w = EndpointData::writer(wguid(1), "T", "X");
+        let mut r = EndpointData::reader(rguid(2), "T", "X");
+        // Different type names and no type information: inconsistent.
+        r.type_name = "Y".into();
+        assert_eq!(match_endpoints(&w, &r, &registry), Match::Inconsistent);
+        // The same TypeIdentifier: names do not matter.
+        w.type_information = Some(v1.information.clone());
+        r.type_information = Some(v1.information.clone());
+        assert_eq!(match_endpoints(&w, &r, &registry), Match::Matched);
+        // A writer offering XCDR2 to a reader that takes XCDR only.
+        w.data_representation = vec![data_representation::XCDR2];
+        assert_eq!(
+            match_endpoints(&w, &r, &registry),
+            Match::Incompatible(vec![DATA_REPRESENTATION_QOS_POLICY_ID])
+        );
+        r.data_representation = vec![data_representation::XCDR, data_representation::XCDR2];
+        assert_eq!(match_endpoints(&w, &r, &registry), Match::Matched);
+        // Inconsistent types in other partitions are still reported.
+        r.partitions = vec!["p".into()];
+        r.type_consistency = Some(TypeConsistency {
+            kind: TypeConsistencyKind::DisallowTypeCoercion,
+            ..Default::default()
+        });
+        w.type_information = Some(appendable("X", &["a", "b"]).information);
+        assert_eq!(match_endpoints(&w, &r, &registry), Match::Inconsistent);
+    }
+
+    #[test]
+    fn inconsistent_and_unresolved_types() {
+        let t = Instant::now();
+        let (mut a, mut b) = pair(t);
+        let v1 = appendable("X", &["a"]);
+        let v2 = appendable("X", &["a", "b"]);
+        let other = appendable("X", &["z"]);
+        a.registry_mut().add_type(&v2);
+        b.registry_mut().add_type(&v1);
+        // b's reader of v1 and a's writer of v2: b does not know v2 yet.
+        let mut w = EndpointData::writer(wguid(1), "T", "X");
+        w.type_information = Some(v2.information.clone());
+        a.add_writer(w);
+        let mut r = EndpointData::reader(rguid(2), "T", "X");
+        r.type_information = Some(v1.information.clone());
+        b.add_reader(r);
+        let (ea, eb) = pump(&mut a, &mut b, t, |_| false);
+        assert!(
+            !eb.iter().any(|e| matches!(e, SedpEvent::Matched { .. })),
+            "{eb:?}"
+        );
+        assert!(
+            !ea.iter().any(|e| matches!(e, SedpEvent::Matched { .. })),
+            "{ea:?}"
+        );
+        assert_eq!(
+            b.unresolved_types(),
+            vec![(v2.minimal_id().clone(), wguid(1))]
+        );
+        assert_eq!(
+            a.unresolved_types(),
+            vec![(v1.minimal_id().clone(), rguid(2))]
+        );
+        // Once the TypeObjects are known (TypeLookup), they match: v1 is
+        // assignable from v2.
+        b.registry_mut().add_pairs(&v2.minimal).unwrap();
+        assert_eq!(
+            b.rematch_unresolved(),
+            vec![SedpEvent::Matched {
+                local: rguid(2),
+                remote: wguid(1)
+            }]
+        );
+        a.registry_mut().add_pairs(&v1.minimal).unwrap();
+        assert_eq!(
+            a.rematch_unresolved(),
+            vec![SedpEvent::Matched {
+                local: wguid(1),
+                remote: rguid(2)
+            }]
+        );
+        assert!(b.unresolved_types().is_empty());
+
+        // A writer of a type the reader's is not assignable from: both
+        // sides report an inconsistent topic once.
+        let w3 = Guid::new(
+            prefix(1),
+            EntityId::user([0, 0, 3], entity_kind::USER_WRITER_NO_KEY),
+        );
+        let mut w = EndpointData::writer(w3, "T", "X");
+        w.type_information = Some(other.information.clone());
+        a.registry_mut().add_type(&other);
+        b.registry_mut().add_pairs(&other.minimal).unwrap();
+        let ea = a.add_writer(w);
+        let (_, eb) = pump(&mut a, &mut b, t + StdDuration::from_secs(100), |_| false);
+        assert!(ea.contains(&SedpEvent::InconsistentTopic {
+            local: w3,
+            remote: rguid(2)
+        }));
+        assert!(eb.contains(&SedpEvent::InconsistentTopic {
+            local: rguid(2),
+            remote: w3
+        }));
+        assert!(!eb.iter().any(|e| matches!(e, SedpEvent::Matched { .. })));
     }
 }

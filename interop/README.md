@@ -103,6 +103,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#19 (part 1) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 24 cases pass |
 | 2026-11-03 | rustorb-dds#19 (part 2) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 | 2026-11-03 | rustorb-dds#20 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
+| 2026-11-03 | rustorb-dds#32 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 42 cases pass |
 
 Found on the way:
 
@@ -171,6 +172,24 @@ Found on the way:
   set to a third of the lease here). The locators it announces include
   some that are not UDPv4; a MANUAL_BY_TOPIC liveliness HEARTBEAT that
   cannot be sent to those is skipped, as a write's DATA is.
+- XTypes in discovery (rustorb-dds#32): Cyclone DDS 0.10.4 announces
+  `PID_TYPE_INFORMATION` (XCDR2, no encapsulation header, in the byte
+  order of the parameter list) and `PID_DATA_REPRESENTATION` `[XCDR,
+  XCDR2]` for its writers and readers, and no
+  `PID_TYPE_CONSISTENCY_ENFORCEMENT` (its default). Its TypeIdentifiers
+  for `HelloWorld::Greeting` and `Keyed::Shape` are those rustorb-dds
+  computes, so they match by TypeInformation. Fast DDS 2.11.2 announces no
+  TypeInformation and no DATA_REPRESENTATION; its readers announce
+  `PID_TYPE_CONSISTENCY_ENFORCEMENT` with the default values. rustorb-dds
+  takes a reader that announces its TypeInformation but no policy to have
+  the default policy (DDS-XTypes 7.6.3.4.1 says to assume
+  DISALLOW_TYPE_COERCION, meant for implementations without XTypes).
+- XCDR2 samples (rustorb-dds#32): Cyclone DDS 0.10.4 drops, as a
+  malformed message, a DATA whose encapsulation identifier is `0x0011`
+  (PLAIN_CDR2 little endian in DDS-XTypes Table 39 and DDSI-RTPS 2.5
+  Table 10.3), and writes `0x0007` (`CDR2_LE`, Table 60) itself.
+  rustorb-cdr 0.2 writes the Table 39 values, so rustorb-dds rewrites
+  them to those of Table 60 when it writes; it reads both.
 
 ## ROS 2
 

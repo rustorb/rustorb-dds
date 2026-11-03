@@ -13,7 +13,9 @@ use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
 use crate::listener::DataWriterListener;
 use crate::participant::{Shared, WriteOp, WriterEvent, WriterListener, WriterState};
-use crate::qos::{DataWriterQos, DurabilityKind, PublisherQos, duration_to_rtps};
+use crate::qos::{
+    DataWriterQos, DurabilityKind, PublisherQos, data_representation, duration_to_rtps,
+};
 use crate::status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessLostStatus, MatchedStatus, StatusMask,
 };
@@ -70,8 +72,19 @@ impl Publisher {
         if qos.durability > DurabilityKind::TransientLocal {
             return Err(Error::Unsupported("TRANSIENT and PERSISTENT durability"));
         }
+        let encoding = match qos.data_representation.first() {
+            None | Some(&data_representation::XCDR) => Encoding::Xcdr1,
+            Some(&data_representation::XCDR2) => Encoding::Xcdr2,
+            Some(_) => {
+                return Err(Error::Unsupported(
+                    "a data representation other than XCDR and XCDR2",
+                ));
+            }
+        };
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::writer(guid, topic.name(), T::TYPE_NAME);
+        data.type_information = self.shared.type_information(T::TYPE_NAME)?;
+        data.data_representation = qos.data_representation.clone();
         data.reliability = qos.reliability.to_rtps();
         data.durability = qos.durability;
         data.deadline = duration_to_rtps(qos.deadline);
@@ -82,6 +95,7 @@ impl Publisher {
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
+            encoding,
             owned: true,
             _type: PhantomData,
         })
@@ -94,6 +108,8 @@ impl Publisher {
 pub struct DataWriter<T: TopicType> {
     shared: Arc<Shared>,
     guid: Guid,
+    /// How samples are serialized: the writer's data representation.
+    encoding: Encoding,
     /// Whether dropping this handle deletes the writer: not for the
     /// handle given to a listener.
     owned: bool,
@@ -115,8 +131,9 @@ impl<T: TopicType> DataWriter<T> {
         self.guid
     }
 
-    /// Publishes a sample: serializes it in XCDR1 (in the host's byte
-    /// order) and sends it to every matched reader.
+    /// Publishes a sample: serializes it in XCDR1, or XCDR2 if that is
+    /// the writer's data representation (in the host's byte order), and
+    /// sends it to every matched reader.
     ///
     /// A RELIABLE writer with KEEP_ALL history and `max_samples` set
     /// waits, when its history is full, for its readers to acknowledge
@@ -131,7 +148,8 @@ impl<T: TopicType> DataWriter<T> {
 
     /// Like [`Self::write`], with the source timestamp given.
     pub fn write_w_timestamp(&self, sample: &T, timestamp: Time) -> Result<()> {
-        let payload = sample.to_payload(Encoding::Xcdr1, ByteOrder::NATIVE)?;
+        let mut payload = sample.to_payload(self.encoding, ByteOrder::NATIVE)?;
+        table_60_identifier(&mut payload);
         self.shared.write(
             self.guid,
             instance_of(sample)?,
@@ -257,10 +275,12 @@ impl<T: TopicType> DataWriter<T> {
     where
         T: 'static,
     {
+        let encoding = self.encoding;
         let l: WriterListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
             let writer = DataWriter::<T> {
                 shared: shared.clone(),
                 guid,
+                encoding,
                 owned: false,
                 _type: PhantomData,
             };
@@ -347,6 +367,46 @@ impl<T: TopicType> Drop for DataWriter<T> {
     fn drop(&mut self) {
         if self.owned {
             self.shared.remove_writer(&self.guid);
+        }
+    }
+}
+
+/// Rewrites an XCDR2 encapsulation identifier to the value of DDS-XTypes
+/// 1.3 Table 60 (`CDR2_LE` is `0x0007`, `D_CDR2_LE` `0x0009`, `PL_CDR2_LE`
+/// `0x000b`, and the big-endian ones one less). rustorb-cdr 0.2 writes the
+/// values of Table 39 (`0x0010` to `0x0015`), which Cyclone DDS 0.10.4
+/// drops as malformed; both tables are read.
+fn table_60_identifier(payload: &mut [u8]) {
+    if let [0x00, id, ..] = payload {
+        let order = *id & 1;
+        *id = match *id & !1 {
+            0x10 => 0x06,
+            0x14 => 0x08,
+            0x12 => 0x0a,
+            _ => return,
+        } | order;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xcdr2_identifiers_of_table_60() {
+        for (from, to) in [
+            (0x10, 0x06),
+            (0x11, 0x07),
+            (0x14, 0x08),
+            (0x15, 0x09),
+            (0x12, 0x0a),
+            (0x13, 0x0b),
+            (0x01, 0x01),
+            (0x03, 0x03),
+        ] {
+            let mut p = [0x00, from, 0x00, 0x00];
+            table_60_identifier(&mut p);
+            assert_eq!(p, [0x00, to, 0x00, 0x00]);
         }
     }
 }

@@ -35,6 +35,11 @@
 //!
 //! Setting `RUSTORB_DROP_ONE_IN=n` drops one in `n` user datagrams
 //! received, at random, to test that reliable delivery repairs losses.
+//!
+//! Both sides register the type with its DDS-XTypes description, so they
+//! announce its TypeInformation. `RUSTORB_NO_TYPE_INFORMATION=1` leaves
+//! that out (matching by type name only), and `RUSTORB_XCDR2=1` makes the
+//! publisher write XCDR2.
 
 mod greeting;
 
@@ -43,7 +48,7 @@ use std::time::{Duration, Instant};
 use greeting::Greeting;
 use rustorb_dds::{
     DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, Error, History,
-    ParticipantConfig, Reliability, StatusMask, WaitSet,
+    ParticipantConfig, Reliability, StatusMask, WaitSet, data_representation,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,6 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.drop_one_in = Some(n.parse()?);
     }
     let participant = DomainParticipant::with_config(config)?;
+    if std::env::var_os("RUSTORB_NO_TYPE_INFORMATION").is_none() {
+        participant.register_type::<Greeting>()?;
+    }
     let topic = participant.create_topic::<Greeting>("hello_world")?;
     match role {
         "pub" => {
@@ -101,6 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     reliability: Reliability::best_effort(),
                     ..DataWriterQos::default()
                 }
+            };
+            let qos = if std::env::var_os("RUSTORB_XCDR2").is_some() {
+                DataWriterQos {
+                    data_representation: vec![data_representation::XCDR2],
+                    ..qos
+                }
+            } else {
+                qos
             };
             let writer = participant
                 .create_publisher()?

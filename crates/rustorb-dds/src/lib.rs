@@ -44,8 +44,18 @@
 //! fragments are repaired. Samples are written in XCDR1. Writers and
 //! readers in the same participant are matched with each other too.
 //!
-//! Data flows with ROS 2 nodes too (the `ros2` example). Next: the
-//! XTypes type information (D3).
+//! Data flows with ROS 2 nodes too (the `ros2` example).
+//!
+//! DDS-XTypes (D3, in progress): a type registered with
+//! [`DomainParticipant::register_type`] (its [`DescribeType`] is written
+//! by `rustorb-idl -Wbxtypes`) is announced with its TypeInformation, and
+//! its endpoints match others by type assignability
+//! ([`DataReaderQos::type_consistency`]) instead of by type name. Writers
+//! can write XCDR2 ([`DataWriterQos::data_representation`]). Topics count
+//! the endpoints whose types are not consistent with theirs
+//! ([`Topic::inconsistent_topic_status`]). Not yet: TypeLookup, to fetch
+//! the TypeObjects of a remote type that differs from the local one (until
+//! then such endpoints do not match).
 
 mod condition;
 mod error;
@@ -73,15 +83,18 @@ pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher};
 pub use qos::{
     DataReaderQos, DataWriterQos, DurabilityKind, History, Liveliness, LivelinessKind,
-    PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos, WriterDataLifecycle,
+    PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos, TypeConsistency,
+    TypeConsistencyKind, WriterDataLifecycle, data_representation,
 };
 pub use rustorb_rtps::qos::ReliabilityKind;
+pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
+pub use rustorb_xtypes::types::DescribeType;
 pub use status::{
-    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
-    MatchedStatus, QosPolicyCount, SampleLostStatus, SampleRejectedReason, SampleRejectedStatus,
-    StatusMask,
+    DeadlineMissedStatus, IncompatibleQosStatus, InconsistentTopicStatus, LivelinessChangedStatus,
+    LivelinessLostStatus, MatchedStatus, QosPolicyCount, SampleLostStatus, SampleRejectedReason,
+    SampleRejectedStatus, StatusMask,
 };
 pub use subscriber::{DataReader, Sample, Subscriber};
 pub use topic::Topic;
