@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
 name = "rustorb-cdr"
 version = "0.1.1"
 source = "git+https://github.com/rustorb/rustorb?branch=main#6200bb04f224a52541a237a7e19cc1ffb0311b32"
@@ -20,6 +26,7 @@ name = "rustorb-rtps"
 version = "0.0.0"
 dependencies = [
  "rustorb-cdr",
+ "socket2",
 ]
 
 [[package]]
@@ -27,4 +34,29 @@ name = "rustorb-xtypes"
 version = "0.0.0"
 dependencies = [
  "rustorb-cdr",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
 ]
