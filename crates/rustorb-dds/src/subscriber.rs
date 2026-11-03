@@ -8,12 +8,15 @@ use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, entity_kind};
 use rustorb_typesupport::TopicType;
 
-use crate::error::Result;
+use crate::condition::{ReadCondition, StatusCondition};
+use crate::error::{Error, Result};
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
-use crate::participant::Shared;
+use crate::listener::DataReaderListener;
+use crate::participant::{ReaderEvent, ReaderListener, ReaderState, Shared};
 use crate::qos::{DataReaderQos, SubscriberQos, duration_to_rtps};
 use crate::status::{
-    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, SampleRejectedStatus,
+    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, MatchedStatus,
+    SampleLostStatus, SampleRejectedStatus, StatusMask,
 };
 use crate::topic::Topic;
 use crate::typed::{Typed, instance_of};
@@ -77,6 +80,7 @@ impl Subscriber {
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,
+            owned: true,
             _type: PhantomData,
         })
     }
@@ -101,7 +105,19 @@ pub struct Sample<T> {
 pub struct DataReader<T: TopicType> {
     shared: Arc<Shared>,
     guid: Guid,
+    /// Whether dropping this handle deletes the reader: not for the
+    /// handle given to a listener.
+    owned: bool,
     _type: PhantomData<fn() -> T>,
+}
+
+/// A [`DataReaderListener`] for DATA_AVAILABLE alone, from a function.
+struct DataAvailable<F>(F);
+
+impl<T: TopicType, F: Fn(&DataReader<T>) + Send + Sync> DataReaderListener<T> for DataAvailable<F> {
+    fn on_data_available(&self, reader: &DataReader<T>) {
+        (self.0)(reader)
+    }
 }
 
 impl<T: TopicType> std::fmt::Debug for DataReader<T> {
@@ -136,7 +152,10 @@ impl<T: TopicType> DataReader<T> {
         let raw = {
             let mut g = self.shared.lock_any();
             match g.readers.get_mut(&self.guid) {
-                Some(r) => r.samples.select(filter, instance, take),
+                Some(r) => {
+                    r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
+                    r.samples.select(filter, instance, take)
+                }
                 None => Vec::new(),
             }
         };
@@ -207,6 +226,7 @@ impl<T: TopicType> DataReader<T> {
             let Some(r) = g.readers.get_mut(&self.guid) else {
                 return Vec::new();
             };
+            r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
             match r.samples.next_instance(previous, filter) {
                 Some(h) => r.samples.select(filter, Some(h), take),
                 None => Vec::new(),
@@ -259,27 +279,61 @@ impl<T: TopicType> DataReader<T> {
         }
     }
 
-    /// Sets the function called when a sample arrives (the
-    /// `on_data_available` listener), replacing any earlier one.
-    ///
-    /// It runs on the participant's thread, or on the writer's thread for
-    /// a writer in the same participant, and must not block for long. It
-    /// may call [`DataReader::take`] through its own handle, or send to a
+    /// Sets the listener (`set_listener`), replacing any earlier one:
+    /// its methods are called for the statuses in `mask` when they
+    /// change. See [`DataReaderListener`].
+    pub fn set_listener(&self, listener: impl DataReaderListener<T> + 'static, mask: StatusMask)
+    where
+        T: 'static,
+    {
+        let l: ReaderListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
+            let reader = DataReader::<T> {
+                shared: shared.clone(),
+                guid,
+                owned: false,
+                _type: PhantomData,
+            };
+            match event {
+                ReaderEvent::DataAvailable => listener.on_data_available(&reader),
+                ReaderEvent::SubscriptionMatched(s) => listener.on_subscription_matched(&reader, s),
+                ReaderEvent::LivelinessChanged(s) => listener.on_liveliness_changed(&reader, s),
+                ReaderEvent::RequestedDeadlineMissed(s) => {
+                    listener.on_requested_deadline_missed(&reader, s)
+                }
+                ReaderEvent::RequestedIncompatibleQos(s) => {
+                    listener.on_requested_incompatible_qos(&reader, s)
+                }
+                ReaderEvent::SampleRejected(s) => listener.on_sample_rejected(&reader, s),
+                ReaderEvent::SampleLost(s) => listener.on_sample_lost(&reader, s),
+            }
+        });
+        let mut g = self.shared.lock_any();
+        if let Some(r) = g.readers.get_mut(&self.guid) {
+            r.listener = Some((l, mask));
+        }
+    }
+
+    /// Sets a listener for DATA_AVAILABLE alone: `f` is called with the
+    /// reader when samples arrive. It may take them, or send to a
     /// channel:
     ///
     /// ```no_run
-    /// # fn f(reader: &rustorb_dds::DataReader<impl rustorb_typesupport::TopicType>) {
+    /// # fn f<T: rustorb_typesupport::TopicType + Send + 'static>(
+    /// #     reader: &rustorb_dds::DataReader<T>,
+    /// # ) {
     /// let (tx, rx) = std::sync::mpsc::channel();
-    /// reader.set_listener(move || {
-    ///     let _ = tx.send(());
+    /// reader.on_data_available(move |r| {
+    ///     for s in r.take() {
+    ///         let _ = tx.send(s);
+    ///     }
     /// });
     /// # }
     /// ```
-    pub fn set_listener(&self, f: impl Fn() + Send + Sync + 'static) {
-        let mut g = self.shared.lock_any();
-        if let Some(r) = g.readers.get_mut(&self.guid) {
-            r.listener = Some(Arc::new(f));
-        }
+    pub fn on_data_available(&self, f: impl Fn(&DataReader<T>) + Send + Sync + 'static)
+    where
+        T: 'static,
+    {
+        self.set_listener(DataAvailable(f), StatusMask::DATA_AVAILABLE);
     }
 
     /// Removes the listener.
@@ -288,6 +342,73 @@ impl<T: TopicType> DataReader<T> {
         if let Some(r) = g.readers.get_mut(&self.guid) {
             r.listener = None;
         }
+    }
+
+    /// The statuses changed since they were last read
+    /// (`get_status_changes`).
+    pub fn status_changes(&self) -> StatusMask {
+        let g = self.shared.lock_any();
+        g.readers
+            .get(&self.guid)
+            .map_or(StatusMask::NONE, |r| r.changes)
+    }
+
+    /// The reader's StatusCondition (`get_statuscondition`).
+    pub fn status_condition(&self) -> StatusCondition {
+        StatusCondition::new(self.shared.clone(), self.guid)
+    }
+
+    /// A ReadCondition that is true while the reader has samples whose
+    /// states pass `filter` (`create_readcondition`). Dropping every
+    /// clone of it deletes it.
+    pub fn create_readcondition(&self, filter: StateFilter) -> ReadCondition {
+        ReadCondition::new(self.shared.clone(), self.guid, filter)
+    }
+
+    fn check_condition(&self, condition: &ReadCondition) -> Result<StateFilter> {
+        if condition.reader() != self.guid {
+            return Err(Error::PreconditionNotMet);
+        }
+        Ok(condition.filter())
+    }
+
+    /// Takes the samples `condition` is true for (`take_w_condition`).
+    /// Fails with [`Error::PreconditionNotMet`] for a condition of
+    /// another reader.
+    pub fn take_w_condition(&self, condition: &ReadCondition) -> Result<Vec<Sample<T>>> {
+        Ok(self.select(self.check_condition(condition)?, None, true))
+    }
+
+    /// Reads the samples `condition` is true for (`read_w_condition`).
+    pub fn read_w_condition(&self, condition: &ReadCondition) -> Result<Vec<Sample<T>>> {
+        Ok(self.select(self.check_condition(condition)?, None, false))
+    }
+
+    /// Reads a status, clearing its changed flag.
+    fn status<R: Default>(&self, k: StatusMask, f: impl FnOnce(&mut ReaderState) -> R) -> R {
+        let mut g = self.shared.lock_any();
+        g.readers
+            .get_mut(&self.guid)
+            .map(|r| {
+                r.changes = r.changes & !k;
+                f(r)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The SUBSCRIPTION_MATCHED status: the writers matched. Reading it
+    /// resets the `*_change` counts.
+    pub fn subscription_matched_status(&self) -> MatchedStatus {
+        self.status(StatusMask::SUBSCRIPTION_MATCHED, |r| {
+            r.matched_status.take()
+        })
+    }
+
+    /// The SAMPLE_LOST status: samples of matched writers that never
+    /// arrived (gaps in their sequence numbers, for a BEST_EFFORT reader).
+    /// Reading it resets `total_count_change`.
+    pub fn sample_lost_status(&self) -> SampleLostStatus {
+        self.status(StatusMask::SAMPLE_LOST, |r| r.samples.lost.take())
     }
 
     /// The writers matched now (`get_matched_publications`).
@@ -303,42 +424,34 @@ impl<T: TopicType> DataReader<T> {
     /// type and partition that this reader did not match because of
     /// their QoS. Reading it resets `total_count_change`.
     pub fn requested_incompatible_qos_status(&self) -> IncompatibleQosStatus {
-        let mut g = self.shared.lock_any();
-        g.readers
-            .get_mut(&self.guid)
-            .map(|r| r.incompatible.take())
-            .unwrap_or_default()
+        self.status(StatusMask::REQUESTED_INCOMPATIBLE_QOS, |r| {
+            r.incompatible.take()
+        })
     }
 
     /// The SAMPLE_REJECTED status: samples dropped because of the
     /// reader's RESOURCE_LIMITS. Reading it resets `total_count_change`.
     pub fn sample_rejected_status(&self) -> SampleRejectedStatus {
-        let mut g = self.shared.lock_any();
-        g.readers
-            .get_mut(&self.guid)
-            .map(|r| r.samples.take_rejected_status())
-            .unwrap_or_default()
+        self.status(StatusMask::SAMPLE_REJECTED, |r| {
+            r.samples.take_rejected_status()
+        })
     }
 
     /// The LIVELINESS_CHANGED status: how many matched writers are alive
     /// and how many are not. Reading it resets the `*_change` counts.
     pub fn liveliness_changed_status(&self) -> LivelinessChangedStatus {
-        let mut g = self.shared.lock_any();
-        g.readers
-            .get_mut(&self.guid)
-            .map(|r| r.liveliness_changed.take())
-            .unwrap_or_default()
+        self.status(StatusMask::LIVELINESS_CHANGED, |r| {
+            r.liveliness_changed.take()
+        })
     }
 
     /// The REQUESTED_DEADLINE_MISSED status: DEADLINE periods in which an
     /// alive instance got no sample. Reading it resets
     /// `total_count_change`.
     pub fn requested_deadline_missed_status(&self) -> DeadlineMissedStatus {
-        let mut g = self.shared.lock_any();
-        g.readers
-            .get_mut(&self.guid)
-            .map(|r| r.deadlines.missed.take())
-            .unwrap_or_default()
+        self.status(StatusMask::REQUESTED_DEADLINE_MISSED, |r| {
+            r.deadlines.missed.take()
+        })
     }
 
     /// Waits until at least `count` writers are matched, or `timeout`
@@ -359,6 +472,8 @@ impl<T: TopicType> DataReader<T> {
 
 impl<T: TopicType> Drop for DataReader<T> {
     fn drop(&mut self) {
-        self.shared.remove_reader(&self.guid);
+        if self.owned {
+            self.shared.remove_reader(&self.guid);
+        }
     }
 }

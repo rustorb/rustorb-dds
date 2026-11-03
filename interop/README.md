@@ -155,6 +155,13 @@ Found on the way:
   to KEEP_ALL too: that policy, KEEP_LAST 1 by default, bounds what it
   keeps for late joiners. `cyclonedds/hello.c` sets it. Fast DDS 2.11.2
   sends the writer's whole history.
+- `dds_wait_for_acks` of Cyclone DDS 0.10.4 does not wait for a reader
+  that has not yet answered a HEARTBEAT; the ACKNACK that rustorb-dds
+  sends when it matches a writer (before any HEARTBEAT) does not count.
+  The transient-local publisher called it right after the reader matched
+  and, about one run in three, it returned before any sample was sent and
+  the publisher exited (rustorb-dds#20). `cyclonedds/hello.c` now waits
+  half a second first, as the other cases do.
 - LIVELINESS (rustorb-dds#19): Fast DDS 2.11.2 marks the payload of its
   participant messages (`ParticipantMessageData`, 9.6.3.1) `PL_CDR_LE`,
   though what follows is plain CDR; Cyclone DDS 0.10.4 marks it `CDR_LE`.

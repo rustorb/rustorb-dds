@@ -8,7 +8,7 @@ use std::ops::BitOr;
 use rustorb_rtps::{Guid, SequenceNumber, Time};
 
 use crate::qos::{History, ResourceLimits};
-use crate::status::{SampleRejectedReason, SampleRejectedStatus};
+use crate::status::{SampleLostStatus, SampleRejectedReason, SampleRejectedStatus};
 
 /// Identifies an instance: its key hash (DDSI-RTPS 2.5, 9.6.4.8). Every
 /// writer and reader of a topic gives an instance the same handle. A type
@@ -276,6 +276,8 @@ pub(crate) struct ReaderHistory {
     history: History,
     limits: ResourceLimits,
     rejected: SampleRejectedStatus,
+    /// SAMPLE_LOST.
+    pub(crate) lost: SampleLostStatus,
     instances: BTreeMap<InstanceHandle, Instance>,
     /// The highest sequence number taken in from each writer: older ones
     /// are dropped (a best-effort reader keeps each writer's order,
@@ -297,6 +299,7 @@ impl ReaderHistory {
             history,
             limits,
             rejected: SampleRejectedStatus::default(),
+            lost: SampleLostStatus::default(),
             instances: BTreeMap::new(),
             last_sn: HashMap::new(),
             arrivals: 0,
@@ -328,6 +331,31 @@ impl ReaderHistory {
             .is_some_and(|i| i.state == InstanceState::Alive)
     }
 
+    /// Whether some sample passes `filter` (the trigger of a
+    /// ReadCondition, DDS 1.4, 2.2.4.5).
+    pub(crate) fn has_matching(&self, filter: StateFilter) -> bool {
+        self.instances.values().any(|i| {
+            let view = if i.new {
+                ViewState::New
+            } else {
+                ViewState::NotNew
+            };
+            i.samples.iter().any(|s| {
+                let st = if s.read {
+                    SampleState::Read
+                } else {
+                    SampleState::NotRead
+                };
+                filter.accepts(st, view, i.state)
+            })
+        })
+    }
+
+    /// The rejected count, to tell whether an `accept` rejected.
+    pub(crate) fn rejected_count(&self) -> u32 {
+        self.rejected.total_count
+    }
+
     /// Whether some sample has not been read.
     pub(crate) fn has_unread(&self) -> bool {
         self.instances
@@ -337,9 +365,17 @@ impl ReaderHistory {
 
     /// Takes a change in. Returns whether a sample was added.
     pub(crate) fn accept(&mut self, c: Incoming) -> bool {
+        let first = !self.last_sn.contains_key(&c.writer);
         let last = self.last_sn.entry(c.writer).or_insert(SequenceNumber(0));
         if c.sequence_number <= *last {
             return false;
+        }
+        // Sequence numbers skipped are samples lost, except before the
+        // first one taken from a writer: a reader matched late was never
+        // meant to get those.
+        if !first && c.sequence_number.0 > last.0 + 1 {
+            let n = c.sequence_number.0 - last.0 - 1;
+            self.lost.add(u32::try_from(n).unwrap_or(u32::MAX));
         }
         *last = c.sequence_number;
         if matches!(c.change, Change::Write(_)) {

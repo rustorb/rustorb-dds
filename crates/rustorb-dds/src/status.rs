@@ -208,15 +208,17 @@ impl Deadlines {
     }
 
     /// Counts the periods that passed by `now` without a sample, for the
-    /// instances `keep` keeps; the others are dropped.
+    /// instances `keep` keeps; the others are dropped. Returns whether
+    /// one was counted.
     pub(crate) fn check(
         &mut self,
         now: std::time::Instant,
         mut keep: impl FnMut(&InstanceHandle) -> bool,
-    ) {
+    ) -> bool {
         let Some(p) = self.period else {
-            return;
+            return false;
         };
+        let before = self.missed.total_count;
         self.due.retain(|h, _| keep(h));
         for (h, due) in self.due.iter_mut() {
             while *due <= now {
@@ -226,5 +228,158 @@ impl Deadlines {
                 *due += p.max(std::time::Duration::from_millis(1));
             }
         }
+        self.missed.total_count != before
+    }
+}
+
+/// A set of communication status kinds (DDS 1.4 `StatusMask`, 2.2.4.1),
+/// with the values of the IDL PSM (2.3.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StatusMask(pub u32);
+
+impl StatusMask {
+    /// No status.
+    pub const NONE: StatusMask = StatusMask(0);
+    /// Every status.
+    pub const ALL: StatusMask = StatusMask(u32::MAX);
+    /// `INCONSISTENT_TOPIC_STATUS`.
+    pub const INCONSISTENT_TOPIC: StatusMask = StatusMask(1 << 0);
+    /// `OFFERED_DEADLINE_MISSED_STATUS`.
+    pub const OFFERED_DEADLINE_MISSED: StatusMask = StatusMask(1 << 1);
+    /// `REQUESTED_DEADLINE_MISSED_STATUS`.
+    pub const REQUESTED_DEADLINE_MISSED: StatusMask = StatusMask(1 << 2);
+    /// `OFFERED_INCOMPATIBLE_QOS_STATUS`.
+    pub const OFFERED_INCOMPATIBLE_QOS: StatusMask = StatusMask(1 << 5);
+    /// `REQUESTED_INCOMPATIBLE_QOS_STATUS`.
+    pub const REQUESTED_INCOMPATIBLE_QOS: StatusMask = StatusMask(1 << 6);
+    /// `SAMPLE_LOST_STATUS`.
+    pub const SAMPLE_LOST: StatusMask = StatusMask(1 << 7);
+    /// `SAMPLE_REJECTED_STATUS`.
+    pub const SAMPLE_REJECTED: StatusMask = StatusMask(1 << 8);
+    /// `DATA_ON_READERS_STATUS`.
+    pub const DATA_ON_READERS: StatusMask = StatusMask(1 << 9);
+    /// `DATA_AVAILABLE_STATUS`.
+    pub const DATA_AVAILABLE: StatusMask = StatusMask(1 << 10);
+    /// `LIVELINESS_LOST_STATUS`.
+    pub const LIVELINESS_LOST: StatusMask = StatusMask(1 << 11);
+    /// `LIVELINESS_CHANGED_STATUS`.
+    pub const LIVELINESS_CHANGED: StatusMask = StatusMask(1 << 12);
+    /// `PUBLICATION_MATCHED_STATUS`.
+    pub const PUBLICATION_MATCHED: StatusMask = StatusMask(1 << 13);
+    /// `SUBSCRIPTION_MATCHED_STATUS`.
+    pub const SUBSCRIPTION_MATCHED: StatusMask = StatusMask(1 << 14);
+
+    /// Whether every status of `other` is in this set.
+    pub const fn contains(self, other: StatusMask) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether this set and `other` have a status in common.
+    pub const fn intersects(self, other: StatusMask) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// Whether the set is empty.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The statuses of the set, one at a time.
+    pub(crate) fn bits(self) -> impl Iterator<Item = StatusMask> {
+        (0..32)
+            .map(|i| StatusMask(1 << i))
+            .filter(move |b| self.intersects(*b))
+    }
+}
+
+impl std::ops::BitOr for StatusMask {
+    type Output = StatusMask;
+    fn bitor(self, rhs: StatusMask) -> StatusMask {
+        StatusMask(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for StatusMask {
+    fn bitor_assign(&mut self, rhs: StatusMask) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for StatusMask {
+    type Output = StatusMask;
+    fn bitand(self, rhs: StatusMask) -> StatusMask {
+        StatusMask(self.0 & rhs.0)
+    }
+}
+
+impl std::ops::Not for StatusMask {
+    type Output = StatusMask;
+    fn not(self) -> StatusMask {
+        StatusMask(!self.0)
+    }
+}
+
+/// PUBLICATION_MATCHED of a writer or SUBSCRIPTION_MATCHED of a reader
+/// (DDS 1.4, 2.2.4.1): the endpoints it matched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MatchedStatus {
+    /// How many times it matched an endpoint.
+    pub total_count: u32,
+    /// How many since the status was last read.
+    pub total_count_change: u32,
+    /// How many endpoints it matches now.
+    pub current_count: u32,
+    /// The change in `current_count` since the status was last read.
+    pub current_count_change: i32,
+    /// The last endpoint matched or unmatched.
+    pub last_handle: Option<Guid>,
+}
+
+impl MatchedStatus {
+    pub(crate) fn matched(&mut self, other: Guid) {
+        self.total_count += 1;
+        self.total_count_change += 1;
+        self.current_count += 1;
+        self.current_count_change += 1;
+        self.last_handle = Some(other);
+    }
+
+    pub(crate) fn unmatched(&mut self, other: Guid) {
+        self.current_count = self.current_count.saturating_sub(1);
+        self.current_count_change -= 1;
+        self.last_handle = Some(other);
+    }
+
+    pub(crate) fn take(&mut self) -> Self {
+        let s = *self;
+        self.total_count_change = 0;
+        self.current_count_change = 0;
+        s
+    }
+}
+
+/// SAMPLE_LOST of a reader (DDS 1.4, 2.2.4.1): samples it never got.
+///
+/// They are counted from the gaps in the sequence numbers of each
+/// writer: samples a best-effort reader missed, and samples a writer no
+/// longer had when a reliable reader asked for them (KEEP_LAST).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SampleLostStatus {
+    /// How many samples were lost.
+    pub total_count: u32,
+    /// How many since the status was last read.
+    pub total_count_change: u32,
+}
+
+impl SampleLostStatus {
+    pub(crate) fn add(&mut self, n: u32) {
+        self.total_count = self.total_count.saturating_add(n);
+        self.total_count_change = self.total_count_change.saturating_add(n);
+    }
+
+    pub(crate) fn take(&mut self) -> Self {
+        let s = *self;
+        self.total_count_change = 0;
+        s
     }
 }

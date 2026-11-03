@@ -30,6 +30,9 @@
 //! sample too large for a datagram goes as DATA_FRAG. The subscriber
 //! checks it.
 //!
+//! The subscriber waits for samples on a `WaitSet`, with the
+//! StatusCondition of its reader enabled for DATA_AVAILABLE.
+//!
 //! Setting `RUSTORB_DROP_ONE_IN=n` drops one in `n` user datagrams
 //! received, at random, to test that reliable delivery repairs losses.
 
@@ -39,8 +42,8 @@ use std::time::{Duration, Instant};
 
 use greeting::Greeting;
 use rustorb_dds::{
-    DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, History, ParticipantConfig,
-    Reliability,
+    DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, Error, History,
+    ParticipantConfig, Reliability, StatusMask, WaitSet,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -145,29 +148,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let reader = participant
                 .create_subscriber()?
                 .create_datareader_with_qos(&topic, qos)?;
+            let status = reader.status_condition();
+            status.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
+            let waitset = WaitSet::new();
+            waitset.attach_condition(&status)?;
             println!("rustorb-dds: waiting for greetings...");
             let mut got = 0;
             while got < count {
-                if Instant::now() >= deadline {
-                    return Err(format!("rustorb-dds: got {got} of {count} samples").into());
-                }
-                if reader.wait_for_data(Duration::from_millis(200)) {
-                    // Samples without data tell that the writer is gone.
-                    for s in reader.take().into_iter().filter_map(|s| s.data) {
-                        if s.message != message(s.index) {
-                            let start: String = s.message.chars().take(40).collect();
-                            return Err(format!(
-                                "bad message {start:?}... ({} octets) for {}",
-                                s.message.len(),
-                                s.index
-                            )
-                            .into());
-                        }
-                        println!("rustorb-dds: received {}", s.index);
-                        got += 1;
-                        if reliable && s.index != got {
-                            return Err(format!("expected {got}, got {}", s.index).into());
-                        }
+                let left = deadline.saturating_duration_since(Instant::now());
+                match waitset.wait(left) {
+                    Err(Error::Timeout) => {
+                        return Err(format!("rustorb-dds: got {got} of {count} samples").into());
+                    }
+                    r => r?,
+                };
+                // Samples without data tell that the writer is gone.
+                for s in reader.take().into_iter().filter_map(|s| s.data) {
+                    if s.message != message(s.index) {
+                        let start: String = s.message.chars().take(40).collect();
+                        return Err(format!(
+                            "bad message {start:?}... ({} octets) for {}",
+                            s.message.len(),
+                            s.index
+                        )
+                        .into());
+                    }
+                    println!("rustorb-dds: received {}", s.index);
+                    got += 1;
+                    if reliable && s.index != got {
+                        return Err(format!("expected {got}, got {}", s.index).into());
                     }
                 }
             }

@@ -33,7 +33,10 @@
 //! over UDPv4. Endpoints whose QoS do not match are counted in the
 //! incompatible QoS statuses; readers reject samples beyond their
 //! RESOURCE_LIMITS. LIVELINESS (with the Writer Liveliness Protocol) and
-//! DEADLINE are kept and reported in statuses. A participant that is
+//! DEADLINE are kept and reported in statuses. A thread can wait for
+//! samples or status changes on a [`WaitSet`], with a [`StatusCondition`],
+//! a [`ReadCondition`] or a [`GuardCondition`], or have them handed to a
+//! [`DataReaderListener`] or [`DataWriterListener`]. A participant that is
 //! deleted tells the others. Keyed types
 //! have instances: writers register, write, dispose and unregister them;
 //! readers keep a history per instance with its states (DDS 1.4,
@@ -41,11 +44,13 @@
 //! fragments are repaired. Samples are written in XCDR1. Writers and
 //! readers in the same participant are matched with each other too.
 //!
-//! Still to come in D2 (rustorb-dds#15): WaitSets and ROS 2; then the
+//! Still to come in D2 (rustorb-dds#15): ROS 2; then the
 //! XTypes type information (D3).
 
+mod condition;
 mod error;
 mod instance;
+mod listener;
 mod participant;
 mod publisher;
 mod qos;
@@ -57,11 +62,13 @@ mod test_shape;
 mod topic;
 mod typed;
 
+pub use condition::{Condition, GuardCondition, ReadCondition, StatusCondition, WaitSet};
 pub use error::{Error, Result};
 pub use instance::{
     InstanceHandle, InstanceState, InstanceStateMask, SampleInfo, SampleState, SampleStateMask,
     StateFilter, ViewState, ViewStateMask,
 };
+pub use listener::{DataReaderListener, DataWriterListener};
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher};
 pub use qos::{
@@ -73,7 +80,8 @@ pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
 pub use status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
-    QosPolicyCount, SampleRejectedReason, SampleRejectedStatus,
+    MatchedStatus, QosPolicyCount, SampleLostStatus, SampleRejectedReason, SampleRejectedStatus,
+    StatusMask,
 };
 pub use subscriber::{DataReader, Sample, Subscriber};
 pub use topic::Topic;

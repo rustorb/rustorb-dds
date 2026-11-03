@@ -69,7 +69,7 @@ fn same_participant() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let c = calls.clone();
-    reader.set_listener(move || {
+    reader.on_data_available(move |_| {
         c.fetch_add(1, Ordering::SeqCst);
     });
     for i in 1..=3 {
@@ -164,7 +164,7 @@ fn two_participants_over_udp() {
     assert_eq!(a.discovered_participants(), [b.guid().prefix]);
 
     let (tx, rx) = std::sync::mpsc::channel();
-    reader.set_listener(move || {
+    reader.on_data_available(move |_| {
         let _ = tx.send(());
     });
     for i in 1..=5 {
