@@ -1,0 +1,41 @@
+module Fx {
+  enum Color { RED, GREEN, @value(7) BLUE };
+  @bit_bound(8) bitmask Perm { READ, WRITE, @position(5) EXEC };
+  typedef sequence<long, 10> LongSeq10;
+  typedef string<20> Name;
+  typedef long Matrix[2][3];
+
+  @final struct Plain {
+    boolean b; octet o; short s; unsigned short us; long l; unsigned long ul;
+    long long ll; unsigned long long ull; float f; double d; char c;
+    int8 i8; uint8 u8;
+  };
+  @appendable struct Inner { @key long id; string<300> big; };
+  @mutable struct Mut {
+    @id(5) long a;
+    @id(2) @optional string b;
+    @id(9) @key short k;
+    Inner inner;
+  };
+  @final union U switch (long) {
+    case 1: case 2: long x;
+    case 3: string s;
+    default: Inner i;
+  };
+  @appendable union UE switch (Color) {
+    case RED: double r;
+    case BLUE: Name n;
+  };
+  @mutable @autoid(HASH) struct Hashed { long alpha; @hashid string beta; @hashid("other") long gamma; };
+  @final @nested struct Nested { long v; };
+  @final struct Derived : Nested { long w; };
+  @final struct All {
+    Color color; Perm perm; LongSeq10 ls; Name name; Matrix m;
+    sequence<Inner> inners; sequence<sequence<long> > ss;
+    Inner arr[4]; long big_arr[300]; sequence<string, 500> strs;
+    U u; UE ue; Mut mut; Hashed h; Derived der; Plain p;
+    @external Inner ext;
+    @optional long opt;
+  };
+  @final @topic struct Top { @key long id; All all; };
+};

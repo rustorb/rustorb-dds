@@ -45,6 +45,7 @@ name = "rustorb-xtypes"
 version = "0.0.0"
 dependencies = [
  "rustorb-cdr",
+ "rustorb-typesupport",
 ]
 
 [[package]]

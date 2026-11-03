@@ -13,6 +13,8 @@ publish = false
 
 [dependencies]
 rustorb-cdr.workspace = true
+# MD5, for the hashes of TypeObjects and member names.
+rustorb-typesupport.workspace = true
 
 [lints]
 workspace = true
