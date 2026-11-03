@@ -124,4 +124,7 @@ Found on the way:
   for fragments its socket dropped, and rustorb-dds resent only those.
 - rustorb-dds asks for a 4 MiB receive buffer on its sockets: with the
   Linux default (208 KiB), a burst of fragments of one 200 KB sample
-  overflowed it and best-effort samples were lost.
+  overflowed it and best-effort samples were lost. It also asks for a
+  1 MiB send buffer: on macOS the send buffer bounds the largest
+  datagram, 9216 octets by default, and larger sends failed with
+  `EMSGSIZE`.
