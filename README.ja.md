@@ -2,7 +2,14 @@
 
 Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://github.com/rustorb/rustorb) プロジェクトの一部です（[English](README.md)）。
 
-**現状: 始めたばかりで、まだ何も動きません。** 計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。ほかの DDS 実装との相互接続はまだ確かめていません。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+
+hello world は、2 つの端末で次を実行すると試せます。
+
+```sh
+cargo run --example hello_world -- sub
+cargo run --example hello_world -- pub
+```
 
 ## クレート構成
 
@@ -12,7 +19,7 @@ Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://g
 | `rustorb-rtps` | 通信路（DDSI-RTPS 2.5）: メッセージ、ディスカバリ、writer と reader | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | 型系（DDS-XTypes 1.3）: TypeObject、型の互換判定、DynamicData | MIT OR Apache-2.0 |
 
-XCDR1/XCDR2 の符号化は `rustorb-cdr` に、IDL の生成器は `rustorb-idl` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。DDS のクレートが依存するのは `rustorb-cdr` だけです。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
+XCDR1/XCDR2 の符号化は `rustorb-cdr` に、DDS の型サポートの trait は `rustorb-typesupport` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) です。DDS のクレートが依存するのは `rustorb-cdr` と `rustorb-typesupport` だけです。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
 
 ## 段階
 

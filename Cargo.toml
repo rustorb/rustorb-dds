@@ -20,13 +20,13 @@ categories = ["network-programming"]
 [workspace.dependencies]
 rustorb-xtypes = { path = "crates/rustorb-xtypes" }
 rustorb-rtps = { path = "crates/rustorb-rtps" }
-# Until rustorb releases the shared parts (rustorb/rustorb#114), use the
-# main branch. Only rustorb-cdr (MIT OR Apache-2.0) is used, never the
-# GPL generator.
 # Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
 # MIT OR Apache-2.0.
 socket2 = { version = "0.6", features = ["all"] }
-rustorb-cdr = { git = "https://github.com/rustorb/rustorb", branch = "main" }
+# The shared parts of rustorb, released in 0.2.0 (rustorb/rustorb#114).
+# Both are MIT OR Apache-2.0; the GPL generator is never a dependency.
+rustorb-cdr = "0.2.0"
+rustorb-typesupport = "0.2.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -14,6 +14,10 @@ publish = false
 [dependencies]
 rustorb-rtps.workspace = true
 rustorb-xtypes.workspace = true
+rustorb-typesupport.workspace = true
+
+[dev-dependencies]
+rustorb-typesupport.workspace = true
 
 [lints]
 workspace = true

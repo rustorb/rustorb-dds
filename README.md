@@ -3,8 +3,17 @@
 A DDS (Data Distribution Service) implementation in Rust, from the
 [rustorb](https://github.com/rustorb/rustorb) project ([日本語](README.ja.md)).
 
-**Status: just started. Nothing works yet.** The plan is
+**Status: early.** Participants discover each other (SPDP/SEDP) and
+exchange samples with best-effort writers and readers over UDPv4. Interop
+with other DDS implementations is not checked yet. The plan is
 [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111).
+
+Try the hello world in two terminals:
+
+```sh
+cargo run --example hello_world -- sub
+cargo run --example hello_world -- pub
+```
 
 ## Crates
 
@@ -14,9 +23,11 @@ A DDS (Data Distribution Service) implementation in Rust, from the
 | `rustorb-rtps` | The wire protocol (DDSI-RTPS 2.5): messages, discovery, writers and readers | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | The type system (DDS-XTypes 1.3): TypeObject, assignability, DynamicData | MIT OR Apache-2.0 |
 
-The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the IDL generator is
-`rustorb-idl`, both in the rustorb repository and shared with the ORB.
-The DDS crates depend on `rustorb-cdr` only; the generator is
+The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
+traits in `rustorb-typesupport`, both in the rustorb repository and shared
+with the ORB. The IDL generator is
+[rustorb-idl](https://github.com/rustorb/rustorb-idl). The DDS crates
+depend on `rustorb-cdr` and `rustorb-typesupport` only; the generator is
 GPL-3.0-or-later, and the code it generates is not covered by that license.
 
 ## Stages
