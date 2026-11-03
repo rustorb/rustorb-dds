@@ -137,8 +137,16 @@ fn manual_by_topic_is_lost_and_asserted_again() {
             InstanceState::NotAliveNoWriters
         );
     }
-    let s = writer.liveliness_lost_status();
-    assert_eq!((s.total_count, s.total_count_change), (lost_before + 1, 1));
+    // The writer's participant sees its lease pass on its own timer,
+    // not necessarily before the readers.
+    let mut s = writer.liveliness_lost_status();
+    let mut change = s.total_count_change;
+    wait_until("the writer lost", || {
+        s = writer.liveliness_lost_status();
+        change += s.total_count_change;
+        s.total_count == lost_before + 1
+    });
+    assert_eq!(change, 1);
     assert_eq!(writer.liveliness_lost_status().total_count_change, 0);
     // assert_liveliness sends a HEARTBEAT with the liveliness flag.
     writer.assert_liveliness().unwrap();
@@ -187,7 +195,11 @@ fn manual_by_participant() {
     wait_until("not alive", || {
         reader.liveliness_changed_status().not_alive_count == 1
     });
-    assert_eq!(writer.liveliness_lost_status().total_count, lost_before + 1);
+    // The writer's participant sees its lease pass on its own timer, at
+    // about the same time as the reader's: not necessarily first.
+    wait_until("the writer lost", || {
+        writer.liveliness_lost_status().total_count == lost_before + 1
+    });
     // The writer's own assert_liveliness asserts the participant.
     writer.assert_liveliness().unwrap();
     wait_until("alive again", || {
