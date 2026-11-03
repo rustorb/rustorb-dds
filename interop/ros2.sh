@@ -31,9 +31,14 @@ mkdir -p "$OUT"
 
 log() { echo "[ros2] $*"; }
 
-if [ -z "${ROS_DISTRO:-}" ] || [ -z "${AMENT_PREFIX_PATH:-}" ]; then
+if [ -z "${AMENT_PREFIX_PATH:-}" ]; then
   echo "ROS 2 is not sourced: source /opt/ros/<distro>/setup.bash first" >&2
   exit 2
+fi
+# ROS_DISTRO comes from the package ros_environment, which a minimal
+# installation may not have: else take it from /opt/ros/<distro>.
+if [ -z "${ROS_DISTRO:-}" ]; then
+  ROS_DISTRO=$(echo "$AMENT_PREFIX_PATH" | tr ':' '\n' | sed -n 's|^/opt/ros/\([^/]*\)$|\1|p' | head -n 1)
 fi
 DEMO=$(echo "$AMENT_PREFIX_PATH" | tr ':' '\n' | while read -r p; do
   [ -x "$p/lib/demo_nodes_cpp/talker" ] && echo "$p/lib/demo_nodes_cpp" && break
