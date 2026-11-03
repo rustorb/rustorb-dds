@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use rustorb_rtps::frag::{Keep, Reassembler, ReassemblyLimits};
 use rustorb_rtps::pl::pid;
-use rustorb_rtps::qos::{DurabilityKind, ReliabilityKind};
+use rustorb_rtps::qos::{DurabilityKind, LivelinessKind, ReliabilityKind};
 use rustorb_rtps::receiver::receive;
 use rustorb_rtps::reliable::{
     Change, MatchedReader, ReaderConfig, ReliableReader, ReliableWriter, WriterConfig,
@@ -18,6 +18,7 @@ use rustorb_rtps::reliable::{
 use rustorb_rtps::sedp::{EndpointData, Match, Sedp, SedpConfig, SedpEvent, match_endpoints};
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
 use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
+use rustorb_rtps::wlp::{self, Wlp};
 use rustorb_rtps::{
     EntityId, Guid, GuidPrefix, Locator, Parameter, ParameterList, PayloadKind, SequenceNumber,
     SerializedPayload, Submessage, Time, VendorId,
@@ -28,7 +29,9 @@ use crate::error::{Error, Result};
 use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
-use crate::status::IncompatibleQosStatus;
+use crate::status::{
+    Deadlines, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
+};
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
 use crate::typed::KeyOps;
@@ -109,10 +112,28 @@ pub(crate) struct ReaderState {
     pub(crate) reassembly: ReassemblyLimits,
     /// REQUESTED_INCOMPATIBLE_QOS.
     pub(crate) incompatible: IncompatibleQosStatus,
+    /// The liveliness of the matched writers.
+    pub(crate) liveliness: HashMap<Guid, WriterLiveliness>,
+    /// LIVELINESS_CHANGED.
+    pub(crate) liveliness_changed: LivelinessChangedStatus,
+    /// DEADLINE: when each alive instance must next get a sample, and
+    /// REQUESTED_DEADLINE_MISSED.
+    pub(crate) deadlines: Deadlines,
     /// The samples and the instances.
     pub(crate) samples: ReaderHistory,
     pub(crate) keys: Arc<dyn KeyOps>,
     pub(crate) listener: Option<Listener>,
+}
+
+/// What a reader knows of the liveliness of a matched writer.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WriterLiveliness {
+    kind: LivelinessKind,
+    /// `None`: it cannot lose its liveliness (an infinite lease, or an
+    /// AUTOMATIC writer of the same participant).
+    lease: Option<Duration>,
+    last: Instant,
+    alive: bool,
 }
 
 impl ReaderState {
@@ -121,7 +142,73 @@ impl ReaderState {
         if !self.matched.contains(&c.writer) {
             return false;
         }
-        self.samples.accept(c)
+        let h = c.instance;
+        let value = matches!(c.change, instance::Change::Write(_));
+        let added = self.samples.accept(c);
+        if added && value {
+            self.deadlines.renew(h, Instant::now());
+        }
+        added
+    }
+
+    /// Starts tracking the liveliness of a newly matched writer: it is
+    /// alive.
+    fn writer_matched(
+        &mut self,
+        writer: Guid,
+        kind: LivelinessKind,
+        lease: Option<Duration>,
+        now: Instant,
+    ) {
+        let l = WriterLiveliness {
+            kind,
+            lease,
+            last: now,
+            alive: true,
+        };
+        if self.liveliness.insert(writer, l).is_none() {
+            self.liveliness_changed.update(writer, None, Some(true));
+        }
+    }
+
+    /// Stops tracking a writer that is no longer matched.
+    fn writer_unmatched(&mut self, writer: &Guid) {
+        if let Some(l) = self.liveliness.remove(writer) {
+            self.liveliness_changed.update(*writer, Some(l.alive), None);
+        }
+    }
+
+    /// A matched writer asserted its liveliness.
+    fn writer_asserted(&mut self, writer: &Guid, now: Instant) {
+        if let Some(l) = self.liveliness.get_mut(writer) {
+            l.last = now;
+            if !l.alive {
+                l.alive = true;
+                self.liveliness_changed
+                    .update(*writer, Some(false), Some(true));
+            }
+        }
+    }
+
+    /// Writers whose lease passed become not alive, and the instances
+    /// they alone wrote lose their writers; deadlines missed are counted.
+    /// Returns whether a sample was added.
+    fn check(&mut self, now: Instant) -> bool {
+        let mut added = false;
+        let lost: Vec<Guid> = self
+            .liveliness
+            .iter()
+            .filter(|(_, l)| l.alive && l.lease.is_some_and(|d| now > l.last + d))
+            .map(|(g, _)| *g)
+            .collect();
+        for g in lost {
+            self.liveliness.get_mut(&g).expect("listed above").alive = false;
+            self.liveliness_changed.update(g, Some(true), Some(false));
+            added |= self.samples.writer_lost(&g);
+        }
+        let samples = &self.samples;
+        self.deadlines.check(now, |h| samples.is_alive(h));
+        added
     }
 
     /// Reads a change received from a remote writer: its instance from
@@ -209,9 +296,41 @@ pub(crate) struct WriterState {
     change_instance: HashMap<SequenceNumber, InstanceHandle>,
     /// OFFERED_INCOMPATIBLE_QOS.
     pub(crate) incompatible: IncompatibleQosStatus,
+    /// When it last asserted its liveliness.
+    last_asserted: Instant,
+    /// Whether its liveliness is not lost.
+    alive: bool,
+    /// LIVELINESS_LOST.
+    pub(crate) liveliness_lost: LivelinessLostStatus,
+    /// DEADLINE: when each registered instance must next be written, and
+    /// OFFERED_DEADLINE_MISSED.
+    pub(crate) deadlines: Deadlines,
 }
 
 impl WriterState {
+    /// The lease within which a reader takes the writer as alive, as a
+    /// local reader sees it: an AUTOMATIC writer of the same participant
+    /// is always alive.
+    fn local_lease(&self) -> Option<Duration> {
+        match self.qos.liveliness.kind {
+            LivelinessKind::Automatic => None,
+            _ => self.qos.liveliness.lease_duration,
+        }
+    }
+
+    /// The liveliness of the writer is lost when its lease passes without
+    /// an assertion; deadlines missed are counted.
+    fn check(&mut self, now: Instant) {
+        if let Some(lease) = self.local_lease() {
+            if self.alive && now > self.last_asserted + lease {
+                self.alive = false;
+                self.liveliness_lost.add();
+            }
+        }
+        let instances = &self.instances;
+        self.deadlines.check(now, |h| instances.contains_key(h));
+    }
+
     /// The changes of an instance still in the history.
     fn instance_changes(&mut self, h: &InstanceHandle) -> usize {
         let Some(i) = self.instances.get_mut(h) else {
@@ -349,6 +468,12 @@ impl WriterState {
             }
         };
         let inline_qos = (!q.parameters.is_empty()).then_some(q);
+        if payload.is_some() {
+            self.deadlines.renew(h, Instant::now());
+        } else {
+            // Disposed or unregistered: no more updates are due.
+            self.deadlines.remove(&h);
+        }
         let sn = self
             .rtps
             .add_change_at(inline_qos, payload, Some(timestamp));
@@ -369,12 +494,139 @@ impl WriterState {
 pub(crate) struct Inner {
     spdp: Spdp,
     pub(crate) sedp: Sedp,
+    wlp: Wlp,
+    /// When to write the next automatic liveliness message, while there
+    /// are AUTOMATIC writers with a finite lease.
+    next_automatic: Option<Instant>,
+    /// A MANUAL_BY_PARTICIPANT writer asserted its liveliness since the
+    /// last manual liveliness message.
+    manual_pending: bool,
+    /// The earliest time for the next manual liveliness message.
+    next_manual: Instant,
     writer_config: WriterConfig,
     reader_config: ReaderConfig,
     next_entity: u32,
     pub(crate) writers: HashMap<Guid, WriterState>,
     pub(crate) readers: HashMap<Guid, ReaderState>,
     deleted: bool,
+}
+
+/// The shortest interval between two liveliness messages of a kind.
+const MIN_LIVELINESS_PERIOD: Duration = Duration::from_millis(10);
+
+impl Inner {
+    /// A local writer asserted its liveliness, by writing or with
+    /// `assert_liveliness`. For a MANUAL_BY_PARTICIPANT writer, that
+    /// asserts every such writer of the participant (DDS 1.4, 2.2.3.11).
+    fn local_writer_asserted(&mut self, writer: Guid, now: Instant) {
+        let Some(kind) = self.writers.get(&writer).map(|w| w.qos.liveliness.kind) else {
+            return;
+        };
+        if kind == LivelinessKind::ManualByParticipant {
+            self.participant_asserted(now);
+        } else {
+            self.local_asserted(writer, now);
+        }
+    }
+
+    /// The participant asserted its liveliness: its MANUAL_BY_PARTICIPANT
+    /// writers are alive, and the others are told with a manual
+    /// liveliness message (DDSI-RTPS 2.5, 8.4.13.5).
+    fn participant_asserted(&mut self, now: Instant) {
+        let guids: Vec<Guid> = self
+            .writers
+            .iter()
+            .filter(|(_, w)| w.qos.liveliness.kind == LivelinessKind::ManualByParticipant)
+            .map(|(g, _)| *g)
+            .collect();
+        if !guids.is_empty() {
+            self.manual_pending = true;
+        }
+        for g in guids {
+            self.local_asserted(g, now);
+        }
+    }
+
+    fn local_asserted(&mut self, writer: Guid, now: Instant) {
+        if let Some(w) = self.writers.get_mut(&writer) {
+            w.last_asserted = now;
+            w.alive = true;
+        }
+        self.remote_writer_asserted(&writer, now);
+    }
+
+    /// A writer asserted its liveliness, as seen by the local readers.
+    fn remote_writer_asserted(&mut self, writer: &Guid, now: Instant) {
+        for r in self.readers.values_mut() {
+            r.writer_asserted(writer, now);
+        }
+    }
+
+    /// A liveliness message from another participant: an automatic one
+    /// asserts its AUTOMATIC writers, a manual one those and its
+    /// MANUAL_BY_PARTICIPANT writers.
+    fn remote_participant_asserted(&mut self, prefix: GuidPrefix, kind: [u8; 4], now: Instant) {
+        let manual = kind == wlp::kind::MANUAL_LIVELINESS_UPDATE;
+        for r in self.readers.values_mut() {
+            let guids: Vec<Guid> = r
+                .liveliness
+                .iter()
+                .filter(|(g, l)| {
+                    g.prefix == prefix
+                        && (l.kind == LivelinessKind::Automatic
+                            || (manual && l.kind == LivelinessKind::ManualByParticipant))
+                })
+                .map(|(g, _)| *g)
+                .collect();
+            for g in guids {
+                r.writer_asserted(&g, now);
+            }
+        }
+    }
+
+    /// Liveliness and deadlines: leases that passed, deadlines missed,
+    /// and the liveliness messages due (DDSI-RTPS 2.5, 8.7.2.2.3).
+    fn check_timers(&mut self, now: Instant, notify: &mut Notify) {
+        for w in self.writers.values_mut() {
+            w.check(now);
+        }
+        for r in self.readers.values_mut() {
+            if r.check(now) {
+                notify.delivered = true;
+                if let Some(l) = &r.listener {
+                    notify.listeners.push(l.clone());
+                }
+            }
+        }
+        let min_lease = |kind: LivelinessKind| {
+            self.writers
+                .values()
+                .filter(|w| w.qos.liveliness.kind == kind)
+                .filter_map(|w| w.qos.liveliness.lease_duration)
+                .min()
+        };
+        // AUTOMATIC: a message at a rate faster than the shortest lease.
+        match min_lease(LivelinessKind::Automatic) {
+            None => self.next_automatic = None,
+            Some(lease) => {
+                if self.next_automatic.is_none_or(|t| t <= now) {
+                    self.wlp
+                        .assert_liveliness(wlp::kind::AUTOMATIC_LIVELINESS_UPDATE);
+                    self.next_automatic = Some(now + (lease / 3).max(MIN_LIVELINESS_PERIOD));
+                }
+            }
+        }
+        // MANUAL_BY_PARTICIPANT: a message when some writer asserted,
+        // at most once a third of the shortest lease.
+        if self.manual_pending && now >= self.next_manual {
+            self.manual_pending = false;
+            self.wlp
+                .assert_liveliness(wlp::kind::MANUAL_LIVELINESS_UPDATE);
+            let period = min_lease(LivelinessKind::ManualByParticipant)
+                .map_or(Duration::from_secs(1), |l| l / 3);
+            self.next_manual = now + period.max(MIN_LIVELINESS_PERIOD);
+        }
+    }
 }
 
 /// What the participant handle and its entities share with the thread.
@@ -446,13 +698,19 @@ impl Shared {
         let mut g = self.lock()?;
         let inner = &mut *g;
         let guid = data.guid;
+        let now = Instant::now();
         let mut matched = BTreeSet::new();
         let mut incompatible = IncompatibleQosStatus::default();
+        let lease = match qos.liveliness.kind {
+            LivelinessKind::Automatic => None,
+            _ => qos.liveliness.lease_duration,
+        };
         for (rg, r) in inner.readers.iter_mut() {
             match match_endpoints(&data, &r.data) {
                 Match::Matched => {
                     matched.insert(*rg);
                     r.matched.insert(guid);
+                    r.writer_matched(guid, qos.liveliness.kind, lease, now);
                 }
                 Match::Incompatible(policies) => {
                     incompatible.add(&policies);
@@ -473,10 +731,14 @@ impl Shared {
                 instances: BTreeMap::new(),
                 change_instance: HashMap::new(),
                 incompatible,
+                last_asserted: now,
+                alive: true,
+                liveliness_lost: LivelinessLostStatus::default(),
+                deadlines: Deadlines::new(qos.deadline),
             },
         );
         let events = inner.sedp.add_writer(data);
-        apply_sedp_events(inner, events, Instant::now(), &mut Notify::default());
+        apply_sedp_events(inner, events, now, &mut Notify::default());
         Ok(())
     }
 
@@ -491,14 +753,17 @@ impl Shared {
         let mut g = self.lock()?;
         let inner = &mut *g;
         let guid = data.guid;
+        let now = Instant::now();
         let mut matched = BTreeSet::new();
         let mut incompatible = IncompatibleQosStatus::default();
+        let mut liveliness = Vec::new();
         // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL reader.
         let mut kept = Vec::new();
         for (wg, w) in inner.writers.iter_mut() {
             match match_endpoints(&w.data, &data) {
                 Match::Matched => {
                     matched.insert(*wg);
+                    liveliness.push((*wg, w.qos.liveliness.kind, w.local_lease()));
                     w.matched.insert(guid);
                     if w.transient_local() && qos.durability >= DurabilityKind::TransientLocal {
                         kept.extend(w.rtps.changes().cloned());
@@ -522,19 +787,25 @@ impl Shared {
                 fragments: HashMap::new(),
                 reassembly: inner.reader_config.reassembly,
                 incompatible,
+                liveliness: HashMap::new(),
+                liveliness_changed: LivelinessChangedStatus::default(),
+                deadlines: Deadlines::new(qos.deadline),
                 samples: ReaderHistory::with_limits(qos.history, qos.resource_limits),
                 keys,
                 listener: None,
             },
         );
         let st = inner.readers.get_mut(&guid).expect("inserted above");
+        for (w, kind, lease) in liveliness {
+            st.writer_matched(w, kind, lease, now);
+        }
         for c in kept {
             if let Some(c) = st.incoming(c) {
                 st.accept(c);
             }
         }
         let events = inner.sedp.add_reader(data);
-        apply_sedp_events(inner, events, Instant::now(), &mut Notify::default());
+        apply_sedp_events(inner, events, now, &mut Notify::default());
         Ok(())
     }
 
@@ -570,6 +841,7 @@ impl Shared {
                 return;
             }
             for r in inner.readers.values_mut() {
+                r.writer_unmatched(guid);
                 if r.matched.remove(guid) && r.samples.writer_gone(guid) {
                     delivered = true;
                     if let Some(l) = &r.listener {
@@ -673,6 +945,8 @@ impl Shared {
             let now = Instant::now();
             out = w.rtps.poll(now);
             w.trim();
+            inner.local_writer_asserted(writer, now);
+            let w = inner.writers.get_mut(&writer).expect("checked above");
             let matched: Vec<Guid> = w.matched.iter().copied().collect();
             let mut delivered = false;
             for r in matched {
@@ -719,6 +993,37 @@ impl Shared {
             Some(e) if !sent => Err(e.into()),
             _ => Ok(()),
         }
+    }
+
+    /// `assert_liveliness` of a local writer. A MANUAL_BY_TOPIC writer
+    /// sends a HEARTBEAT with the liveliness flag to its readers
+    /// (DDSI-RTPS 2.5, 8.7.2.2.3); a MANUAL_BY_PARTICIPANT one asserts
+    /// the participant; it does nothing for an AUTOMATIC writer.
+    pub(crate) fn assert_writer_liveliness(&self, writer: &Guid) -> Result<()> {
+        let out = {
+            let mut g = self.lock()?;
+            let inner = &mut *g;
+            let Some(kind) = inner.writers.get(writer).map(|w| w.qos.liveliness.kind) else {
+                return Ok(());
+            };
+            if kind == LivelinessKind::Automatic {
+                return Ok(());
+            }
+            inner.local_writer_asserted(*writer, Instant::now());
+            match inner.writers.get_mut(writer) {
+                Some(w) if kind == LivelinessKind::ManualByTopic => w.rtps.liveliness_heartbeat(),
+                _ => Vec::new(),
+            }
+        };
+        // Like a HEARTBEAT that is lost on the way, one that cannot be
+        // sent (to a locator kind not supported here, say) is not an
+        // error of the call.
+        for o in &out {
+            for l in &o.locators {
+                let _ = self.transport.send(&o.bytes, l);
+            }
+        }
+        Ok(())
     }
 
     /// Waits until every matched reliable reader has acknowledged every
@@ -779,6 +1084,14 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                     }
                 } else if let Some(r) = inner.readers.get_mut(&local) {
                     r.matched.insert(remote);
+                    if let Some(d) = inner.sedp.remote_writer(&remote) {
+                        r.writer_matched(
+                            remote,
+                            d.liveliness.kind,
+                            d.liveliness.lease_duration.to_std(),
+                            now,
+                        );
+                    }
                     if let (Some(rtps), Some(d)) =
                         (r.rtps.as_mut(), inner.sedp.remote_writer(&remote))
                     {
@@ -798,6 +1111,7 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                     w.trim();
                 } else if let Some(r) = inner.readers.get_mut(&local) {
                     r.fragments.remove(&remote);
+                    r.writer_unmatched(&remote);
                     if r.matched.remove(&remote) && r.samples.writer_gone(&remote) {
                         notify.delivered = true;
                         if let Some(l) = &r.listener {
@@ -856,7 +1170,7 @@ impl DomainParticipant {
         let prefix = GuidPrefix::generate(VENDOR_ID);
         let mut data = ParticipantData::new(prefix, VENDOR_ID);
         data.domain_id = Some(domain_id);
-        data.available_builtin_endpoints.0 |= Sedp::BUILTIN_ENDPOINTS;
+        data.available_builtin_endpoints.0 |= Sedp::BUILTIN_ENDPOINTS | Wlp::BUILTIN_ENDPOINTS;
         data.metatraffic_unicast_locators = transport.discovery_unicast_locators();
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
@@ -867,6 +1181,15 @@ impl DomainParticipant {
         let inner = Inner {
             spdp: Spdp::new(data, spdp_config),
             sedp: Sedp::new(prefix, VENDOR_ID, SedpConfig::default()),
+            wlp: Wlp::new(
+                prefix,
+                VENDOR_ID,
+                SedpConfig::default().writer,
+                SedpConfig::default().reader,
+            ),
+            next_automatic: None,
+            manual_pending: false,
+            next_manual: Instant::now(),
             writer_config: config.writer,
             reader_config: config.reader,
             next_entity: 1,
@@ -932,6 +1255,14 @@ impl DomainParticipant {
         Ok(Subscriber::new(self.shared.clone(), qos))
     }
 
+    /// Asserts the liveliness of the participant's MANUAL_BY_PARTICIPANT
+    /// writers (`assert_liveliness`, DDS 1.4, 2.2.2.2.1.19). Writing with
+    /// any of them does too.
+    pub fn assert_liveliness(&self) -> Result<()> {
+        self.shared.lock()?.participant_asserted(Instant::now());
+        Ok(())
+    }
+
     /// The GUID prefixes of the other participants discovered.
     pub fn discovered_participants(&self) -> Vec<GuidPrefix> {
         let g = self.shared.lock_any();
@@ -969,16 +1300,23 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
     while !shared.stop.load(Ordering::Relaxed) {
         let wait = {
             let g = shared.lock_any();
-            let next = [g.spdp.next_deadline(), g.sedp.next_deadline()]
-                .into_iter()
-                .chain(g.writers.values().map(|w| w.rtps.next_deadline()))
-                .chain(
-                    g.readers
-                        .values()
-                        .map(|r| r.rtps.as_ref().and_then(|r| r.next_deadline())),
-                )
-                .flatten()
-                .min();
+            let manual = g.manual_pending.then_some(g.next_manual);
+            let next = [
+                g.spdp.next_deadline(),
+                g.sedp.next_deadline(),
+                g.wlp.next_deadline(),
+                g.next_automatic,
+                manual,
+            ]
+            .into_iter()
+            .chain(g.writers.values().map(|w| w.rtps.next_deadline()))
+            .chain(
+                g.readers
+                    .values()
+                    .map(|r| r.rtps.as_ref().and_then(|r| r.next_deadline())),
+            )
+            .flatten()
+            .min();
             next.map_or(MAX_WAIT, |t| {
                 t.saturating_duration_since(Instant::now()).min(MAX_WAIT)
             })
@@ -1013,6 +1351,9 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                     }
                     let events = inner.sedp.handle_message(&d.data, now);
                     apply_sedp_events(inner, events, now, &mut notify);
+                    for a in inner.wlp.handle_message(&d.data, now) {
+                        inner.remote_participant_asserted(a.participant, a.kind, now);
+                    }
                 }
                 Channel::UserMulticast | Channel::UserUnicast => {
                     if shared.should_drop() {
@@ -1027,12 +1368,16 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         for e in inner.spdp.remove_expired(now) {
             participant_event(inner, e, now, &mut notify);
         }
+        inner.check_timers(now, &mut notify);
         delivered |= notify.delivered;
         listeners.append(&mut notify.listeners);
         if let Some((bytes, to)) = inner.spdp.poll_announce(now) {
             out.push((bytes, to.to_vec()));
         }
         for o in inner.sedp.poll(now) {
+            out.push((o.bytes, o.locators));
+        }
+        for o in inner.wlp.poll(now) {
             out.push((o.bytes, o.locators));
         }
         for w in inner.writers.values_mut() {
@@ -1071,8 +1416,10 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant, notif
     match e {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
             inner.sedp.add_participant(&p, now);
+            inner.wlp.add_participant(&p, now);
         }
         ParticipantEvent::Removed(prefix, _) => {
+            inner.wlp.remove_participant(&prefix);
             let events = inner.sedp.remove_participant(&prefix);
             apply_sedp_events(inner, events, now, notify);
         }
@@ -1114,6 +1461,7 @@ fn user_traffic(
             }
             Submessage::Data(d) => {
                 let writer = Guid::new(src, d.writer_id);
+                inner.remote_writer_asserted(&writer, now);
                 for_readers(
                     inner,
                     d.reader_id,
@@ -1133,6 +1481,7 @@ fn user_traffic(
             }
             Submessage::DataFrag(d) => {
                 let writer = Guid::new(src, d.writer_id);
+                inner.remote_writer_asserted(&writer, now);
                 for_readers(
                     inner,
                     d.reader_id,
@@ -1190,6 +1539,10 @@ fn user_traffic(
             }
             Submessage::Heartbeat(h) => {
                 let writer = Guid::new(src, h.writer_id);
+                if h.liveliness_flag {
+                    // MANUAL_BY_TOPIC assert_liveliness (8.7.2.2.3).
+                    inner.remote_writer_asserted(&writer, now);
+                }
                 for_readers(
                     inner,
                     h.reader_id,

@@ -23,6 +23,10 @@
 #   LARGE      samples the large cases send (default 10)
 #   LARGE_SIZE the size of their message, in octets: more than a datagram
 #              holds, so that they go as DATA_FRAG (default 300000)
+#   ONLY       run only the cases whose name matches this extended
+#              regular expression (default: all)
+#   LEASE      the liveliness lease of the liveliness cases, in ms
+#              (default 1000)
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -40,6 +44,7 @@ RELIABLE=${RELIABLE:-50}
 KEYED=${KEYED:-30}
 LARGE=${LARGE:-10}
 LARGE_SIZE=${LARGE_SIZE:-300000}
+LEASE=${LEASE:-1000}
 DROP=${DROP:-5}
 PEERS=("$@")
 [ ${#PEERS[@]} -eq 0 ] && PEERS=(cyclonedds fastdds)
@@ -72,10 +77,11 @@ cat "$OUT/versions.txt"
 
 # --- build -----------------------------------------------------------------
 
-log "building rustorb-dds hello_world and keyed"
-cargo build --quiet --example hello_world --example keyed || exit 1
+log "building rustorb-dds hello_world, keyed and liveliness"
+cargo build --quiet --example hello_world --example keyed --example liveliness || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
 RUST_KEYED="$ROOT/target/debug/examples/keyed"
+RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -111,6 +117,7 @@ run_case() {
   shift
   sub=("$@")
   DOMAIN=$((DOMAIN + 1))
+  if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then return; fi
   local dir=$OUT/$name
   rm -rf "$dir"; mkdir -p "$dir"
   local cap_pid=
@@ -196,6 +203,17 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-keyed" \
     "$RUST_KEYED" pub @D@ "$KEYED" 20 -- \
     timeout $((TIMEOUT + 5)) "$K" sub @D@ "$KEYED" "$TIMEOUT"
+  # LIVELINESS: the writer stays alive while asserted, is lost when
+  # silent (manual kinds) and comes back when it writes.
+  L=$BUILD/$peer/liveliness
+  for kind in automatic participant topic; do
+    run_case "$peer-to-rustorb-liveliness-$kind" \
+      "$L" pub @D@ "$kind" "$LEASE" -- \
+      timeout $((TIMEOUT + 5)) "$RUST_LIVELINESS" sub @D@ "$kind" "$LEASE" "$TIMEOUT"
+    run_case "rustorb-to-$peer-liveliness-$kind" \
+      "$RUST_LIVELINESS" pub @D@ "$kind" "$LEASE" -- \
+      timeout $((TIMEOUT + 5)) "$L" sub @D@ "$kind" "$LEASE" "$TIMEOUT"
+  done
 done
 
 printf '%s\n' "${RESULTS[@]}" | tee "$OUT/results.txt"

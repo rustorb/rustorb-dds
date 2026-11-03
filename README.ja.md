@@ -2,7 +2,7 @@
 
 Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://github.com/rustorb/rustorb) プロジェクトの一部です（[English](README.md)）。
 
-**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL の durability、パーティションにも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable と transient-local でも通ります（[interop](interop/)）。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL の durability、パーティション、LIVELINESS と DEADLINE にも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable、transient-local、liveliness でも通ります（[interop](interop/)）。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
 
 hello world は、2 つの端末で次を実行すると試せます。
 

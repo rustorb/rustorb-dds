@@ -632,6 +632,44 @@ impl ReliableWriter {
         out
     }
 
+    /// A HEARTBEAT with the final and liveliness flags to every matched
+    /// reader, reliable or not: what `assert_liveliness` sends for a
+    /// MANUAL_BY_TOPIC writer (8.7.2.2.3). It asks for no reply.
+    pub fn liveliness_heartbeat(&mut self) -> Vec<Outgoing> {
+        let header = Header::new(self.vendor_id, self.guid.prefix);
+        let writer_id = self.guid.entity_id;
+        let first_sn = self
+            .history
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(SequenceNumber(self.last_sn.0 + 1));
+        let mut out = Vec::new();
+        let mut guids: Vec<Guid> = self.readers.keys().copied().collect();
+        guids.sort();
+        for g in guids {
+            let p = &self.readers[&g];
+            let dest = destination(&p.unicast, &p.multicast);
+            let mut b = Batcher::new(header, g.prefix, self.config.max_message_size);
+            self.heartbeat_count = self.heartbeat_count.wrapping_add(1);
+            b.push(
+                Submessage::Heartbeat(Heartbeat {
+                    final_flag: true,
+                    liveliness_flag: true,
+                    reader_id: g.entity_id,
+                    writer_id,
+                    first_sn: first_sn.max(p.start),
+                    last_sn: self.last_sn,
+                    count: Count(self.heartbeat_count),
+                    group_info: None,
+                }),
+                32,
+            );
+            b.finish(&dest, &mut out);
+        }
+        out
+    }
+
     /// When [`Self::poll`] next has something to do, if no message comes
     /// in before.
     pub fn next_deadline(&self) -> Option<Instant> {

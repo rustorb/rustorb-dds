@@ -8,7 +8,8 @@
 //! [`sedp`], built on the reliable writer and reader of [`reliable`], the
 //! message receiver of [`receiver`] and the QoS policies of [`qos`].
 //! Changes too large for a datagram are split into DATA_FRAG and put back
-//! together by [`frag`] (8.4.14.1, rustorb-dds#18).
+//! together by [`frag`] (8.4.14.1, rustorb-dds#18). The Writer Liveliness
+//! Protocol (8.4.13, rustorb-dds#19) is in [`wlp`].
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -59,6 +60,7 @@ mod submessage;
 mod types;
 pub mod udp;
 mod wire;
+pub mod wlp;
 
 pub use error::{DecodeError, EncodeError};
 pub use message::{Header, Message, PROTOCOL_RTPS, Submessages};
