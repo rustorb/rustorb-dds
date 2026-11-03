@@ -14,6 +14,10 @@ pub enum Error {
     AlreadyDeleted,
     /// No more entity ids are left in the participant.
     OutOfResources,
+    /// The operation did not finish in time: a reliable writer had no
+    /// room in its history within `max_blocking_time`, or its readers
+    /// did not acknowledge in time.
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -23,6 +27,7 @@ impl fmt::Display for Error {
             Error::Serialize(e) => write!(f, "cannot serialize the sample: {e}"),
             Error::AlreadyDeleted => f.write_str("the participant was deleted"),
             Error::OutOfResources => f.write_str("no more entity ids"),
+            Error::Timeout => f.write_str("timed out"),
         }
     }
 }

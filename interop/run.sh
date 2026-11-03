@@ -17,6 +17,11 @@
 #   SEND       samples the publisher sends (default 20)
 #   INTERVAL   milliseconds between samples (default 100)
 #   TIMEOUT    seconds a subscriber waits (default 30)
+#   RELIABLE   samples the reliable cases send; the subscriber must get
+#              all of them, in order (default 50)
+#   DROP       in the reliable cases, rustorb-dds drops one in DROP user
+#              datagrams it receives, at random, so that repairs are
+#              exercised in both directions (default 5; 0 drops nothing)
 
 set -u
 cd "$(dirname "$0")/.."
@@ -27,6 +32,8 @@ COUNT=${COUNT:-3}
 SEND=${SEND:-20}
 INTERVAL=${INTERVAL:-100}
 TIMEOUT=${TIMEOUT:-30}
+RELIABLE=${RELIABLE:-50}
+DROP=${DROP:-5}
 PEERS=("$@")
 [ ${#PEERS[@]} -eq 0 ] && PEERS=(cyclonedds fastdds)
 mkdir -p "$OUT" "$BUILD"
@@ -141,6 +148,14 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer" \
     "$RUST" pub @D@ "$SEND" "$INTERVAL" -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+  # Reliable: every sample, in order, with losses on the rustorb side.
+  run_case "$peer-to-rustorb-reliable" \
+    "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+    env RUSTORB_DROP_ONE_IN="$DROP" \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  run_case "rustorb-to-$peer-reliable" \
+    env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
 done
 
 printf '%s\n' "${RESULTS[@]}" | tee "$OUT/results.txt"
