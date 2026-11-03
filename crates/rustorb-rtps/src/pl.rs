@@ -168,6 +168,24 @@ fn bad(id: ParameterId) -> DecodeError {
     DecodeError::InvalidParameterValue(id)
 }
 
+fn read_string(r: &mut Reader<'_>) -> Option<String> {
+    let len = r.u32().ok()? as usize;
+    let bytes = r.bytes(len).ok()?;
+    let bytes = match bytes.split_last() {
+        Some((0, rest)) => rest,
+        Some(_) => return None,
+        // A length of 0 is not valid CDR, but means the empty string.
+        None => bytes,
+    };
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+fn write_string(w: &mut Writer<'_>, v: &str) {
+    w.u32(v.len() as u32 + 1);
+    w.bytes(v.as_bytes());
+    w.bytes(&[0]);
+}
+
 /// Reads parameter values in the byte order of their list.
 #[derive(Clone, Copy, Debug)]
 pub struct PlValues {
@@ -196,16 +214,25 @@ impl PlValues {
 
     /// `string`: length (with the terminating NUL), octets, NUL.
     pub fn string(&self, p: &Parameter) -> Result<String, DecodeError> {
+        read_string(&mut self.reader(p)).ok_or(bad(p.id))
+    }
+
+    /// `sequence<string>`, as in `PartitionQosPolicy`. Each string's
+    /// length is aligned to 4 from the start of the value.
+    pub fn strings(&self, p: &Parameter) -> Result<Vec<String>, DecodeError> {
         let mut r = self.reader(p);
-        let len = r.u32().map_err(|_| bad(p.id))? as usize;
-        let bytes = r.bytes(len).map_err(|_| bad(p.id))?;
-        let bytes = match bytes.split_last() {
-            Some((0, rest)) => rest,
-            Some(_) => return Err(bad(p.id)),
-            // A length of 0 is not valid CDR, but means the empty string.
-            None => bytes,
-        };
-        String::from_utf8(bytes.to_vec()).map_err(|_| bad(p.id))
+        let n = r.u32().map_err(|_| bad(p.id))? as usize;
+        // Each string takes at least 4 octets, which bounds `n`.
+        if n > r.remaining() / 4 {
+            return Err(bad(p.id));
+        }
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let pad = (4 - r.position() % 4) % 4;
+            r.skip(pad).map_err(|_| bad(p.id))?;
+            out.push(read_string(&mut r).ok_or(bad(p.id))?);
+        }
+        Ok(out)
     }
 
     /// `sequence<octet>`.
@@ -282,10 +309,17 @@ impl PlBuilder {
 
     /// `string`.
     pub fn string(&self, id: ParameterId, v: &str) -> Parameter {
+        self.build(id, |w| write_string(w, v))
+    }
+
+    /// `sequence<string>`.
+    pub fn strings(&self, id: ParameterId, v: &[String]) -> Parameter {
         self.build(id, |w| {
-            w.u32(v.len() as u32 + 1);
-            w.bytes(v.as_bytes());
-            w.bytes(&[0]);
+            w.u32(v.len() as u32);
+            for s in v {
+                w.align4();
+                write_string(w, s);
+            }
         })
     }
 
@@ -402,6 +436,15 @@ mod tests {
             [1, 2, 3]
         );
         assert_eq!(v.string(&b.string(pid::DOMAIN_TAG, "")).unwrap(), "");
+        let parts = vec!["a".to_string(), "".to_string(), "xyz12".to_string()];
+        let p = b.strings(pid::PARTITION, &parts);
+        // count, "a\0" + pad, "\0" + pad, "xyz12\0".
+        assert_eq!(p.value.len(), 4 + 8 + 8 + 10);
+        assert_eq!(v.strings(&p).unwrap(), parts);
+        assert!(
+            v.strings(&Parameter::new(pid::PARTITION, [0, 0, 0, 9]))
+                .is_err()
+        );
         let d = Duration {
             seconds: -2,
             fraction: 7,
