@@ -1,0 +1,12 @@
+// std_msgs/msg/String of ROS 2, as ROS 2 puts it on DDS: the message
+// `pkg/msg/Name` is the struct `pkg::msg::dds_::Name_` (the rosidl DDS
+// naming, used by rmw_fastrtps_cpp and rmw_cyclonedds_cpp).
+module std_msgs {
+    module msg {
+        module dds_ {
+            struct String_ {
+                string data;
+            };
+        };
+    };
+};

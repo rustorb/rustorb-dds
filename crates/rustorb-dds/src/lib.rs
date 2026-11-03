@@ -44,7 +44,7 @@
 //! fragments are repaired. Samples are written in XCDR1. Writers and
 //! readers in the same participant are matched with each other too.
 //!
-//! Still to come in D2 (rustorb-dds#15): ROS 2; then the
+//! Data flows with ROS 2 nodes too (the `ros2` example). Next: the
 //! XTypes type information (D3).
 
 mod condition;
