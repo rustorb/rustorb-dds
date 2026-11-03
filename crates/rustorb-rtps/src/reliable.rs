@@ -10,7 +10,12 @@
 //!
 //! Both follow the stateful reference implementation in what they send,
 //! but are written against the requirements of 8.4.2 only. They are used
-//! by SEDP (rustorb-dds#6) and are meant for user endpoints too (D2).
+//! by SEDP (rustorb-dds#6) and by the user endpoints of rustorb-dds
+//! (rustorb-dds#16).
+//!
+//! A [`ReliableWriter`] can also serve best-effort readers (8.4.4: a
+//! RELIABLE writer matches BEST_EFFORT readers too): they are sent each
+//! change once, and no HEARTBEAT, GAP or repair.
 //!
 //! The caller passes in received submessages and the time, calls `poll`
 //! to get the datagrams to send, and waits until `next_deadline`.
@@ -21,7 +26,7 @@ use std::time::{Duration, Instant};
 use crate::message::{Header, Message};
 use crate::parameter::ParameterList;
 use crate::submessage::{
-    AckNack, Data, Gap, Heartbeat, InfoDestination, SerializedPayload, Submessage,
+    AckNack, Data, Gap, Heartbeat, InfoDestination, InfoTimestamp, SerializedPayload, Submessage,
 };
 use crate::types::{
     Count, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, SequenceNumberSet, Time, VendorId,
@@ -71,6 +76,9 @@ struct Batcher {
     max_size: usize,
     messages: Vec<Message>,
     size: usize,
+    /// The source timestamp in force in the last message (8.3.4: INFO_TS
+    /// applies to the submessages after it in the same message).
+    timestamp: Option<Time>,
 }
 
 impl Batcher {
@@ -81,10 +89,33 @@ impl Batcher {
             max_size,
             messages: Vec::new(),
             size: 0,
+            timestamp: None,
         }
     }
 
+    /// Pushes a DATA, preceded by an INFO_TS when its timestamp differs
+    /// from the one in force.
+    fn push_data(&mut self, reader_id: EntityId, c: &Change) {
+        let size = approx_data_size(c) + 12;
+        self.start_if_full(size);
+        if self.timestamp != c.timestamp {
+            self.timestamp = c.timestamp;
+            self.push_unchecked(
+                Submessage::InfoTimestamp(InfoTimestamp {
+                    timestamp: c.timestamp,
+                }),
+                12,
+            );
+        }
+        self.push_unchecked(data(reader_id, c), size - 12);
+    }
+
     fn push(&mut self, sub: Submessage, approx_size: usize) {
+        self.start_if_full(approx_size);
+        self.push_unchecked(sub, approx_size);
+    }
+
+    fn start_if_full(&mut self, approx_size: usize) {
         if self.messages.is_empty() || self.size + approx_size > self.max_size {
             let mut m = Message::new(self.header);
             m.submessages
@@ -93,7 +124,11 @@ impl Batcher {
                 }));
             self.messages.push(m);
             self.size = Header::SIZE + 16;
+            self.timestamp = None;
         }
+    }
+
+    fn push_unchecked(&mut self, sub: Submessage, approx_size: usize) {
         self.size += approx_size;
         self.messages
             .last_mut()
@@ -184,10 +219,31 @@ impl Default for WriterConfig {
     }
 }
 
+/// How a matched reader is served by a [`ReliableWriter`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchedReader {
+    /// The reader's unicast locators.
+    pub unicast: Vec<Locator>,
+    /// Its multicast locators, used when it has no unicast one.
+    pub multicast: Vec<Locator>,
+    /// RELIABLE: the reader gets HEARTBEATs, GAPs and repairs. A
+    /// BEST_EFFORT reader is only sent each change once.
+    pub reliable: bool,
+    /// Whether the reader gets the changes already in the history when it
+    /// is matched (TRANSIENT_LOCAL). Otherwise (VOLATILE) it gets only
+    /// the changes added after, and is told that the earlier ones are not
+    /// relevant to it.
+    pub history: bool,
+}
+
 #[derive(Debug)]
 struct ReaderProxy {
     unicast: Vec<Locator>,
     multicast: Vec<Locator>,
+    reliable: bool,
+    /// The first sequence number relevant to this reader: those before
+    /// were written before it was matched by a VOLATILE writer.
+    start: SequenceNumber,
     /// Every sequence number up to this one has been sent (as DATA or GAP).
     highest_sent: SequenceNumber,
     /// Every sequence number up to this one has been acknowledged.
@@ -241,6 +297,17 @@ impl ReliableWriter {
         inline_qos: Option<ParameterList>,
         payload: Option<SerializedPayload>,
     ) -> SequenceNumber {
+        self.add_change_at(inline_qos, payload, None)
+    }
+
+    /// Like [`Self::add_change`], with a source timestamp that is sent in
+    /// an INFO_TS before the DATA.
+    pub fn add_change_at(
+        &mut self,
+        inline_qos: Option<ParameterList>,
+        payload: Option<SerializedPayload>,
+        timestamp: Option<Time>,
+    ) -> SequenceNumber {
         self.last_sn.0 += 1;
         let sn = self.last_sn;
         self.history.insert(
@@ -250,10 +317,46 @@ impl ReliableWriter {
                 sequence_number: sn,
                 inline_qos,
                 payload,
-                timestamp: None,
+                timestamp,
             },
         );
         sn
+    }
+
+    /// The sequence number of the last change added (0 if none).
+    pub fn last_sn(&self) -> SequenceNumber {
+        self.last_sn
+    }
+
+    /// The number of changes in the history.
+    pub fn len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Whether the history is empty.
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    /// Removes the oldest change; returns its sequence number.
+    pub fn remove_oldest(&mut self) -> Option<SequenceNumber> {
+        self.history.pop_first().map(|(sn, _)| sn)
+    }
+
+    /// Removes the changes that every matched reader has acknowledged
+    /// (or, for a best-effort reader, was sent), which a VOLATILE writer
+    /// no longer needs (8.4.2.3.4). Returns how many were removed.
+    pub fn remove_acknowledged(&mut self) -> usize {
+        let acked = self
+            .readers
+            .values()
+            .map(|r| r.acked)
+            .min()
+            .unwrap_or(self.last_sn);
+        let keep = self.history.split_off(&SequenceNumber(acked.0 + 1));
+        let removed = self.history.len();
+        self.history = keep;
+        removed
     }
 
     /// Removes a change from the history. Readers that have not got it
@@ -267,21 +370,45 @@ impl ReliableWriter {
         self.history.values()
     }
 
-    /// Matches a reader (`matched_reader_add`). It is sent the whole
-    /// history. Matching a reader again only updates its locators.
+    /// Matches a reliable reader (`matched_reader_add`). It is sent the
+    /// whole history. Matching a reader again only updates its locators.
     pub fn add_reader(&mut self, guid: Guid, unicast: Vec<Locator>, multicast: Vec<Locator>) {
+        self.add_matched_reader(
+            guid,
+            MatchedReader {
+                unicast,
+                multicast,
+                reliable: true,
+                history: true,
+            },
+        );
+    }
+
+    /// Matches a reader (`matched_reader_add`), reliable or best-effort.
+    /// Matching a reader again only updates its locators.
+    pub fn add_matched_reader(&mut self, guid: Guid, m: MatchedReader) {
+        // A VOLATILE writer starts the reader after what is written now
+        // (the filter applied when the proxy is made, 8.4.9.2 T1).
+        let start = if m.history {
+            SequenceNumber(1)
+        } else {
+            SequenceNumber(self.last_sn.0 + 1)
+        };
+        let before = SequenceNumber(start.0 - 1);
         let p = self.readers.entry(guid).or_insert(ReaderProxy {
             unicast: Vec::new(),
             multicast: Vec::new(),
-            highest_sent: SequenceNumber(0),
-            acked: SequenceNumber(0),
+            reliable: m.reliable,
+            start,
+            highest_sent: before,
+            acked: before,
             requested: BTreeSet::new(),
             repair_at: None,
             last_acknack: None,
             heartbeat_due: false,
         });
-        p.unicast = unicast;
-        p.multicast = multicast;
+        p.unicast = m.unicast;
+        p.multicast = m.multicast;
     }
 
     /// Unmatches a reader (`matched_reader_remove`).
@@ -299,16 +426,25 @@ impl ReliableWriter {
         self.readers.keys()
     }
 
-    /// Whether every matched reader has acknowledged `sn`.
+    /// Whether every matched reader has acknowledged `sn` (a best-effort
+    /// reader, once it was sent).
     pub fn is_acked_by_all(&self, sn: SequenceNumber) -> bool {
         self.readers.values().all(|r| r.acked >= sn)
+    }
+
+    /// Whether every matched reliable reader has acknowledged every
+    /// change written so far (what `wait_for_acknowledgments` waits for).
+    pub fn is_all_acked(&self) -> bool {
+        self.readers
+            .values()
+            .all(|r| !r.reliable || r.acked >= self.last_sn)
     }
 
     /// Handles an ACKNACK from `reader` (8.4.9.2.8). Duplicates (a count
     /// not above the last one) and ACKNACKs from unmatched readers are
     /// ignored.
     pub fn handle_acknack(&mut self, reader: Guid, a: &AckNack, now: Instant) {
-        let Some(p) = self.readers.get_mut(&reader) else {
+        let Some(p) = self.readers.get_mut(&reader).filter(|p| p.reliable) else {
             return;
         };
         if p.last_acknack.is_some_and(|c| a.count.0 <= c.0) {
@@ -353,21 +489,35 @@ impl ReliableWriter {
         let mut guids: Vec<Guid> = self.readers.keys().copied().collect();
         guids.sort();
         for g in guids {
-            let mut subs = Vec::new();
-            let mut sent_something = false;
             let p = self.readers.get_mut(&g).expect("listed above");
+            let dest = destination(&p.unicast, &p.multicast);
+            let mut b = Batcher::new(header, g.prefix, self.config.max_message_size);
+            if !p.reliable {
+                // Best effort: each new change once, nothing else.
+                if p.highest_sent < self.last_sn {
+                    let from = SequenceNumber(p.highest_sent.0 + 1);
+                    for c in self.history.range(from..).map(|(_, c)| c) {
+                        b.push_data(g.entity_id, c);
+                    }
+                    p.highest_sent = self.last_sn;
+                    p.acked = self.last_sn;
+                }
+                b.finish(&dest, &mut out);
+                continue;
+            }
+            let mut sent_something = false;
             // Repairs.
             if p.repair_at.is_some_and(|t| t <= now) {
                 p.repair_at = None;
                 let mut missing = Vec::new();
                 for sn in std::mem::take(&mut p.requested) {
-                    match self.history.get(&sn) {
-                        Some(c) => subs.push((data(g.entity_id, c), approx_data_size(c))),
+                    match self.history.get(&sn).filter(|_| sn >= p.start) {
+                        Some(c) => b.push_data(g.entity_id, c),
                         None => missing.push(sn),
                     }
                 }
                 for s in gaps(g.entity_id, writer_id, &missing) {
-                    subs.push((s, 32));
+                    b.push(s, 32);
                 }
                 sent_something = true;
             }
@@ -376,16 +526,16 @@ impl ReliableWriter {
                 let mut next = SequenceNumber(p.highest_sent.0 + 1);
                 for (sn, c) in self.history.range(next..) {
                     if *sn > next {
-                        subs.push((
+                        b.push(
                             gap(g.entity_id, writer_id, next, SequenceNumber(sn.0 - 1)),
                             32,
-                        ));
+                        );
                     }
-                    subs.push((data(g.entity_id, c), approx_data_size(c)));
+                    b.push_data(g.entity_id, c);
                     next = SequenceNumber(sn.0 + 1);
                 }
                 if next <= self.last_sn {
-                    subs.push((gap(g.entity_id, writer_id, next, self.last_sn), 32));
+                    b.push(gap(g.entity_id, writer_id, next, self.last_sn), 32);
                 }
                 p.highest_sent = self.last_sn;
                 sent_something = true;
@@ -393,29 +543,23 @@ impl ReliableWriter {
             let unacked = p.acked < self.last_sn;
             let want_hb = p.heartbeat_due || sent_something || (periodic && unacked);
             p.heartbeat_due = false;
-            let dest = destination(&p.unicast, &p.multicast);
             if want_hb {
                 // A HEARTBEAT after data asks the reader to answer, so it
-                // can ask for what it missed (final flag not set).
+                // can ask for what it missed (final flag not set). What
+                // was written before a VOLATILE match is not available to
+                // this reader.
                 self.heartbeat_count = self.heartbeat_count.wrapping_add(1);
                 let hb = Heartbeat {
                     final_flag: !unacked,
                     liveliness_flag: false,
                     reader_id: g.entity_id,
                     writer_id,
-                    first_sn,
+                    first_sn: first_sn.max(p.start),
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
                 };
-                subs.push((Submessage::Heartbeat(hb), 32));
-            }
-            if subs.is_empty() {
-                continue;
-            }
-            let mut b = Batcher::new(header, g.prefix, self.config.max_message_size);
-            for (s, size) in subs {
-                b.push(s, size);
+                b.push(Submessage::Heartbeat(hb), 32);
             }
             b.finish(&dest, &mut out);
         }
@@ -435,7 +579,11 @@ impl ReliableWriter {
                 take(Instant::now());
             }
         }
-        if self.readers.values().any(|p| p.acked < self.last_sn) {
+        if self
+            .readers
+            .values()
+            .any(|p| p.reliable && p.acked < self.last_sn)
+        {
             if let Some(t) = self.next_heartbeat {
                 take(t);
             }
@@ -981,5 +1129,164 @@ mod tests {
         w.remove_reader(&rguid(2));
         w.remove_readers_of(&rguid(3).prefix);
         assert_eq!(w.readers().count(), 0);
+    }
+
+    #[test]
+    fn best_effort_reader_gets_each_change_once() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        let m = MatchedReader {
+            unicast: loc(2),
+            multicast: vec![],
+            reliable: false,
+            history: false,
+        };
+        w.add_matched_reader(rguid(2), m);
+        w.add_change(None, payload(1));
+        w.add_change(None, payload(2));
+        w.remove_change(SequenceNumber(1));
+        let s = subs(&w.poll(t));
+        // DATA only: no GAP for 1 and no HEARTBEAT.
+        assert_eq!(s.len(), 1);
+        assert!(matches!(&s[0], Submessage::Data(d) if d.writer_sn == SequenceNumber(2)));
+        assert!(w.is_all_acked());
+        assert!(w.is_acked_by_all(SequenceNumber(2)));
+        assert!(w.poll(t + Duration::from_secs(5)).is_empty());
+        assert_eq!(w.next_deadline(), None);
+        // ACKNACKs from it are ignored.
+        let set = SequenceNumberSet::new(SequenceNumber(1), 1).unwrap();
+        w.handle_acknack(
+            rguid(2),
+            &AckNack {
+                final_flag: false,
+                reader_id: rguid(2).entity_id,
+                writer_id: wguid().entity_id,
+                reader_sn_state: set,
+                count: Count(1),
+            },
+            t,
+        );
+        assert!(w.poll(t).is_empty());
+        assert_eq!(w.remove_acknowledged(), 1);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn volatile_match_starts_after_the_history() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.add_reader(rguid(2), loc(2), vec![]);
+        for i in 1..=3 {
+            w.add_change(None, payload(i));
+        }
+        w.poll(t);
+        // Reader 2 has not acknowledged, so 1..=3 stay in the history.
+        assert_eq!(w.remove_acknowledged(), 0);
+        let mut r = ReliableReader::new(rguid(3), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        let m = MatchedReader {
+            unicast: loc(3),
+            multicast: vec![],
+            reliable: true,
+            history: false,
+        };
+        w.add_matched_reader(rguid(3), m);
+        // Nothing is sent to it for 1..=3, and its early ACKNACK (which
+        // acknowledges nothing) does not bring them either.
+        acknacks(&mut w, &r.poll(t), t);
+        assert!(w.poll(t).iter().all(|o| o.locators != loc(3)));
+        // A request for 2 anyway is not answered with the DATA: for this
+        // reader, 1..=3 count as acknowledged.
+        let mut set = SequenceNumberSet::new(SequenceNumber(1), 4).unwrap();
+        set.insert(SequenceNumber(2));
+        w.handle_acknack(
+            rguid(3),
+            &AckNack {
+                final_flag: true,
+                reader_id: rguid(3).entity_id,
+                writer_id: wguid().entity_id,
+                reader_sn_state: set,
+                count: Count(100),
+            },
+            t,
+        );
+        assert!(
+            subs(
+                &w.poll(t)
+                    .into_iter()
+                    .filter(|o| o.locators == loc(3))
+                    .collect::<Vec<_>>()
+            )
+            .iter()
+            .all(|s| !matches!(s, Submessage::Data(_)))
+        );
+        // New changes reach it, with a HEARTBEAT that starts after 3.
+        w.add_change(None, payload(4));
+        let out: Vec<Outgoing> = w
+            .poll(t)
+            .into_iter()
+            .filter(|o| o.locators == loc(3))
+            .collect();
+        assert!(subs(&out).iter().any(|s| matches!(s,
+            Submessage::Heartbeat(h) if h.first_sn == SequenceNumber(4)
+                && h.last_sn == SequenceNumber(4))));
+        let got = deliver(&mut r, &out, &[], t);
+        let sns: Vec<i64> = got.iter().map(|c| c.sequence_number.0).collect();
+        assert_eq!(sns, [4]);
+        let Submessage::AckNack(a) = &subs(&r.poll(t))[0] else {
+            panic!()
+        };
+        assert_eq!(a.reader_sn_state.base(), SequenceNumber(5));
+        assert!(a.final_flag);
+    }
+
+    #[test]
+    fn timestamps_go_in_info_ts() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.add_reader(rguid(2), loc(2), vec![]);
+        let ts = Time {
+            seconds: 10,
+            fraction: 0,
+        };
+        w.add_change_at(None, payload(1), Some(ts));
+        w.add_change_at(None, payload(2), Some(ts));
+        w.add_change(None, payload(3));
+        let out = w.poll(t);
+        let m = Message::decode(&out[0].bytes).unwrap();
+        let kinds: Vec<String> = m
+            .submessages
+            .iter()
+            .map(|s| match s {
+                Submessage::InfoDestination(_) => "dst".to_owned(),
+                Submessage::InfoTimestamp(i) => format!("ts {:?}", i.timestamp.map(|t| t.seconds)),
+                Submessage::Data(d) => format!("data {}", d.writer_sn.0),
+                Submessage::Heartbeat(_) => "hb".to_owned(),
+                _ => "other".to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "dst",
+                "ts Some(10)",
+                "data 1",
+                "data 2",
+                "ts None",
+                "data 3",
+                "hb"
+            ]
+        );
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        let got = crate::receiver::receive(&out[0].bytes, rguid(2).prefix)
+            .unwrap()
+            .1;
+        let stamps: Vec<Option<Time>> = got
+            .iter()
+            .filter(|x| matches!(x.submessage, Submessage::Data(_)))
+            .map(|x| x.timestamp)
+            .collect();
+        assert_eq!(stamps, [Some(ts), Some(ts), None]);
     }
 }

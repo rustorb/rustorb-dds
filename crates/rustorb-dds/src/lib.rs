@@ -25,26 +25,30 @@
 //! # }
 //! ```
 //!
-//! What works now (rustorb/rustorb#111, stage D1): discovery with SPDP
-//! and SEDP, and BEST_EFFORT, VOLATILE writers and readers in the default
-//! partition, over UDPv4. Samples are written in XCDR1. Writers and
-//! readers in the same participant are matched with each other too.
+//! What works now (rustorb/rustorb#111, stages D1 and part of D2):
+//! discovery with SPDP and SEDP, and RELIABLE or BEST_EFFORT, VOLATILE
+//! writers and readers in the default partition, over UDPv4. Samples are
+//! written in XCDR1. Writers and readers in the same participant are
+//! matched with each other too.
 //!
-//! Still to come: dispose and unregister, instances, more QoS (reliable
-//! delivery and durability in D2), partitions in the API, DATA_FRAG for
-//! samples larger than a datagram, and the XTypes type information (D3).
+//! Still to come in D2 (rustorb-dds#15): dispose and unregister,
+//! instances, more QoS (durability, liveliness, deadline, partitions in
+//! the API), DATA_FRAG for samples larger than a datagram, WaitSets; then
+//! the XTypes type information (D3).
 
 mod error;
 mod participant;
 mod publisher;
+mod qos;
 mod subscriber;
 mod topic;
-mod wire;
 
 pub use error::{Error, Result};
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher};
+pub use qos::{DataReaderQos, DataWriterQos, History, Reliability, ResourceLimits};
+pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
-pub use subscriber::{DataReader, DataReaderQos, History, Sample, SampleInfo, Subscriber};
+pub use subscriber::{DataReader, Sample, SampleInfo, Subscriber};
 pub use topic::Topic;

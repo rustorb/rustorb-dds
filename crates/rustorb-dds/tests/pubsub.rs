@@ -29,6 +29,7 @@ fn greeting(index: u32) -> Greeting {
 fn keep_all() -> DataReaderQos {
     DataReaderQos {
         history: History::KeepAll,
+        ..DataReaderQos::default()
     }
 }
 
@@ -104,6 +105,7 @@ fn keep_last_keeps_the_newest() {
     let topic = p.create_topic::<Greeting>("depth").unwrap();
     let qos = DataReaderQos {
         history: History::KeepLast(2),
+        ..DataReaderQos::default()
     };
     let reader = p
         .create_subscriber()

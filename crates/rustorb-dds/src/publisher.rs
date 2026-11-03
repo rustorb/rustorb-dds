@@ -4,13 +4,13 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rustorb_rtps::qos::{Reliability, ReliabilityKind};
 use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, entity_kind};
 use rustorb_typesupport::{ByteOrder, Encoding, TopicType};
 
 use crate::error::Result;
 use crate::participant::Shared;
+use crate::qos::DataWriterQos;
 use crate::topic::Topic;
 
 /// A DDS publisher (DDS 1.4, 2.2.2.4.1): creates data writers.
@@ -29,12 +29,24 @@ impl Publisher {
         Publisher { shared }
     }
 
+    /// Creates a writer for `topic` with the default QoS: RELIABLE,
+    /// KEEP_LAST(1), VOLATILE.
+    pub fn create_datawriter<T: TopicType>(&self, topic: &Topic<T>) -> Result<DataWriter<T>> {
+        self.create_datawriter_with_qos(topic, DataWriterQos::default())
+    }
+
     /// Creates a writer for `topic`.
     ///
-    /// For now writers are BEST_EFFORT and VOLATILE: samples are sent once
-    /// to the readers matched at the time of the write. Reliable writers
-    /// come in a later stage (rustorb/rustorb#111, D2).
-    pub fn create_datawriter<T: TopicType>(&self, topic: &Topic<T>) -> Result<DataWriter<T>> {
+    /// Writers are VOLATILE: a reader gets the samples written after it
+    /// was matched. A RELIABLE writer keeps samples until its reliable
+    /// readers acknowledge them, and sends them again when asked; it also
+    /// serves BEST_EFFORT readers. A BEST_EFFORT writer sends each sample
+    /// once and matches only BEST_EFFORT readers.
+    pub fn create_datawriter_with_qos<T: TopicType>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataWriterQos,
+    ) -> Result<DataWriter<T>> {
         let kind = if T::KEYED {
             entity_kind::USER_WRITER_WITH_KEY
         } else {
@@ -42,11 +54,8 @@ impl Publisher {
         };
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::writer(guid, topic.name(), T::TYPE_NAME);
-        data.reliability = Reliability {
-            kind: ReliabilityKind::BestEffort,
-            ..Reliability::writer_default()
-        };
-        self.shared.add_writer(data)?;
+        data.reliability = qos.reliability.to_rtps();
+        self.shared.add_writer(data, qos)?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
@@ -81,6 +90,11 @@ impl<T: TopicType> DataWriter<T> {
 
     /// Publishes a sample: serializes it in XCDR1 (in the host's byte
     /// order) and sends it to every matched reader.
+    ///
+    /// A RELIABLE writer with KEEP_ALL history and `max_samples` set
+    /// waits, when its history is full, for its readers to acknowledge
+    /// samples; after `max_blocking_time` it fails with
+    /// [`Error::Timeout`](crate::Error::Timeout).
     pub fn write(&self, sample: &T) -> Result<()> {
         let payload = sample.to_payload(Encoding::Xcdr1, ByteOrder::NATIVE)?;
         let key_hash = if T::KEYED {
@@ -89,6 +103,14 @@ impl<T: TopicType> DataWriter<T> {
             None
         };
         self.shared.write(self.guid, payload, key_hash)
+    }
+
+    /// Waits until every matched RELIABLE reader has acknowledged every
+    /// sample written (`wait_for_acknowledgments`). Fails with
+    /// [`Error::Timeout`](crate::Error::Timeout) if `max_wait` passes
+    /// first.
+    pub fn wait_for_acknowledgments(&self, max_wait: Duration) -> Result<()> {
+        self.shared.wait_for_acknowledgments(&self.guid, max_wait)
     }
 
     /// The readers matched now (`get_matched_subscriptions`).

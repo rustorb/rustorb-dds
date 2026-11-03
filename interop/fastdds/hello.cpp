@@ -1,12 +1,16 @@
 // Hello world publisher and subscriber for Fast DDS, written against its
 // public C++ API only. Used by interop/run.sh.
 //
-//   hello pub <domain> <count> <interval_ms>
-//   hello sub <domain> <count> <timeout_s>
+//   hello pub <domain> <count> <interval_ms> [best_effort|reliable]
+//   hello sub <domain> <count> <timeout_s> [best_effort|reliable]
 //
 // The publisher waits for a matched reader, then writes <count> samples.
 // The subscriber exits with 0 after <count> valid samples, with 1 on
 // timeout.
+//
+// Best effort by default. When reliable, both sides keep every sample
+// (KEEP_ALL), the publisher waits for acknowledgments before it exits and
+// the subscriber checks that it gets 1, 2, 3... with none missing.
 
 #include <chrono>
 #include <cstdio>
@@ -28,12 +32,18 @@
 using namespace eprosima::fastdds::dds;
 
 static const char* MESSAGE = "Hello, world!";
+static bool reliable = false;
 
 static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_ms)
 {
     Publisher* pub = pp->create_publisher(PUBLISHER_QOS_DEFAULT);
     DataWriterQos qos = DATAWRITER_QOS_DEFAULT;
-    qos.reliability().kind = BEST_EFFORT_RELIABILITY_QOS;
+    if (reliable) {
+        qos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+        qos.history().kind = KEEP_ALL_HISTORY_QOS;
+    } else {
+        qos.reliability().kind = BEST_EFFORT_RELIABILITY_QOS;
+    }
     DataWriter* writer = pub->create_datawriter(topic, qos);
     if (writer == nullptr) {
         std::fprintf(stderr, "fastdds: create_datawriter failed\n");
@@ -61,6 +71,14 @@ static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_
         std::fflush(stdout);
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
+    if (reliable) {
+        if (writer->wait_for_acknowledgments(eprosima::fastrtps::Duration_t(30, 0)) !=
+            ReturnCode_t::RETCODE_OK) {
+            std::fprintf(stderr, "fastdds: wait_for_acknowledgments failed\n");
+            return 1;
+        }
+        std::printf("fastdds: all acknowledged\n");
+    }
     return 0;
 }
 
@@ -68,7 +86,7 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
 {
     Subscriber* sub = pp->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
     DataReaderQos qos = DATAREADER_QOS_DEFAULT;
-    qos.reliability().kind = BEST_EFFORT_RELIABILITY_QOS;
+    qos.reliability().kind = reliable ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
     qos.history().kind = KEEP_ALL_HISTORY_QOS;
     DataReader* reader = sub->create_datareader(topic, qos);
     if (reader == nullptr) {
@@ -91,6 +109,10 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
             std::printf("fastdds: received %u\n", g.index());
             std::fflush(stdout);
             got++;
+            if (reliable && g.index() != static_cast<uint32_t>(got)) {
+                std::fprintf(stderr, "fastdds: expected %d, got %u\n", got, g.index());
+                return 1;
+            }
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -104,10 +126,13 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
 
 int main(int argc, char** argv)
 {
-    if (argc != 5) {
-        std::fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s>\n", argv[0]);
+    if (argc != 5 && argc != 6) {
+        std::fprintf(stderr,
+                     "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable]\n",
+                     argv[0]);
         return 2;
     }
+    reliable = argc == 6 && std::string(argv[5]) == "reliable";
     int domain = std::atoi(argv[2]);
     int count = std::atoi(argv[3]);
     int arg = std::atoi(argv[4]);

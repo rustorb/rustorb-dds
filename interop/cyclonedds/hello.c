@@ -2,12 +2,16 @@
  * Hello world publisher and subscriber for Cyclone DDS, written against
  * its public C API only. Used by interop/run.sh.
  *
- *   hello pub <domain> <count> <interval_ms>
- *   hello sub <domain> <count> <timeout_s>
+ *   hello pub <domain> <count> <interval_ms> [best_effort|reliable]
+ *   hello sub <domain> <count> <timeout_s> [best_effort|reliable]
  *
  * The publisher waits for a matched reader, then writes <count> samples.
  * The subscriber exits with 0 after <count> valid samples, with 1 on
  * timeout.
+ *
+ * Best effort by default. When reliable, both sides keep every sample
+ * (KEEP_ALL), the publisher waits for acknowledgments before it exits and
+ * the subscriber checks that it gets 1, 2, 3... with none missing.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,10 +21,22 @@
 
 #define MESSAGE "Hello, world!"
 
+static int reliable = 0;
+
+static void set_reliability(dds_qos_t *qos)
+{
+  if (reliable) {
+    dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
+    dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, 0);
+  } else {
+    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+  }
+}
+
 static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_ms)
 {
   dds_qos_t *qos = dds_create_qos();
-  dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+  set_reliability(qos);
   dds_entity_t writer = dds_create_writer(pp, topic, qos, NULL);
   dds_delete_qos(qos);
   if (writer < 0) {
@@ -48,13 +64,21 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
     fflush(stdout);
     dds_sleepfor(DDS_MSECS(interval_ms));
   }
+  if (reliable) {
+    dds_return_t rc = dds_wait_for_acks(writer, DDS_SECS(30));
+    if (rc != DDS_RETCODE_OK) {
+      fprintf(stderr, "cyclonedds: wait_for_acks: %s\n", dds_strretcode(-rc));
+      return 1;
+    }
+    printf("cyclonedds: all acknowledged\n");
+  }
   return 0;
 }
 
 static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout_s)
 {
   dds_qos_t *qos = dds_create_qos();
-  dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+  set_reliability(qos);
   dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, 0);
   dds_entity_t reader = dds_create_reader(pp, topic, qos, NULL);
   dds_delete_qos(qos);
@@ -78,6 +102,10 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
       printf("cyclonedds: received %u\n", (unsigned)g->index);
       fflush(stdout);
       got++;
+      if (reliable && g->index != (uint32_t)got) {
+        fprintf(stderr, "cyclonedds: expected %d, got %u\n", got, (unsigned)g->index);
+        return 1;
+      }
     } else {
       dds_sleepfor(DDS_MSECS(20));
     }
@@ -92,10 +120,11 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
 
 int main(int argc, char **argv)
 {
-  if (argc != 5) {
-    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s>\n", argv[0]);
+  if (argc != 5 && argc != 6) {
+    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable]\n", argv[0]);
     return 2;
   }
+  reliable = argc == 6 && strcmp(argv[5], "reliable") == 0;
   dds_domainid_t domain = (dds_domainid_t)atoi(argv[2]);
   int count = atoi(argv[3]);
   int arg = atoi(argv[4]);

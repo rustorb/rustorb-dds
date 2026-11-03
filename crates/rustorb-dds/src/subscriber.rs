@@ -10,35 +10,8 @@ use rustorb_typesupport::TopicType;
 
 use crate::error::Result;
 use crate::participant::{RawSample, Shared};
+use crate::qos::DataReaderQos;
 use crate::topic::Topic;
-
-/// The HISTORY of a reader (DDS 1.4, 2.2.3.18): how many samples it keeps
-/// until they are taken.
-///
-/// For now the depth applies to the whole reader, not to each instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum History {
-    /// Keep the latest `n` samples (at least 1).
-    KeepLast(usize),
-    /// Keep every sample until it is taken.
-    KeepAll,
-}
-
-impl Default for History {
-    /// `KEEP_LAST` with depth 1, the DDS default.
-    fn default() -> Self {
-        History::KeepLast(1)
-    }
-}
-
-/// The QoS of a [`DataReader`] that can be set for now.
-///
-/// Readers are BEST_EFFORT and VOLATILE.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DataReaderQos {
-    /// HISTORY.
-    pub history: History,
-}
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
 pub struct Subscriber {
@@ -56,12 +29,18 @@ impl Subscriber {
         Subscriber { shared }
     }
 
-    /// Creates a reader for `topic` with the default QoS.
+    /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
+    /// KEEP_LAST(1), VOLATILE.
     pub fn create_datareader<T: TopicType>(&self, topic: &Topic<T>) -> Result<DataReader<T>> {
         self.create_datareader_with_qos(topic, DataReaderQos::default())
     }
 
     /// Creates a reader for `topic`.
+    ///
+    /// A RELIABLE reader gets the samples of each writer in order and
+    /// without gaps, asking for those lost on the way; it matches only
+    /// RELIABLE writers. A BEST_EFFORT reader takes what arrives, in
+    /// order, and matches any writer.
     pub fn create_datareader_with_qos<T: TopicType>(
         &self,
         topic: &Topic<T>,
@@ -73,8 +52,9 @@ impl Subscriber {
             entity_kind::USER_READER_NO_KEY
         };
         let guid = self.shared.new_guid(kind)?;
-        let data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
-        self.shared.add_reader(data, qos.history)?;
+        let mut data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
+        data.reliability = qos.reliability.to_rtps();
+        self.shared.add_reader(data, qos)?;
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,
