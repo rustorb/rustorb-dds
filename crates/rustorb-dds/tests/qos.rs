@@ -162,7 +162,10 @@ fn incompatible_qos_is_counted() {
     let remote = b
         .create_subscriber()
         .unwrap()
-        .create_datareader_with_qos(&b.create_topic::<Greeting>("i").unwrap(), reader_qos)
+        .create_datareader_with_qos(
+            &b.create_topic::<Greeting>("i").unwrap(),
+            reader_qos.clone(),
+        )
         .unwrap();
     let local = a
         .create_subscriber()

@@ -159,7 +159,7 @@ pub struct SubscriberQos {
 }
 
 /// The QoS of a [`crate::DataWriter`] that can be set for now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataWriterQos {
     /// RELIABILITY; RELIABLE by default.
     pub reliability: Reliability,
@@ -188,6 +188,10 @@ pub struct DataWriterQos {
     /// ([`crate::DataWriter::liveliness_lost_status`]) when its lease
     /// passes without that.
     pub liveliness: Liveliness,
+    /// USER_DATA (DDS 1.4, 2.2.3.1): octets the writer announces to the
+    /// other participants, for the application. Empty by default. ROS 2
+    /// reads `typehash=...;` here.
+    pub user_data: Vec<u8>,
 }
 
 impl Default for DataWriterQos {
@@ -201,12 +205,13 @@ impl Default for DataWriterQos {
             durability: DurabilityKind::Volatile,
             deadline: None,
             liveliness: Liveliness::default(),
+            user_data: Vec::new(),
         }
     }
 }
 
 /// The QoS of a [`crate::DataReader`] that can be set for now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataReaderQos {
     /// RELIABILITY; BEST_EFFORT by default.
     pub reliability: Reliability,
@@ -226,6 +231,9 @@ pub struct DataReaderQos {
     /// liveliness count in [`crate::DataReader::liveliness_changed_status`],
     /// and the instances only they wrote become NOT_ALIVE_NO_WRITERS.
     pub liveliness: Liveliness,
+    /// USER_DATA: octets the reader announces to the other
+    /// participants. Empty by default.
+    pub user_data: Vec<u8>,
 }
 
 impl Default for DataReaderQos {
@@ -238,6 +246,7 @@ impl Default for DataReaderQos {
             durability: DurabilityKind::Volatile,
             deadline: None,
             liveliness: Liveliness::default(),
+            user_data: Vec::new(),
         }
     }
 }

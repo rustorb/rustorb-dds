@@ -102,6 +102,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#18 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 20 cases pass |
 | 2026-11-03 | rustorb-dds#19 (part 1) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 24 cases pass |
 | 2026-11-03 | rustorb-dds#19 (part 2) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
+| 2026-11-03 | rustorb-dds#20 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 
 Found on the way:
 
@@ -170,3 +171,56 @@ Found on the way:
   set to a third of the lease here). The locators it announces include
   some that are not UDPv4; a MANUAL_BY_TOPIC liveliness HEARTBEAT that
   cannot be sent to those is skipped, as a write's DATA is.
+
+## ROS 2
+
+`ros2.sh` runs ROS 2's demo talker and listener (`demo_nodes_cpp`, topic
+`/chatter` of type `std_msgs/msg/String`) against the `ros2` example of
+the `rustorb-dds` crate, in both directions, with each ROS 2 middleware:
+`rmw_fastrtps_cpp` (Fast DDS) and `rmw_cyclonedds_cpp` (Cyclone DDS)
+(rustorb-dds#21). ROS 2 is a black box: its programs as distributed.
+
+```sh
+source /opt/ros/jazzy/setup.bash
+interop/ros2.sh
+RMWS=rmw_fastrtps_cpp interop/ros2.sh    # one middleware
+```
+
+ROS 2 Jazzy comes from the ROS 2 packages for Ubuntu 24.04
+(`ros-jazzy-demo-nodes-cpp`, `ros-jazzy-rmw-fastrtps-cpp`,
+`ros-jazzy-rmw-cyclonedds-cpp` from packages.ros.org), or from the
+`osrf/ros:jazzy-desktop` container image, which has rmw_fastrtps_cpp only.
+In a container, run with `--network host` and give the example built on
+the host in `RUST`. A rustorb-dds listener must hear `COUNT` messages
+(default 5) from the ROS 2 talker; the ROS 2 listener must hear all
+`COUNT` messages of the rustorb-dds talker, in order. The CI job `ros2`
+runs the script and keeps the logs as an artifact.
+
+What a ROS 2 (Jazzy) node puts on DDS, seen from outside (with
+`ros2 topic info -v` and in captures):
+
+- A topic `/name` is the DDS topic `rt/name` (services use `rq/` and
+  `rr/`). A message type `pkg/msg/Name` is the DDS type
+  `pkg::msg::dds_::Name_`; `idl/String.idl` declares `std_msgs/msg/String`
+  in that form, and the example's type is what `rustorb-idl -brust
+  -Wbdds_only` generates from it. The type is not keyed.
+- The demo talker and listener use the default profile: RELIABLE,
+  VOLATILE, KEEP_LAST(10). History depth is not sent over DDS:
+  `ros2 topic info -v` shows `UNKNOWN` for it.
+- Each participant announces `enclave=/;` in its USER_DATA. Each writer
+  and reader announces `typehash=RIHS01_<sha256>;` in its USER_DATA, the
+  hash of its type's description (`RIHS01_df668c74...6b1a18` for
+  `std_msgs/msg/String`). Matching does not need either: without them,
+  ROS 2 shows the endpoint's type hash as `INVALID` and its node as
+  `_CREATED_BY_BARE_DDS_APP_`; with them, the hash, and the node as
+  `_NODE_NAME_UNKNOWN_`. The node name and namespace come from the topic
+  `ros_discovery_info` (type `rmw_dds_common::msg::dds_::ParticipantEntitiesInfo_`),
+  which the example does not write.
+- The demo talker starts publishing at once, so a listener that matches
+  it late misses the first messages; the example's talker waits for a
+  listener first.
+
+| Date | rustorb-dds | ROS 2 | Result |
+|---|---|---|---|
+| 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.6), `osrf/ros:jazzy-desktop` | both cases pass |
+| 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.7) and rmw_cyclonedds_cpp 2.2.4 (Cyclone DDS 0.10.5), CI job `ros2` | all 4 cases pass |

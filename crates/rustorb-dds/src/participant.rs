@@ -62,6 +62,10 @@ pub struct ParticipantConfig {
     /// HEARTBEAT, GAP, ACKNACK) at random, one in `n` on average, as if
     /// they were lost on the way. `None`, the default, drops nothing.
     pub drop_one_in: Option<u32>,
+    /// USER_DATA of the participant (DDS 1.4, 2.2.3.1): octets announced
+    /// to the other participants with SPDP. Empty by default. ROS 2
+    /// announces `enclave=/;` here.
+    pub user_data: Vec<u8>,
 }
 
 impl ParticipantConfig {
@@ -83,6 +87,7 @@ impl ParticipantConfig {
             },
             reader: ReaderConfig::default(),
             drop_one_in: None,
+            user_data: Vec::new(),
         }
     }
 
@@ -1003,6 +1008,8 @@ impl Shared {
             let guid = data.guid;
             let now = Instant::now();
             let rtps = ReliableWriter::new(guid, VENDOR_ID, inner.writer_config.clone());
+            let liveliness_kind = qos.liveliness.kind;
+            let deadline = qos.deadline;
             let mut w = WriterState {
                 data: data.clone(),
                 qos,
@@ -1015,7 +1022,7 @@ impl Shared {
                 last_asserted: now,
                 alive: true,
                 liveliness_lost: LivelinessLostStatus::default(),
-                deadlines: Deadlines::new(qos.deadline),
+                deadlines: Deadlines::new(deadline),
                 matched_status: MatchedStatus::default(),
                 changes: StatusMask::NONE,
                 enabled: StatusMask::ALL,
@@ -1032,7 +1039,7 @@ impl Shared {
                         if r.add_match(guid) {
                             k |= StatusMask::SUBSCRIPTION_MATCHED;
                         }
-                        if r.writer_matched(guid, qos.liveliness.kind, lease, now) {
+                        if r.writer_matched(guid, liveliness_kind, lease, now) {
                             k |= StatusMask::LIVELINESS_CHANGED;
                         }
                         inner.pending.push((*rg, k));
@@ -1474,6 +1481,7 @@ impl DomainParticipant {
         data.default_unicast_locators = transport.user_unicast_locators();
         data.default_multicast_locators = transport.user_multicast_locators();
         data.lease_duration = rustorb_rtps::Duration::from_std(config.lease_duration);
+        data.user_data = config.user_data.clone();
         let mut spdp_config = SpdpConfig::new(domain_id, transport.discovery_multicast_locators());
         spdp_config.announce_period = config.announce_period;
         let inner = Inner {

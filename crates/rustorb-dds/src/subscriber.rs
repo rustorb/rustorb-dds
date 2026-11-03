@@ -74,6 +74,7 @@ impl Subscriber {
         data.durability = qos.durability;
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
+        data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
         self.shared
             .add_reader(data, qos, Arc::new(Typed::<T>::new()))?;
