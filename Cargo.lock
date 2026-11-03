@@ -10,14 +10,16 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "rustorb-cdr"
-version = "0.1.1"
-source = "git+https://github.com/rustorb/rustorb?branch=main#6200bb04f224a52541a237a7e19cc1ffb0311b32"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4a04f61a080b2c9b42b9c79d4bcc0ea2fd4a8168c0602fdee919edd5e6e60e8"
 
 [[package]]
 name = "rustorb-dds"
 version = "0.0.0"
 dependencies = [
  "rustorb-rtps",
+ "rustorb-typesupport",
  "rustorb-xtypes",
 ]
 
@@ -27,6 +29,15 @@ version = "0.0.0"
 dependencies = [
  "rustorb-cdr",
  "socket2",
+]
+
+[[package]]
+name = "rustorb-typesupport"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e68ddaa3eeecf15cb112bc236925de7b916a964926a25dcb8c72d8a0bf4efc8"
+dependencies = [
+ "rustorb-cdr",
 ]
 
 [[package]]
