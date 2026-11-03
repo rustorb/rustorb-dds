@@ -19,6 +19,32 @@ impl GuidPrefix {
     /// `GUIDPREFIX_UNKNOWN`: all zeros.
     pub const UNKNOWN: GuidPrefix = GuidPrefix([0; 12]);
 
+    /// Makes a prefix that is very likely unique in the domain: the vendor
+    /// id in the first two octets (9.3.1.5), then ten octets mixed from
+    /// the process id, the time, a counter and the standard library's
+    /// random hash keys.
+    pub fn generate(vendor_id: VendorId) -> GuidPrefix {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let mut h = RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            h.write_u128(d.as_nanos());
+        }
+        let a = h.finish();
+        h.write_u64(a);
+        let b = h.finish();
+        let mut out = [0u8; 12];
+        out[..2].copy_from_slice(&vendor_id.0);
+        out[2..10].copy_from_slice(&a.to_be_bytes());
+        out[10..].copy_from_slice(&b.to_be_bytes()[..2]);
+        GuidPrefix(out)
+    }
+
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         r.array().map(GuidPrefix)
     }
@@ -524,6 +550,21 @@ impl Time {
         fraction: 0xffff_fffe,
     };
 
+    /// The current time, counted from the UNIX epoch.
+    ///
+    /// DDSI-RTPS does not fix the origin of `Time_t`; the UNIX epoch is
+    /// assumed here and is to be checked against other implementations
+    /// (rustorb-dds#8).
+    pub fn now() -> Time {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Time {
+            seconds: d.as_secs() as u32,
+            fraction: ((u64::from(d.subsec_nanos()) << 32) / 1_000_000_000) as u32,
+        }
+    }
+
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         Ok(Time {
             seconds: r.u32()?,
@@ -683,5 +724,96 @@ impl LocatorUdpV4 {
     pub(crate) fn write(&self, w: &mut Writer<'_>) {
         w.u32(self.address);
         w.u32(self.port);
+    }
+}
+
+/// A length of time in NTP format: `seconds + fraction / 2^32`
+/// (DDSI-RTPS 2.5, 9.3.2.1 and 9.3.2.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Duration {
+    /// Whole seconds.
+    pub seconds: i32,
+    /// Fraction of a second in units of 2^-32 s.
+    pub fraction: u32,
+}
+
+impl Duration {
+    /// `DURATION_ZERO`.
+    pub const ZERO: Duration = Duration {
+        seconds: 0,
+        fraction: 0,
+    };
+    /// `DURATION_INFINITE`.
+    pub const INFINITE: Duration = Duration {
+        seconds: 0x7fff_ffff,
+        fraction: 0xffff_ffff,
+    };
+
+    /// Whole seconds.
+    pub const fn from_secs(seconds: i32) -> Duration {
+        Duration {
+            seconds,
+            fraction: 0,
+        }
+    }
+
+    /// Converts to a [`std::time::Duration`]. Negative values give zero;
+    /// [`Duration::INFINITE`] gives `None`.
+    pub fn to_std(self) -> Option<std::time::Duration> {
+        if self == Duration::INFINITE {
+            return None;
+        }
+        if self.seconds < 0 {
+            return Some(std::time::Duration::ZERO);
+        }
+        let nanos = (u64::from(self.fraction) * 1_000_000_000) >> 32;
+        Some(std::time::Duration::new(self.seconds as u64, nanos as u32))
+    }
+
+    /// Converts from a [`std::time::Duration`], saturating at the largest
+    /// finite value.
+    pub fn from_std(d: std::time::Duration) -> Duration {
+        let Ok(seconds) = i32::try_from(d.as_secs()) else {
+            return Duration {
+                seconds: i32::MAX,
+                fraction: 0xffff_fffe,
+            };
+        };
+        Duration {
+            seconds,
+            fraction: ((u64::from(d.subsec_nanos()) << 32) / 1_000_000_000) as u32,
+        }
+    }
+}
+
+/// The built-in endpoints a participant has (DDSI-RTPS 2.5, 9.3.2.12).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct BuiltinEndpointSet(pub u32);
+
+impl BuiltinEndpointSet {
+    /// `DISC_BUILTIN_ENDPOINT_PARTICIPANT_ANNOUNCER`.
+    pub const PARTICIPANT_ANNOUNCER: u32 = 1 << 0;
+    /// `DISC_BUILTIN_ENDPOINT_PARTICIPANT_DETECTOR`.
+    pub const PARTICIPANT_DETECTOR: u32 = 1 << 1;
+    /// `DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER`.
+    pub const PUBLICATIONS_ANNOUNCER: u32 = 1 << 2;
+    /// `DISC_BUILTIN_ENDPOINT_PUBLICATIONS_DETECTOR`.
+    pub const PUBLICATIONS_DETECTOR: u32 = 1 << 3;
+    /// `DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_ANNOUNCER`.
+    pub const SUBSCRIPTIONS_ANNOUNCER: u32 = 1 << 4;
+    /// `DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_DETECTOR`.
+    pub const SUBSCRIPTIONS_DETECTOR: u32 = 1 << 5;
+    /// `BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER`.
+    pub const PARTICIPANT_MESSAGE_DATA_WRITER: u32 = 1 << 10;
+    /// `BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER`.
+    pub const PARTICIPANT_MESSAGE_DATA_READER: u32 = 1 << 11;
+    /// `DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER`.
+    pub const TOPICS_ANNOUNCER: u32 = 1 << 28;
+    /// `DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR`.
+    pub const TOPICS_DETECTOR: u32 = 1 << 29;
+
+    /// Whether all the given bits are set.
+    pub const fn contains(self, bits: u32) -> bool {
+        self.0 & bits == bits
     }
 }
