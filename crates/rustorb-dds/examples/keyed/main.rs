@@ -86,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let qos = DataReaderQos {
                 reliability: Reliability::reliable(),
                 history: History::KeepAll,
+                ..DataReaderQos::default()
             };
             let reader = participant
                 .create_subscriber()?

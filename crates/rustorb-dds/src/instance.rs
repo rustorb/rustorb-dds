@@ -7,7 +7,8 @@ use std::ops::BitOr;
 
 use rustorb_rtps::{Guid, SequenceNumber, Time};
 
-use crate::qos::History;
+use crate::qos::{History, ResourceLimits};
+use crate::status::{SampleRejectedReason, SampleRejectedStatus};
 
 /// Identifies an instance: its key hash (DDSI-RTPS 2.5, 9.6.4.8). Every
 /// writer and reader of a topic gives an instance the same handle. A type
@@ -273,6 +274,8 @@ pub(crate) type Selected = (Option<Vec<u8>>, SampleInfo);
 #[derive(Debug)]
 pub(crate) struct ReaderHistory {
     history: History,
+    limits: ResourceLimits,
+    rejected: SampleRejectedStatus,
     instances: BTreeMap<InstanceHandle, Instance>,
     /// The highest sequence number taken in from each writer: older ones
     /// are dropped (a best-effort reader keeps each writer's order,
@@ -282,9 +285,18 @@ pub(crate) struct ReaderHistory {
 }
 
 impl ReaderHistory {
+    #[cfg(test)]
     pub(crate) fn new(history: History) -> Self {
+        Self::with_limits(history, ResourceLimits::default())
+    }
+
+    /// A history that holds at most what `limits` allows (DDS 1.4,
+    /// 2.2.3.19): a sample beyond them is rejected.
+    pub(crate) fn with_limits(history: History, limits: ResourceLimits) -> Self {
         ReaderHistory {
             history,
+            limits,
+            rejected: SampleRejectedStatus::default(),
             instances: BTreeMap::new(),
             last_sn: HashMap::new(),
             arrivals: 0,
@@ -323,6 +335,15 @@ impl ReaderHistory {
             return false;
         }
         *last = c.sequence_number;
+        if matches!(c.change, Change::Write(_)) {
+            if let Some(reason) = self.rejects(&c.instance) {
+                self.rejected.total_count += 1;
+                self.rejected.total_count_change += 1;
+                self.rejected.last_reason = Some(reason);
+                self.rejected.last_instance_handle = Some(c.instance);
+                return false;
+            }
+        }
         let inst = self
             .instances
             .entry(c.instance)
@@ -384,6 +405,42 @@ impl ReaderHistory {
             }
         }
         true
+    }
+
+    /// Why a new value of instance `h` would go beyond the resource
+    /// limits, if it would. Under KEEP_LAST, a value that replaces the
+    /// oldest of a full instance takes no more room.
+    fn rejects(&self, h: &InstanceHandle) -> Option<SampleRejectedReason> {
+        let l = self.limits;
+        let inst = self.instances.get(h);
+        if inst.is_none()
+            && l.max_instances
+                .is_some_and(|m| self.instances.len() >= m.max(1))
+        {
+            return Some(SampleRejectedReason::InstancesLimit);
+        }
+        let in_instance = inst.map_or(0, |i| i.samples.len());
+        let replaces = matches!(self.history, History::KeepLast(d) if in_instance >= d.max(1));
+        if replaces {
+            return None;
+        }
+        if l.max_samples_per_instance
+            .is_some_and(|m| in_instance >= m.max(1))
+        {
+            return Some(SampleRejectedReason::SamplesPerInstanceLimit);
+        }
+        let total: usize = self.instances.values().map(|i| i.samples.len()).sum();
+        if l.max_samples.is_some_and(|m| total >= m.max(1)) {
+            return Some(SampleRejectedReason::SamplesLimit);
+        }
+        None
+    }
+
+    /// The SAMPLE_REJECTED status; reading it resets the change count.
+    pub(crate) fn take_rejected_status(&mut self) -> SampleRejectedStatus {
+        let s = self.rejected;
+        self.rejected.total_count_change = 0;
+        s
     }
 
     /// A writer is gone (unmatched, or deleted): the instances it wrote
@@ -703,5 +760,39 @@ mod tests {
             InstanceStateMask::ANY
         );
         assert!(SampleStateMask::default().contains(SampleState::Read));
+    }
+
+    #[test]
+    fn resource_limits_reject() {
+        let limits = ResourceLimits {
+            max_samples: Some(3),
+            max_instances: Some(2),
+            max_samples_per_instance: Some(2),
+        };
+        let mut r = ReaderHistory::with_limits(History::KeepAll, limits);
+        let mut sn = 0;
+        let mut put = |r: &mut ReaderHistory, inst: u8| {
+            sn += 1;
+            r.accept(write(w(1), sn, inst, inst))
+        };
+        assert!(put(&mut r, 1));
+        assert!(put(&mut r, 1));
+        // Two per instance.
+        assert!(!put(&mut r, 1));
+        assert!(put(&mut r, 2));
+        // Three in all.
+        assert!(!put(&mut r, 2));
+        // Two instances.
+        assert!(!put(&mut r, 3));
+        let s = r.take_rejected_status();
+        assert_eq!(s.total_count, 3);
+        assert_eq!(s.total_count_change, 3);
+        assert_eq!(s.last_reason, Some(SampleRejectedReason::InstancesLimit));
+        assert_eq!(r.take_rejected_status().total_count_change, 0);
+        // KEEP_LAST replaces within an instance instead.
+        let mut r = ReaderHistory::with_limits(History::KeepLast(1), limits);
+        for _ in 0..5 {
+            assert!(put(&mut r, 1));
+        }
     }
 }

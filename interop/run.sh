@@ -164,6 +164,13 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-reliable" \
     env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  # TRANSIENT_LOCAL: written before the subscriber's reader exists.
+  run_case "$peer-to-rustorb-transient-local" \
+    "$P" pub @D@ "$RELIABLE" 0 transient_local -- \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" transient_local
+  run_case "rustorb-to-$peer-transient-local" \
+    "$RUST" pub @D@ "$RELIABLE" 0 transient_local -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" transient_local
   # Large samples, as DATA_FRAG. Best effort: some of them must arrive
   # whole.
   run_case "$peer-to-rustorb-large-best-effort" \

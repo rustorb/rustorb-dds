@@ -4,8 +4,8 @@
 implementations on one host, in both directions, and checks that the
 subscriber receives the samples (rustorb-dds#8), best-effort and reliable
 (rustorb-dds#16), keyed instances with dispose and unregister
-(rustorb-dds#17), and samples too large for a datagram, sent as DATA_FRAG
-(rustorb-dds#18).
+(rustorb-dds#17), samples too large for a datagram, sent as DATA_FRAG
+(rustorb-dds#18), and TRANSIENT_LOCAL late joiners (rustorb-dds#19).
 
 | Peer | Where it comes from | Program |
 |---|---|---|
@@ -45,6 +45,12 @@ received is dropped at random, so that lost DATA, HEARTBEAT and ACKNACK
 must be repaired: when rustorb-dds subscribes, the peer's writer repairs;
 when it publishes, its own writer does. `DROP=0` turns this off.
 
+The `-transient-local` cases are like the reliable ones, with both
+sides TRANSIENT_LOCAL, but the publisher writes its `RELIABLE` samples at
+once, before there is a subscriber, then waits for one and for its
+acknowledgments. The subscriber creates its reader two seconds late and
+must still get all of them, in order.
+
 The `-large` cases send hello world samples whose message is
 `LARGE_SIZE` octets (default 300000), more than a UDP datagram holds, so
 both sides send them as DATA_FRAG. Each message is letters that depend on
@@ -81,6 +87,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#16 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 8 cases pass (DROP 5, four runs; DROP 2 once) |
 | 2026-11-03 | rustorb-dds#17 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 12 cases pass |
 | 2026-11-03 | rustorb-dds#18 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 20 cases pass |
+| 2026-11-03 | rustorb-dds#19 (part 1) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 24 cases pass |
 
 Found on the way:
 
@@ -128,3 +135,9 @@ Found on the way:
   1 MiB send buffer: on macOS the send buffer bounds the largest
   datagram, 9216 octets by default, and larger sends failed with
   `EMSGSIZE`.
+- TRANSIENT_LOCAL (rustorb-dds#19): a Cyclone DDS 0.10.4 writer with
+  KEEP_ALL history and TRANSIENT_LOCAL durability sent a late reader only
+  its last sample (50 of 50), until its DURABILITY_SERVICE history was set
+  to KEEP_ALL too: that policy, KEEP_LAST 1 by default, bounds what it
+  keeps for late joiners. `cyclonedds/hello.c` sets it. Fast DDS 2.11.2
+  sends the writer's whole history.

@@ -21,6 +21,9 @@ pub enum Error {
     /// The operation is not allowed in this state: unregistering an
     /// instance that is not registered.
     PreconditionNotMet,
+    /// The QoS asks for something not implemented: TRANSIENT or
+    /// PERSISTENT durability.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -32,6 +35,7 @@ impl fmt::Display for Error {
             Error::OutOfResources => f.write_str("no more entity ids"),
             Error::Timeout => f.write_str("timed out"),
             Error::PreconditionNotMet => f.write_str("the instance is not registered"),
+            Error::Unsupported(what) => write!(f, "not supported: {what}"),
         }
     }
 }

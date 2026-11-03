@@ -9,8 +9,9 @@
 //! provided.
 //!
 //! [`Sedp`] also matches local and remote endpoints: same topic name and
-//! type name, compatible RELIABILITY and DURABILITY, and a shared
-//! partition ([`crate::qos`]).
+//! type name, compatible RELIABILITY, DURABILITY, DEADLINE and LIVELINESS,
+//! and a shared partition ([`crate::qos`]). A pair that would match but
+//! for its QoS is reported as [`SedpEvent::IncompatibleQos`].
 //!
 //! The caller connects it to SPDP: [`Sedp::add_participant`] when a
 //! participant is discovered or updated, [`Sedp::remove_participant`]
@@ -23,7 +24,10 @@ use std::time::Instant;
 use crate::error::DecodeError;
 use crate::parameter::{Parameter, ParameterList};
 use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
-use crate::qos::{DurabilityKind, Reliability, compatible, partitions_match};
+use crate::qos::{
+    DurabilityKind, Liveliness, QosPolicyId, Reliability, RxO, incompatible_policies,
+    partitions_match,
+};
 use crate::receiver::receive;
 use crate::reliable::{
     Change, Outgoing, ReaderConfig, ReliableReader, ReliableWriter, WriterConfig,
@@ -31,7 +35,7 @@ use crate::reliable::{
 use crate::spdp::ParticipantData;
 use crate::submessage::{PayloadKind, SerializedPayload, Submessage};
 use crate::types::{
-    BuiltinEndpointSet, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, VendorId,
+    BuiltinEndpointSet, Duration, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, VendorId,
 };
 use crate::wire::Endianness;
 
@@ -53,6 +57,10 @@ pub struct EndpointData {
     pub reliability: Reliability,
     /// DURABILITY.
     pub durability: DurabilityKind,
+    /// DEADLINE period; infinite by default.
+    pub deadline: Duration,
+    /// LIVELINESS.
+    pub liveliness: Liveliness,
     /// PARTITION; empty means the default partition.
     pub partitions: Vec<String>,
     /// USER_DATA.
@@ -85,6 +93,8 @@ impl EndpointData {
             type_name: type_name.to_owned(),
             reliability,
             durability: DurabilityKind::Volatile,
+            deadline: Duration::INFINITE,
+            liveliness: Liveliness::default(),
             partitions: Vec::new(),
             user_data: Vec::new(),
             unicast_locators: Vec::new(),
@@ -105,6 +115,12 @@ impl EndpointData {
         l.push(b.string(pid::TYPE_NAME, &self.type_name));
         l.push(self.reliability.to_parameter(&b));
         l.push(self.durability.to_parameter(&b));
+        if self.deadline != Duration::INFINITE {
+            l.push(b.duration(pid::DEADLINE, self.deadline));
+        }
+        if self.liveliness != Liveliness::default() {
+            l.push(self.liveliness.to_parameter(&b));
+        }
         if !self.partitions.is_empty() {
             l.push(b.strings(pid::PARTITION, &self.partitions));
         }
@@ -164,6 +180,8 @@ impl EndpointData {
                 pid::TYPE_NAME => type_name = Some(v.string(p)?),
                 pid::RELIABILITY => d.reliability = Reliability::from_parameter(&v, p)?,
                 pid::DURABILITY => d.durability = DurabilityKind::from_parameter(&v, p)?,
+                pid::DEADLINE => d.deadline = v.duration(p)?,
+                pid::LIVELINESS => d.liveliness = Liveliness::from_parameter(&v, p)?,
                 pid::PARTITION => d.partitions = v.strings(p)?,
                 pid::USER_DATA => d.user_data = v.octets(p)?,
                 pid::UNICAST_LOCATOR => d.unicast_locators.push(v.locator(p)?),
@@ -187,18 +205,51 @@ impl EndpointData {
         let (list, e) = decode_pl_payload(bytes)?;
         Self::from_parameter_list(&list, e, writer)
     }
+
+    /// The policies that a writer offers and a reader requests.
+    pub fn rxo(&self) -> RxO {
+        RxO {
+            reliability: self.reliability.kind,
+            durability: self.durability,
+            deadline: self.deadline,
+            liveliness: self.liveliness,
+        }
+    }
+}
+
+/// How a writer and a reader stand towards each other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Match {
+    /// They match.
+    Matched,
+    /// Same topic, type and a shared partition, but the QoS the writer
+    /// offers does not satisfy the reader for these policies.
+    Incompatible(Vec<QosPolicyId>),
+    /// Different topics, types or partitions: nothing to report.
+    Unrelated,
+}
+
+/// Whether a writer and a reader match, and if not, whether for their
+/// QoS (DDS 1.4, 2.2.3).
+pub fn match_endpoints(writer: &EndpointData, reader: &EndpointData) -> Match {
+    if writer.topic_name != reader.topic_name
+        || writer.type_name != reader.type_name
+        || !partitions_match(&writer.partitions, &reader.partitions)
+    {
+        return Match::Unrelated;
+    }
+    let bad = incompatible_policies(&writer.rxo(), &reader.rxo());
+    if bad.is_empty() {
+        Match::Matched
+    } else {
+        Match::Incompatible(bad)
+    }
 }
 
 /// Whether a writer and a reader match: same topic and type names,
-/// compatible RELIABILITY and DURABILITY, and a shared partition.
+/// compatible QoS, and a shared partition.
 pub fn endpoints_match(writer: &EndpointData, reader: &EndpointData) -> bool {
-    writer.topic_name == reader.topic_name
-        && writer.type_name == reader.type_name
-        && compatible(
-            (writer.reliability.kind, writer.durability),
-            (reader.reliability.kind, reader.durability),
-        )
-        && partitions_match(&writer.partitions, &reader.partitions)
+    match_endpoints(writer, reader) == Match::Matched
 }
 
 /// Settings of [`Sedp`]: the timing of its reliable endpoints.
@@ -239,6 +290,16 @@ pub enum SedpEvent {
         /// The remote reader or writer.
         remote: Guid,
     },
+    /// A local endpoint and a remote one would match but for their QoS
+    /// (reported when the pair becomes incompatible).
+    IncompatibleQos {
+        /// The local writer or reader.
+        local: Guid,
+        /// The remote reader or writer.
+        remote: Guid,
+        /// The policies that differ.
+        policies: Vec<QosPolicyId>,
+    },
 }
 
 /// `StatusInfo_t` flags (9.6.4.9).
@@ -274,6 +335,8 @@ pub struct Sedp {
     remote_readers: HashMap<Guid, EndpointData>,
     /// (local, remote) pairs that match.
     matches: HashSet<(Guid, Guid)>,
+    /// (local, remote) pairs that are incompatible, already reported.
+    incompatible: HashSet<(Guid, Guid)>,
 }
 
 impl Sedp {
@@ -315,6 +378,7 @@ impl Sedp {
             remote_writers: HashMap::new(),
             remote_readers: HashMap::new(),
             matches: HashSet::new(),
+            incompatible: HashSet::new(),
         }
     }
 
@@ -593,6 +657,7 @@ impl Sedp {
             return Vec::new();
         };
         writer.remove_change(old.sn);
+        self.incompatible.retain(|(l, _)| l != guid);
         // A dispose: the key in-line and as a key-only payload (9.6.3.2).
         let e = Endianness::NATIVE;
         let b = PlBuilder::new(e);
@@ -695,6 +760,7 @@ impl Sedp {
         if removed.is_none() {
             return;
         }
+        self.incompatible.retain(|(_, r)| *r != guid);
         let mut pairs: Vec<(Guid, Guid)> = self
             .matches
             .iter()
@@ -718,22 +784,37 @@ impl Sedp {
     /// Re-evaluates whether the local endpoint `local` (of `kind`) and the
     /// remote endpoint `remote` match, and reports a change.
     fn update_match(&mut self, kind: Kind, local: Guid, remote: Guid, events: &mut Vec<SedpEvent>) {
-        let now = match kind {
+        let m = match kind {
             Kind::Writer => match (
                 self.local_writers.get(&local),
                 self.remote_readers.get(&remote),
             ) {
-                (Some(w), Some(r)) => endpoints_match(&w.data, r),
-                _ => false,
+                (Some(w), Some(r)) => match_endpoints(&w.data, r),
+                _ => Match::Unrelated,
             },
             Kind::Reader => match (
                 self.remote_writers.get(&remote),
                 self.local_readers.get(&local),
             ) {
-                (Some(w), Some(r)) => endpoints_match(w, &r.data),
-                _ => false,
+                (Some(w), Some(r)) => match_endpoints(w, &r.data),
+                _ => Match::Unrelated,
             },
         };
+        let now = m == Match::Matched;
+        match m {
+            Match::Incompatible(policies) => {
+                if self.incompatible.insert((local, remote)) {
+                    events.push(SedpEvent::IncompatibleQos {
+                        local,
+                        remote,
+                        policies,
+                    });
+                }
+            }
+            _ => {
+                self.incompatible.remove(&(local, remote));
+            }
+        }
         let was = self.matches.contains(&(local, remote));
         if now && !was {
             self.matches.insert((local, remote));
@@ -997,8 +1078,17 @@ mod tests {
         r.reliability.kind = ReliabilityKind::Reliable;
         b.add_reader(r);
         let (_, eb) = pump(&mut a, &mut b, t, |_| false);
-        assert_eq!(eb.len(), 1, "{eb:?}");
+        assert_eq!(eb.len(), 2, "{eb:?}");
         assert!(matches!(eb[0], SedpEvent::WriterDiscovered(_)));
+        // A best-effort writer does not satisfy a reliable reader.
+        assert_eq!(
+            eb[1],
+            SedpEvent::IncompatibleQos {
+                local: rguid(2),
+                remote: wguid(1),
+                policies: vec![QosPolicyId::RELIABILITY],
+            }
+        );
 
         w.reliability.kind = ReliabilityKind::Reliable;
         a.add_writer(w);
