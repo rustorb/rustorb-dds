@@ -8,11 +8,15 @@ use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, Time, entity_kind};
 use rustorb_typesupport::{ByteOrder, Encoding, TopicType};
 
+use crate::condition::StatusCondition;
 use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
-use crate::participant::{Shared, WriteOp};
+use crate::listener::DataWriterListener;
+use crate::participant::{Shared, WriteOp, WriterEvent, WriterListener, WriterState};
 use crate::qos::{DataWriterQos, DurabilityKind, PublisherQos, duration_to_rtps};
-use crate::status::{DeadlineMissedStatus, IncompatibleQosStatus, LivelinessLostStatus};
+use crate::status::{
+    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessLostStatus, MatchedStatus, StatusMask,
+};
 use crate::topic::Topic;
 use crate::typed::instance_of;
 
@@ -77,6 +81,7 @@ impl Publisher {
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
+            owned: true,
             _type: PhantomData,
         })
     }
@@ -88,6 +93,9 @@ impl Publisher {
 pub struct DataWriter<T: TopicType> {
     shared: Arc<Shared>,
     guid: Guid,
+    /// Whether dropping this handle deletes the writer: not for the
+    /// handle given to a listener.
+    owned: bool,
     _type: PhantomData<fn(T)>,
 }
 
@@ -218,11 +226,80 @@ impl<T: TopicType> DataWriter<T> {
     /// type and partition that this writer did not match because of its
     /// QoS. Reading it resets `total_count_change`.
     pub fn offered_incompatible_qos_status(&self) -> IncompatibleQosStatus {
+        self.status(StatusMask::OFFERED_INCOMPATIBLE_QOS, |w| {
+            w.incompatible.take()
+        })
+    }
+
+    /// Reads a status, clearing its changed flag.
+    fn status<R: Default>(&self, k: StatusMask, f: impl FnOnce(&mut WriterState) -> R) -> R {
         let mut g = self.shared.lock_any();
         g.writers
             .get_mut(&self.guid)
-            .map(|w| w.incompatible.take())
+            .map(|w| {
+                w.changes = w.changes & !k;
+                f(w)
+            })
             .unwrap_or_default()
+    }
+
+    /// The PUBLICATION_MATCHED status: the readers matched. Reading it
+    /// resets the `*_change` counts.
+    pub fn publication_matched_status(&self) -> MatchedStatus {
+        self.status(StatusMask::PUBLICATION_MATCHED, |w| w.matched_status.take())
+    }
+
+    /// Sets the listener (`set_listener`), replacing any earlier one:
+    /// its methods are called for the statuses in `mask` when they
+    /// change. See [`DataWriterListener`].
+    pub fn set_listener(&self, listener: impl DataWriterListener<T> + 'static, mask: StatusMask)
+    where
+        T: 'static,
+    {
+        let l: WriterListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
+            let writer = DataWriter::<T> {
+                shared: shared.clone(),
+                guid,
+                owned: false,
+                _type: PhantomData,
+            };
+            match event {
+                WriterEvent::PublicationMatched(s) => listener.on_publication_matched(&writer, s),
+                WriterEvent::LivelinessLost(s) => listener.on_liveliness_lost(&writer, s),
+                WriterEvent::OfferedDeadlineMissed(s) => {
+                    listener.on_offered_deadline_missed(&writer, s)
+                }
+                WriterEvent::OfferedIncompatibleQos(s) => {
+                    listener.on_offered_incompatible_qos(&writer, s)
+                }
+            }
+        });
+        let mut g = self.shared.lock_any();
+        if let Some(w) = g.writers.get_mut(&self.guid) {
+            w.listener = Some((l, mask));
+        }
+    }
+
+    /// Removes the listener.
+    pub fn clear_listener(&self) {
+        let mut g = self.shared.lock_any();
+        if let Some(w) = g.writers.get_mut(&self.guid) {
+            w.listener = None;
+        }
+    }
+
+    /// The statuses changed since they were last read
+    /// (`get_status_changes`).
+    pub fn status_changes(&self) -> StatusMask {
+        let g = self.shared.lock_any();
+        g.writers
+            .get(&self.guid)
+            .map_or(StatusMask::NONE, |w| w.changes)
+    }
+
+    /// The writer's StatusCondition (`get_statuscondition`).
+    pub fn status_condition(&self) -> StatusCondition {
+        StatusCondition::new(self.shared.clone(), self.guid)
     }
 
     /// Asserts the writer's liveliness (`assert_liveliness`, DDS 1.4,
@@ -237,22 +314,16 @@ impl<T: TopicType> DataWriter<T> {
     /// passed without it asserting its liveliness. Reading it resets
     /// `total_count_change`.
     pub fn liveliness_lost_status(&self) -> LivelinessLostStatus {
-        let mut g = self.shared.lock_any();
-        g.writers
-            .get_mut(&self.guid)
-            .map(|w| w.liveliness_lost.take())
-            .unwrap_or_default()
+        self.status(StatusMask::LIVELINESS_LOST, |w| w.liveliness_lost.take())
     }
 
     /// The OFFERED_DEADLINE_MISSED status: DEADLINE periods in which a
     /// registered instance was not written. Reading it resets
     /// `total_count_change`.
     pub fn offered_deadline_missed_status(&self) -> DeadlineMissedStatus {
-        let mut g = self.shared.lock_any();
-        g.writers
-            .get_mut(&self.guid)
-            .map(|w| w.deadlines.missed.take())
-            .unwrap_or_default()
+        self.status(StatusMask::OFFERED_DEADLINE_MISSED, |w| {
+            w.deadlines.missed.take()
+        })
     }
 
     /// Waits until at least `count` readers are matched, or `timeout`
@@ -273,6 +344,8 @@ impl<T: TopicType> DataWriter<T> {
 
 impl<T: TopicType> Drop for DataWriter<T> {
     fn drop(&mut self) {
-        self.shared.remove_writer(&self.guid);
+        if self.owned {
+            self.shared.remove_writer(&self.guid);
+        }
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -25,12 +25,14 @@ use rustorb_rtps::{
 };
 use rustorb_typesupport::TopicType;
 
+use crate::condition::Waker;
 use crate::error::{Error, Result};
 use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
 use crate::status::{
-    Deadlines, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
+    DeadlineMissedStatus, Deadlines, IncompatibleQosStatus, LivelinessChangedStatus,
+    LivelinessLostStatus, MatchedStatus, SampleLostStatus, SampleRejectedStatus, StatusMask,
 };
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
@@ -92,7 +94,33 @@ impl ParticipantConfig {
     }
 }
 
-pub(crate) type Listener = Arc<dyn Fn() + Send + Sync>;
+/// A status change of a reader, with the status, for its listener.
+pub(crate) enum ReaderEvent {
+    DataAvailable,
+    SubscriptionMatched(MatchedStatus),
+    LivelinessChanged(LivelinessChangedStatus),
+    RequestedDeadlineMissed(DeadlineMissedStatus),
+    RequestedIncompatibleQos(IncompatibleQosStatus),
+    SampleRejected(SampleRejectedStatus),
+    SampleLost(SampleLostStatus),
+}
+
+/// A status change of a writer, with the status, for its listener.
+pub(crate) enum WriterEvent {
+    PublicationMatched(MatchedStatus),
+    LivelinessLost(LivelinessLostStatus),
+    OfferedDeadlineMissed(DeadlineMissedStatus),
+    OfferedIncompatibleQos(IncompatibleQosStatus),
+}
+
+/// A reader's listener, with its type erased: it is given the reader's
+/// participant and GUID to make a handle of the right type.
+pub(crate) type ReaderListener = Arc<dyn Fn(&Arc<Shared>, Guid, ReaderEvent) + Send + Sync>;
+/// A writer's listener, with its type erased.
+pub(crate) type WriterListener = Arc<dyn Fn(&Arc<Shared>, Guid, WriterEvent) + Send + Sync>;
+
+/// A listener call that [`Shared::flush`] makes after unlocking.
+type ListenerCall = Box<dyn FnOnce(&Arc<Shared>)>;
 
 /// `StatusInfo_t` flags (DDSI-RTPS 2.5, 9.6.4.9).
 const STATUS_DISPOSED: u8 = 0x01;
@@ -122,7 +150,15 @@ pub(crate) struct ReaderState {
     /// The samples and the instances.
     pub(crate) samples: ReaderHistory,
     pub(crate) keys: Arc<dyn KeyOps>,
-    pub(crate) listener: Option<Listener>,
+    /// SUBSCRIPTION_MATCHED.
+    pub(crate) matched_status: MatchedStatus,
+    /// The statuses changed since they were last read or given to the
+    /// listener (the StatusChangedFlags, DDS 1.4, 2.2.4.2).
+    pub(crate) changes: StatusMask,
+    /// The statuses its StatusCondition is sensitive to.
+    pub(crate) enabled: StatusMask,
+    /// The listener and the statuses it is called for.
+    pub(crate) listener: Option<(ReaderListener, StatusMask)>,
 }
 
 /// What a reader knows of the liveliness of a matched writer.
@@ -137,18 +173,118 @@ pub(crate) struct WriterLiveliness {
 }
 
 impl ReaderState {
-    /// Takes a change in; returns whether a sample was added.
-    fn accept(&mut self, c: Incoming) -> bool {
+    fn new(
+        data: EndpointData,
+        qos: &DataReaderQos,
+        keys: Arc<dyn KeyOps>,
+        config: &ReaderConfig,
+    ) -> Self {
+        let rtps = (qos.reliability.kind == ReliabilityKind::Reliable)
+            .then(|| ReliableReader::new(data.guid, VENDOR_ID, config.clone()));
+        ReaderState {
+            data,
+            rtps,
+            matched: BTreeSet::new(),
+            fragments: HashMap::new(),
+            reassembly: config.reassembly,
+            incompatible: IncompatibleQosStatus::default(),
+            liveliness: HashMap::new(),
+            liveliness_changed: LivelinessChangedStatus::default(),
+            deadlines: Deadlines::new(qos.deadline),
+            samples: ReaderHistory::with_limits(qos.history, qos.resource_limits),
+            keys,
+            matched_status: MatchedStatus::default(),
+            changes: StatusMask::NONE,
+            enabled: StatusMask::ALL,
+            listener: None,
+        }
+    }
+
+    /// Takes a change in; returns the statuses it changed:
+    /// DATA_AVAILABLE when a sample was added, SAMPLE_REJECTED and
+    /// SAMPLE_LOST.
+    fn accept(&mut self, c: Incoming) -> StatusMask {
         if !self.matched.contains(&c.writer) {
-            return false;
+            return StatusMask::NONE;
         }
         let h = c.instance;
         let value = matches!(c.change, instance::Change::Write(_));
-        let added = self.samples.accept(c);
-        if added && value {
-            self.deadlines.renew(h, Instant::now());
+        let rejected = self.samples.rejected_count();
+        let lost = self.samples.lost.total_count;
+        let mut changes = StatusMask::NONE;
+        if self.samples.accept(c) {
+            changes |= StatusMask::DATA_AVAILABLE;
+            if value {
+                self.deadlines.renew(h, Instant::now());
+            }
         }
-        added
+        if self.samples.rejected_count() != rejected {
+            changes |= StatusMask::SAMPLE_REJECTED;
+        }
+        if self.samples.lost.total_count != lost {
+            changes |= StatusMask::SAMPLE_LOST;
+        }
+        changes
+    }
+
+    /// Matches a writer; returns whether it was not matched before.
+    fn add_match(&mut self, writer: Guid) -> bool {
+        let new = self.matched.insert(writer);
+        if new {
+            self.matched_status.matched(writer);
+        }
+        new
+    }
+
+    /// Unmatches a writer; returns whether it was matched.
+    fn remove_match(&mut self, writer: &Guid) -> bool {
+        let was = self.matched.remove(writer);
+        if was {
+            self.matched_status.unmatched(*writer);
+        }
+        was
+    }
+
+    /// A matched writer is gone (deleted, or unmatched): it is
+    /// unmatched, and its instances lose it. Returns the statuses
+    /// changed.
+    fn writer_removed(&mut self, writer: &Guid) -> StatusMask {
+        let mut k = StatusMask::NONE;
+        if self.writer_unmatched(writer) {
+            k |= StatusMask::LIVELINESS_CHANGED;
+        }
+        if self.remove_match(writer) {
+            k |= StatusMask::SUBSCRIPTION_MATCHED;
+            if self.samples.writer_gone(writer) {
+                k |= StatusMask::DATA_AVAILABLE;
+            }
+        }
+        k
+    }
+
+    /// The status of kind `k`, for the listener: reading it resets its
+    /// changes. `None` for a kind a reader does not have.
+    fn take_event(&mut self, k: StatusMask) -> Option<ReaderEvent> {
+        Some(match k {
+            StatusMask::DATA_AVAILABLE => ReaderEvent::DataAvailable,
+            StatusMask::SUBSCRIPTION_MATCHED => {
+                ReaderEvent::SubscriptionMatched(self.matched_status.take())
+            }
+            StatusMask::LIVELINESS_CHANGED => {
+                ReaderEvent::LivelinessChanged(self.liveliness_changed.take())
+            }
+            StatusMask::REQUESTED_DEADLINE_MISSED => {
+                ReaderEvent::RequestedDeadlineMissed(self.deadlines.missed.take())
+            }
+            StatusMask::REQUESTED_INCOMPATIBLE_QOS => {
+                ReaderEvent::RequestedIncompatibleQos(self.incompatible.take())
+            }
+            StatusMask::SAMPLE_REJECTED => {
+                ReaderEvent::SampleRejected(self.samples.take_rejected_status())
+            }
+            StatusMask::SAMPLE_LOST => ReaderEvent::SampleLost(self.samples.lost.take()),
+            _ => return None,
+        })
     }
 
     /// Starts tracking the liveliness of a newly matched writer: it is
@@ -159,7 +295,7 @@ impl ReaderState {
         kind: LivelinessKind,
         lease: Option<Duration>,
         now: Instant,
-    ) {
+    ) -> bool {
         let l = WriterLiveliness {
             kind,
             lease,
@@ -168,33 +304,43 @@ impl ReaderState {
         };
         if self.liveliness.insert(writer, l).is_none() {
             self.liveliness_changed.update(writer, None, Some(true));
+            return true;
+        }
+        false
+    }
+
+    /// Stops tracking a writer that is no longer matched; returns whether
+    /// LIVELINESS_CHANGED changed.
+    fn writer_unmatched(&mut self, writer: &Guid) -> bool {
+        match self.liveliness.remove(writer) {
+            Some(l) => {
+                self.liveliness_changed.update(*writer, Some(l.alive), None);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Stops tracking a writer that is no longer matched.
-    fn writer_unmatched(&mut self, writer: &Guid) {
-        if let Some(l) = self.liveliness.remove(writer) {
-            self.liveliness_changed.update(*writer, Some(l.alive), None);
-        }
-    }
-
-    /// A matched writer asserted its liveliness.
-    fn writer_asserted(&mut self, writer: &Guid, now: Instant) {
+    /// A matched writer asserted its liveliness; returns whether it was
+    /// not alive.
+    fn writer_asserted(&mut self, writer: &Guid, now: Instant) -> bool {
         if let Some(l) = self.liveliness.get_mut(writer) {
             l.last = now;
             if !l.alive {
                 l.alive = true;
                 self.liveliness_changed
                     .update(*writer, Some(false), Some(true));
+                return true;
             }
         }
+        false
     }
 
     /// Writers whose lease passed become not alive, and the instances
     /// they alone wrote lose their writers; deadlines missed are counted.
-    /// Returns whether a sample was added.
-    fn check(&mut self, now: Instant) -> bool {
-        let mut added = false;
+    /// Returns the statuses changed.
+    fn check(&mut self, now: Instant) -> StatusMask {
+        let mut changes = StatusMask::NONE;
         let lost: Vec<Guid> = self
             .liveliness
             .iter()
@@ -204,11 +350,16 @@ impl ReaderState {
         for g in lost {
             self.liveliness.get_mut(&g).expect("listed above").alive = false;
             self.liveliness_changed.update(g, Some(true), Some(false));
-            added |= self.samples.writer_lost(&g);
+            changes |= StatusMask::LIVELINESS_CHANGED;
+            if self.samples.writer_lost(&g) {
+                changes |= StatusMask::DATA_AVAILABLE;
+            }
         }
         let samples = &self.samples;
-        self.deadlines.check(now, |h| samples.is_alive(h));
-        added
+        if self.deadlines.check(now, |h| samples.is_alive(h)) {
+            changes |= StatusMask::REQUESTED_DEADLINE_MISSED;
+        }
+        changes
     }
 
     /// Reads a change received from a remote writer: its instance from
@@ -305,9 +456,54 @@ pub(crate) struct WriterState {
     /// DEADLINE: when each registered instance must next be written, and
     /// OFFERED_DEADLINE_MISSED.
     pub(crate) deadlines: Deadlines,
+    /// PUBLICATION_MATCHED.
+    pub(crate) matched_status: MatchedStatus,
+    /// The statuses changed since they were last read or given to the
+    /// listener.
+    pub(crate) changes: StatusMask,
+    /// The statuses its StatusCondition is sensitive to.
+    pub(crate) enabled: StatusMask,
+    /// The listener and the statuses it is called for.
+    pub(crate) listener: Option<(WriterListener, StatusMask)>,
 }
 
 impl WriterState {
+    /// Matches a reader; returns whether it was not matched before.
+    fn add_match(&mut self, reader: Guid) -> bool {
+        let new = self.matched.insert(reader);
+        if new {
+            self.matched_status.matched(reader);
+        }
+        new
+    }
+
+    /// Unmatches a reader; returns whether it was matched.
+    fn remove_match(&mut self, reader: &Guid) -> bool {
+        let was = self.matched.remove(reader);
+        if was {
+            self.matched_status.unmatched(*reader);
+        }
+        was
+    }
+
+    /// The status of kind `k`, for the listener: reading it resets its
+    /// changes.
+    fn take_event(&mut self, k: StatusMask) -> Option<WriterEvent> {
+        Some(match k {
+            StatusMask::PUBLICATION_MATCHED => {
+                WriterEvent::PublicationMatched(self.matched_status.take())
+            }
+            StatusMask::LIVELINESS_LOST => WriterEvent::LivelinessLost(self.liveliness_lost.take()),
+            StatusMask::OFFERED_DEADLINE_MISSED => {
+                WriterEvent::OfferedDeadlineMissed(self.deadlines.missed.take())
+            }
+            StatusMask::OFFERED_INCOMPATIBLE_QOS => {
+                WriterEvent::OfferedIncompatibleQos(self.incompatible.take())
+            }
+            _ => return None,
+        })
+    }
+
     /// The lease within which a reader takes the writer as alive, as a
     /// local reader sees it: an AUTOMATIC writer of the same participant
     /// is always alive.
@@ -319,16 +515,22 @@ impl WriterState {
     }
 
     /// The liveliness of the writer is lost when its lease passes without
-    /// an assertion; deadlines missed are counted.
-    fn check(&mut self, now: Instant) {
+    /// an assertion; deadlines missed are counted. Returns the statuses
+    /// changed.
+    fn check(&mut self, now: Instant) -> StatusMask {
+        let mut changes = StatusMask::NONE;
         if let Some(lease) = self.local_lease() {
             if self.alive && now > self.last_asserted + lease {
                 self.alive = false;
                 self.liveliness_lost.add();
+                changes |= StatusMask::LIVELINESS_LOST;
             }
         }
         let instances = &self.instances;
-        self.deadlines.check(now, |h| instances.contains_key(h));
+        if self.deadlines.check(now, |h| instances.contains_key(h)) {
+            changes |= StatusMask::OFFERED_DEADLINE_MISSED;
+        }
+        changes
     }
 
     /// The changes of an instance still in the history.
@@ -509,12 +711,24 @@ pub(crate) struct Inner {
     pub(crate) writers: HashMap<Guid, WriterState>,
     pub(crate) readers: HashMap<Guid, ReaderState>,
     deleted: bool,
+    /// Status changes of local writers and readers, for
+    /// [`Shared::flush`] to hand to their listeners, or else to mark as
+    /// changed for their StatusConditions.
+    pending: Vec<(Guid, StatusMask)>,
 }
 
 /// The shortest interval between two liveliness messages of a kind.
 const MIN_LIVELINESS_PERIOD: Duration = Duration::from_millis(10);
 
 impl Inner {
+    /// Notes that the statuses `k` of the local writer or reader `g`
+    /// changed.
+    fn changed(&mut self, g: Guid, k: StatusMask) {
+        if !k.is_empty() {
+            self.pending.push((g, k));
+        }
+    }
+
     /// A local writer asserted its liveliness, by writing or with
     /// `assert_liveliness`. For a MANUAL_BY_PARTICIPANT writer, that
     /// asserts every such writer of the participant (DDS 1.4, 2.2.3.11).
@@ -557,8 +771,10 @@ impl Inner {
 
     /// A writer asserted its liveliness, as seen by the local readers.
     fn remote_writer_asserted(&mut self, writer: &Guid, now: Instant) {
-        for r in self.readers.values_mut() {
-            r.writer_asserted(writer, now);
+        for (g, r) in self.readers.iter_mut() {
+            if r.writer_asserted(writer, now) {
+                self.pending.push((*g, StatusMask::LIVELINESS_CHANGED));
+            }
         }
     }
 
@@ -567,7 +783,7 @@ impl Inner {
     /// MANUAL_BY_PARTICIPANT writers.
     fn remote_participant_asserted(&mut self, prefix: GuidPrefix, kind: [u8; 4], now: Instant) {
         let manual = kind == wlp::kind::MANUAL_LIVELINESS_UPDATE;
-        for r in self.readers.values_mut() {
+        for (rg, r) in self.readers.iter_mut() {
             let guids: Vec<Guid> = r
                 .liveliness
                 .iter()
@@ -579,23 +795,26 @@ impl Inner {
                 .map(|(g, _)| *g)
                 .collect();
             for g in guids {
-                r.writer_asserted(&g, now);
+                if r.writer_asserted(&g, now) {
+                    self.pending.push((*rg, StatusMask::LIVELINESS_CHANGED));
+                }
             }
         }
     }
 
     /// Liveliness and deadlines: leases that passed, deadlines missed,
     /// and the liveliness messages due (DDSI-RTPS 2.5, 8.7.2.2.3).
-    fn check_timers(&mut self, now: Instant, notify: &mut Notify) {
-        for w in self.writers.values_mut() {
-            w.check(now);
+    fn check_timers(&mut self, now: Instant) {
+        for (g, w) in self.writers.iter_mut() {
+            let k = w.check(now);
+            if !k.is_empty() {
+                self.pending.push((*g, k));
+            }
         }
-        for r in self.readers.values_mut() {
-            if r.check(now) {
-                notify.delivered = true;
-                if let Some(l) = &r.listener {
-                    notify.listeners.push(l.clone());
-                }
+        for (g, r) in self.readers.iter_mut() {
+            let k = r.check(now);
+            if !k.is_empty() {
+                self.pending.push((*g, k));
             }
         }
         let min_lease = |kind: LivelinessKind| {
@@ -631,6 +850,11 @@ impl Inner {
 
 /// What the participant handle and its entities share with the thread.
 pub(crate) struct Shared {
+    /// The `Arc` this is in, to hand to listeners.
+    this: Weak<Shared>,
+    /// The WaitSets that have a condition of this participant attached,
+    /// to wake when a status changes.
+    pub(crate) waitsets: Mutex<Vec<Weak<Waker>>>,
     pub(crate) transport: UdpTransport,
     pub(crate) prefix: GuidPrefix,
     domain_id: u32,
@@ -652,6 +876,84 @@ impl Shared {
             return Err(Error::AlreadyDeleted);
         }
         Ok(g)
+    }
+
+    /// Hands the status changes noted since the last call to the
+    /// listeners that take them, and marks the others as changed (DDS
+    /// 1.4, 2.2.4.2.1); then wakes the threads waiting for data and the
+    /// WaitSets. Called without the lock held, after each change.
+    ///
+    /// A listener runs on the thread that made the change (the
+    /// participant's thread, or the one that wrote), without the lock: it
+    /// may call any operation, but should be quick.
+    pub(crate) fn flush(&self) {
+        let mut calls: Vec<ListenerCall> = Vec::new();
+        let mut any = false;
+        {
+            let mut g = self.lock_any();
+            let inner = &mut *g;
+            if inner.pending.is_empty() {
+                return;
+            }
+            for (guid, k) in std::mem::take(&mut inner.pending) {
+                any = true;
+                for bit in k.bits() {
+                    if let Some(w) = inner.writers.get_mut(&guid) {
+                        let listener = w
+                            .listener
+                            .as_ref()
+                            .filter(|(_, m)| m.contains(bit))
+                            .map(|(l, _)| l.clone());
+                        match listener.and_then(|l| Some((l, w.take_event(bit)?))) {
+                            Some((l, ev)) => {
+                                w.changes = w.changes & !bit;
+                                calls.push(Box::new(move |s| l(s, guid, ev)));
+                            }
+                            None => w.changes |= bit,
+                        }
+                    } else if let Some(r) = inner.readers.get_mut(&guid) {
+                        let listener = r
+                            .listener
+                            .as_ref()
+                            .filter(|(_, m)| m.contains(bit))
+                            .map(|(l, _)| l.clone());
+                        match listener.and_then(|l| Some((l, r.take_event(bit)?))) {
+                            Some((l, ev)) => {
+                                r.changes = r.changes & !bit;
+                                calls.push(Box::new(move |s| l(s, guid, ev)));
+                            }
+                            None => r.changes |= bit,
+                        }
+                    }
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        self.data_arrived.notify_all();
+        self.wake_waitsets();
+        if calls.is_empty() {
+            return;
+        }
+        if let Some(this) = self.this.upgrade() {
+            for c in calls {
+                c(&this);
+            }
+        }
+    }
+
+    /// Wakes the WaitSets attached to some condition of the participant,
+    /// to check their conditions again.
+    pub(crate) fn wake_waitsets(&self) {
+        let mut w = self.waitsets.lock().unwrap_or_else(|e| e.into_inner());
+        w.retain(|w| match w.upgrade() {
+            Some(w) => {
+                w.wake();
+                true
+            }
+            None => false,
+        });
     }
 
     /// Like [`Shared::lock`], for clean-up that runs even after the
@@ -695,50 +997,63 @@ impl Shared {
         qos: DataWriterQos,
         keyed: bool,
     ) -> Result<()> {
-        let mut g = self.lock()?;
-        let inner = &mut *g;
-        let guid = data.guid;
-        let now = Instant::now();
-        let mut matched = BTreeSet::new();
-        let mut incompatible = IncompatibleQosStatus::default();
-        let lease = match qos.liveliness.kind {
-            LivelinessKind::Automatic => None,
-            _ => qos.liveliness.lease_duration,
-        };
-        for (rg, r) in inner.readers.iter_mut() {
-            match match_endpoints(&data, &r.data) {
-                Match::Matched => {
-                    matched.insert(*rg);
-                    r.matched.insert(guid);
-                    r.writer_matched(guid, qos.liveliness.kind, lease, now);
-                }
-                Match::Incompatible(policies) => {
-                    incompatible.add(&policies);
-                    r.incompatible.add(&policies);
-                }
-                Match::Unrelated => {}
-            }
-        }
-        let rtps = ReliableWriter::new(guid, VENDOR_ID, inner.writer_config.clone());
-        inner.writers.insert(
-            guid,
-            WriterState {
+        {
+            let mut g = self.lock()?;
+            let inner = &mut *g;
+            let guid = data.guid;
+            let now = Instant::now();
+            let rtps = ReliableWriter::new(guid, VENDOR_ID, inner.writer_config.clone());
+            let mut w = WriterState {
                 data: data.clone(),
                 qos,
                 keyed,
                 rtps,
-                matched,
+                matched: BTreeSet::new(),
                 instances: BTreeMap::new(),
                 change_instance: HashMap::new(),
-                incompatible,
+                incompatible: IncompatibleQosStatus::default(),
                 last_asserted: now,
                 alive: true,
                 liveliness_lost: LivelinessLostStatus::default(),
                 deadlines: Deadlines::new(qos.deadline),
-            },
-        );
-        let events = inner.sedp.add_writer(data);
-        apply_sedp_events(inner, events, now, &mut Notify::default());
+                matched_status: MatchedStatus::default(),
+                changes: StatusMask::NONE,
+                enabled: StatusMask::ALL,
+                listener: None,
+            };
+            let lease = w.local_lease();
+            let mut changes = StatusMask::NONE;
+            for (rg, r) in inner.readers.iter_mut() {
+                match match_endpoints(&data, &r.data) {
+                    Match::Matched => {
+                        w.add_match(*rg);
+                        changes |= StatusMask::PUBLICATION_MATCHED;
+                        let mut k = StatusMask::NONE;
+                        if r.add_match(guid) {
+                            k |= StatusMask::SUBSCRIPTION_MATCHED;
+                        }
+                        if r.writer_matched(guid, qos.liveliness.kind, lease, now) {
+                            k |= StatusMask::LIVELINESS_CHANGED;
+                        }
+                        inner.pending.push((*rg, k));
+                    }
+                    Match::Incompatible(policies) => {
+                        w.incompatible.add(&policies);
+                        changes |= StatusMask::OFFERED_INCOMPATIBLE_QOS;
+                        r.incompatible.add(&policies);
+                        inner
+                            .pending
+                            .push((*rg, StatusMask::REQUESTED_INCOMPATIBLE_QOS));
+                    }
+                    Match::Unrelated => {}
+                }
+            }
+            inner.writers.insert(guid, w);
+            inner.changed(guid, changes);
+            let events = inner.sedp.add_writer(data);
+            apply_sedp_events(inner, events, now);
+        }
+        self.flush();
         Ok(())
     }
 
@@ -750,62 +1065,53 @@ impl Shared {
         qos: DataReaderQos,
         keys: Arc<dyn KeyOps>,
     ) -> Result<()> {
-        let mut g = self.lock()?;
-        let inner = &mut *g;
-        let guid = data.guid;
-        let now = Instant::now();
-        let mut matched = BTreeSet::new();
-        let mut incompatible = IncompatibleQosStatus::default();
-        let mut liveliness = Vec::new();
-        // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL reader.
-        let mut kept = Vec::new();
-        for (wg, w) in inner.writers.iter_mut() {
-            match match_endpoints(&w.data, &data) {
-                Match::Matched => {
-                    matched.insert(*wg);
-                    liveliness.push((*wg, w.qos.liveliness.kind, w.local_lease()));
-                    w.matched.insert(guid);
-                    if w.transient_local() && qos.durability >= DurabilityKind::TransientLocal {
-                        kept.extend(w.rtps.changes().cloned());
+        {
+            let mut g = self.lock()?;
+            let inner = &mut *g;
+            let guid = data.guid;
+            let now = Instant::now();
+            let mut r = ReaderState::new(data.clone(), &qos, keys, &inner.reader_config);
+            let mut changes = StatusMask::NONE;
+            // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL
+            // reader.
+            let mut kept = Vec::new();
+            for (wg, w) in inner.writers.iter_mut() {
+                match match_endpoints(&w.data, &data) {
+                    Match::Matched => {
+                        r.add_match(*wg);
+                        changes |= StatusMask::SUBSCRIPTION_MATCHED;
+                        if r.writer_matched(*wg, w.qos.liveliness.kind, w.local_lease(), now) {
+                            changes |= StatusMask::LIVELINESS_CHANGED;
+                        }
+                        if w.add_match(guid) {
+                            inner.pending.push((*wg, StatusMask::PUBLICATION_MATCHED));
+                        }
+                        if w.transient_local() && qos.durability >= DurabilityKind::TransientLocal {
+                            kept.extend(w.rtps.changes().cloned());
+                        }
                     }
+                    Match::Incompatible(policies) => {
+                        r.incompatible.add(&policies);
+                        changes |= StatusMask::REQUESTED_INCOMPATIBLE_QOS;
+                        w.incompatible.add(&policies);
+                        inner
+                            .pending
+                            .push((*wg, StatusMask::OFFERED_INCOMPATIBLE_QOS));
+                    }
+                    Match::Unrelated => {}
                 }
-                Match::Incompatible(policies) => {
-                    incompatible.add(&policies);
-                    w.incompatible.add(&policies);
+            }
+            for c in kept {
+                if let Some(c) = r.incoming(c) {
+                    changes |= r.accept(c);
                 }
-                Match::Unrelated => {}
             }
+            inner.readers.insert(guid, r);
+            inner.changed(guid, changes);
+            let events = inner.sedp.add_reader(data);
+            apply_sedp_events(inner, events, now);
         }
-        let rtps = (qos.reliability.kind == ReliabilityKind::Reliable)
-            .then(|| ReliableReader::new(guid, VENDOR_ID, inner.reader_config.clone()));
-        inner.readers.insert(
-            guid,
-            ReaderState {
-                data: data.clone(),
-                rtps,
-                matched,
-                fragments: HashMap::new(),
-                reassembly: inner.reader_config.reassembly,
-                incompatible,
-                liveliness: HashMap::new(),
-                liveliness_changed: LivelinessChangedStatus::default(),
-                deadlines: Deadlines::new(qos.deadline),
-                samples: ReaderHistory::with_limits(qos.history, qos.resource_limits),
-                keys,
-                listener: None,
-            },
-        );
-        let st = inner.readers.get_mut(&guid).expect("inserted above");
-        for (w, kind, lease) in liveliness {
-            st.writer_matched(w, kind, lease, now);
-        }
-        for c in kept {
-            if let Some(c) = st.incoming(c) {
-                st.accept(c);
-            }
-        }
-        let events = inner.sedp.add_reader(data);
-        apply_sedp_events(inner, events, now, &mut Notify::default());
+        self.flush();
         Ok(())
     }
 
@@ -832,33 +1138,23 @@ impl Shared {
                 Time::now(),
             );
         }
-        let mut listeners = Vec::new();
-        let mut delivered = false;
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
             if inner.writers.remove(guid).is_none() {
                 return;
             }
-            for r in inner.readers.values_mut() {
-                r.writer_unmatched(guid);
-                if r.matched.remove(guid) && r.samples.writer_gone(guid) {
-                    delivered = true;
-                    if let Some(l) = &r.listener {
-                        listeners.push(l.clone());
-                    }
+            for (rg, r) in inner.readers.iter_mut() {
+                let k = r.writer_removed(guid);
+                if !k.is_empty() {
+                    inner.pending.push((*rg, k));
                 }
             }
             if !inner.deleted {
                 inner.sedp.remove_writer(guid);
             }
         }
-        if delivered {
-            self.data_arrived.notify_all();
-        }
-        for l in listeners {
-            l();
-        }
+        self.flush();
     }
 
     /// Registers an instance of a local writer, as a write would.
@@ -879,19 +1175,23 @@ impl Shared {
     }
 
     pub(crate) fn remove_reader(&self, guid: &Guid) {
-        let mut g = self.lock_any();
-        let inner = &mut *g;
-        if inner.readers.remove(guid).is_none() {
-            return;
+        {
+            let mut g = self.lock_any();
+            let inner = &mut *g;
+            if inner.readers.remove(guid).is_none() {
+                return;
+            }
+            for (wg, w) in inner.writers.iter_mut() {
+                if w.remove_match(guid) {
+                    inner.pending.push((*wg, StatusMask::PUBLICATION_MATCHED));
+                }
+            }
+            if !inner.deleted {
+                inner.sedp.remove_reader(guid);
+            }
         }
-        for w in inner.writers.values_mut() {
-            w.matched.remove(guid);
-        }
-        if !inner.deleted {
-            inner.sedp.remove_reader(guid);
-        }
-        drop(g);
         self.acknowledged.notify_all();
+        self.flush();
     }
 
     /// Writes a change of instance `h` from a local writer (a value, a
@@ -908,7 +1208,6 @@ impl Shared {
         op: WriteOp,
         timestamp: Time,
     ) -> Result<()> {
-        let mut listeners = Vec::new();
         let out;
         {
             let mut g = self.lock()?;
@@ -948,7 +1247,6 @@ impl Shared {
             inner.local_writer_asserted(writer, now);
             let w = inner.writers.get_mut(&writer).expect("checked above");
             let matched: Vec<Guid> = w.matched.iter().copied().collect();
-            let mut delivered = false;
             for r in matched {
                 if r.prefix != self.prefix {
                     continue;
@@ -961,21 +1259,12 @@ impl Shared {
                         instance: h,
                         change: change.clone(),
                     };
-                    if st.accept(c) {
-                        delivered = true;
-                        if let Some(l) = &st.listener {
-                            listeners.push(l.clone());
-                        }
-                    }
+                    let k = st.accept(c);
+                    inner.changed(r, k);
                 }
             }
-            if delivered {
-                self.data_arrived.notify_all();
-            }
         }
-        for l in listeners {
-            l();
-        }
+        self.flush();
         // A datagram that cannot be sent now is like one lost on the way:
         // a reliable reader gets it repaired, a best-effort one does not.
         // The write fails only when nothing could be sent at all.
@@ -1015,6 +1304,7 @@ impl Shared {
                 _ => Vec::new(),
             }
         };
+        self.flush();
         // Like a HEARTBEAT that is lost on the way, one that cannot be
         // sent (to a locator kind not supported here, say) is not an
         // error of the call.
@@ -1052,22 +1342,17 @@ impl Shared {
     }
 }
 
-/// Readers that got samples, to signal.
-#[derive(Default)]
-struct Notify {
-    delivered: bool,
-    listeners: Vec<Listener>,
-}
-
 /// Applies SEDP match events to the local endpoints: a local writer
 /// starts or stops sending to a remote reader, a local reliable reader
 /// starts or stops tracking a remote writer.
-fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, notify: &mut Notify) {
+fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
     for e in events {
         match e {
             SedpEvent::Matched { local, remote } => {
                 if let Some(w) = inner.writers.get_mut(&local) {
-                    w.matched.insert(remote);
+                    if w.add_match(remote) {
+                        inner.pending.push((local, StatusMask::PUBLICATION_MATCHED));
+                    }
                     if let Some(d) = inner.sedp.remote_reader(&remote) {
                         w.rtps.add_matched_reader(
                             remote,
@@ -1083,14 +1368,22 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                         );
                     }
                 } else if let Some(r) = inner.readers.get_mut(&local) {
-                    r.matched.insert(remote);
+                    let mut k = StatusMask::NONE;
+                    if r.add_match(remote) {
+                        k |= StatusMask::SUBSCRIPTION_MATCHED;
+                    }
                     if let Some(d) = inner.sedp.remote_writer(&remote) {
-                        r.writer_matched(
+                        if r.writer_matched(
                             remote,
                             d.liveliness.kind,
                             d.liveliness.lease_duration.to_std(),
                             now,
-                        );
+                        ) {
+                            k |= StatusMask::LIVELINESS_CHANGED;
+                        }
+                    }
+                    if !k.is_empty() {
+                        inner.pending.push((local, k));
                     }
                     if let (Some(rtps), Some(d)) =
                         (r.rtps.as_mut(), inner.sedp.remote_writer(&remote))
@@ -1106,17 +1399,16 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
             }
             SedpEvent::Unmatched { local, remote } => {
                 if let Some(w) = inner.writers.get_mut(&local) {
-                    w.matched.remove(&remote);
+                    if w.remove_match(&remote) {
+                        inner.pending.push((local, StatusMask::PUBLICATION_MATCHED));
+                    }
                     w.rtps.remove_reader(&remote);
                     w.trim();
                 } else if let Some(r) = inner.readers.get_mut(&local) {
                     r.fragments.remove(&remote);
-                    r.writer_unmatched(&remote);
-                    if r.matched.remove(&remote) && r.samples.writer_gone(&remote) {
-                        notify.delivered = true;
-                        if let Some(l) = &r.listener {
-                            notify.listeners.push(l.clone());
-                        }
+                    let k = r.writer_removed(&remote);
+                    if !k.is_empty() {
+                        inner.pending.push((local, k));
                     }
                     if let Some(rtps) = r.rtps.as_mut() {
                         rtps.remove_writer(&remote);
@@ -1128,8 +1420,14 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
             } => {
                 if let Some(w) = inner.writers.get_mut(&local) {
                     w.incompatible.add(&policies);
+                    inner
+                        .pending
+                        .push((local, StatusMask::OFFERED_INCOMPATIBLE_QOS));
                 } else if let Some(r) = inner.readers.get_mut(&local) {
                     r.incompatible.add(&policies);
+                    inner
+                        .pending
+                        .push((local, StatusMask::REQUESTED_INCOMPATIBLE_QOS));
                 }
             }
             _ => {}
@@ -1196,8 +1494,11 @@ impl DomainParticipant {
             writers: HashMap::new(),
             readers: HashMap::new(),
             deleted: false,
+            pending: Vec::new(),
         };
-        let shared = Arc::new(Shared {
+        let shared = Arc::new_cyclic(|this| Shared {
+            this: this.clone(),
+            waitsets: Mutex::new(Vec::new()),
             transport,
             prefix,
             domain_id,
@@ -1260,6 +1561,7 @@ impl DomainParticipant {
     /// any of them does too.
     pub fn assert_liveliness(&self) -> Result<()> {
         self.shared.lock()?.participant_asserted(Instant::now());
+        self.shared.flush();
         Ok(())
     }
 
@@ -1290,6 +1592,7 @@ impl Drop for DomainParticipant {
         }
         self.shared.data_arrived.notify_all();
         self.shared.acknowledged.notify_all();
+        self.shared.wake_waitsets();
     }
 }
 
@@ -1335,22 +1638,19 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
 /// Handles received datagrams and sends what discovery has due.
 fn step(shared: &Shared, datagrams: Vec<Datagram>) {
     let now = Instant::now();
-    let mut listeners: Vec<Listener> = Vec::new();
     let mut out: Vec<(Vec<u8>, Vec<Locator>)> = Vec::new();
     {
         let mut g = shared.lock_any();
         let inner = &mut *g;
-        let mut delivered = false;
         let mut acked = false;
-        let mut notify = Notify::default();
         for d in datagrams {
             match d.channel {
                 Channel::DiscoveryMulticast | Channel::DiscoveryUnicast => {
                     for e in inner.spdp.handle_message(&d.data, now) {
-                        participant_event(inner, e, now, &mut notify);
+                        participant_event(inner, e, now);
                     }
                     let events = inner.sedp.handle_message(&d.data, now);
-                    apply_sedp_events(inner, events, now, &mut notify);
+                    apply_sedp_events(inner, events, now);
                     for a in inner.wlp.handle_message(&d.data, now) {
                         inner.remote_participant_asserted(a.participant, a.kind, now);
                     }
@@ -1359,18 +1659,14 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                     if shared.should_drop() {
                         continue;
                     }
-                    let r = user_traffic(shared.prefix, inner, &d.data, now, &mut listeners);
-                    delivered |= r.delivered;
-                    acked |= r.acked;
+                    acked |= user_traffic(shared.prefix, inner, &d.data, now);
                 }
             }
         }
         for e in inner.spdp.remove_expired(now) {
-            participant_event(inner, e, now, &mut notify);
+            participant_event(inner, e, now);
         }
-        inner.check_timers(now, &mut notify);
-        delivered |= notify.delivered;
-        listeners.append(&mut notify.listeners);
+        inner.check_timers(now);
         if let Some((bytes, to)) = inner.spdp.poll_announce(now) {
             out.push((bytes, to.to_vec()));
         }
@@ -1393,9 +1689,6 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                 }
             }
         }
-        if delivered {
-            shared.data_arrived.notify_all();
-        }
         if acked {
             shared.acknowledged.notify_all();
         }
@@ -1407,12 +1700,10 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
             let _ = shared.transport.send(&bytes, l);
         }
     }
-    for l in listeners {
-        l();
-    }
+    shared.flush();
 }
 
-fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant, notify: &mut Notify) {
+fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
     match e {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
             inner.sedp.add_participant(&p, now);
@@ -1421,33 +1712,18 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant, notif
         ParticipantEvent::Removed(prefix, _) => {
             inner.wlp.remove_participant(&prefix);
             let events = inner.sedp.remove_participant(&prefix);
-            apply_sedp_events(inner, events, now, notify);
+            apply_sedp_events(inner, events, now);
         }
     }
 }
 
-/// What [`user_traffic`] did.
-#[derive(Default)]
-struct UserTraffic {
-    /// Some reader got a sample.
-    delivered: bool,
-    /// Some writer got an ACKNACK.
-    acked: bool,
-}
-
 /// Handles a user-traffic message: DATA, DATA_FRAG, GAP, HEARTBEAT and
 /// HEARTBEAT_FRAG for the local readers, ACKNACK and NACK_FRAG for the
-/// local writers.
-fn user_traffic(
-    local: GuidPrefix,
-    inner: &mut Inner,
-    bytes: &[u8],
-    now: Instant,
-    listeners: &mut Vec<Listener>,
-) -> UserTraffic {
-    let mut result = UserTraffic::default();
+/// local writers. Returns whether some writer got an ACKNACK.
+fn user_traffic(local: GuidPrefix, inner: &mut Inner, bytes: &[u8], now: Instant) -> bool {
+    let mut acked = false;
     let Some((_, received)) = receive(bytes, local) else {
-        return result;
+        return false;
     };
     for r in received {
         let src = r.source_prefix;
@@ -1456,68 +1732,50 @@ fn user_traffic(
                 if let Some(w) = inner.writers.get_mut(&Guid::new(local, a.writer_id)) {
                     w.rtps.handle_acknack(Guid::new(src, a.reader_id), &a, now);
                     w.trim();
-                    result.acked = true;
+                    acked = true;
                 }
             }
             Submessage::Data(d) => {
                 let writer = Guid::new(src, d.writer_id);
                 inner.remote_writer_asserted(&writer, now);
-                for_readers(
-                    inner,
-                    d.reader_id,
-                    |st| match st.rtps.as_mut() {
-                        Some(rtps) => rtps.handle_data(writer, &d, r.timestamp),
-                        None => vec![Change {
-                            writer,
-                            sequence_number: d.writer_sn,
-                            inline_qos: d.inline_qos.clone(),
-                            payload: d.serialized_payload.clone(),
-                            timestamp: r.timestamp,
-                        }],
-                    },
-                    &mut result,
-                    listeners,
-                );
+                for_readers(inner, d.reader_id, |st| match st.rtps.as_mut() {
+                    Some(rtps) => rtps.handle_data(writer, &d, r.timestamp),
+                    None => vec![Change {
+                        writer,
+                        sequence_number: d.writer_sn,
+                        inline_qos: d.inline_qos.clone(),
+                        payload: d.serialized_payload.clone(),
+                        timestamp: r.timestamp,
+                    }],
+                });
             }
             Submessage::DataFrag(d) => {
                 let writer = Guid::new(src, d.writer_id);
                 inner.remote_writer_asserted(&writer, now);
-                for_readers(
-                    inner,
-                    d.reader_id,
-                    |st| match st.rtps.as_mut() {
-                        Some(rtps) => rtps.handle_data_frag(writer, &d, r.timestamp),
-                        // Best effort: the newest incomplete samples are
-                        // kept, and only those of matched writers.
-                        None if st.matched.contains(&writer) => {
-                            let limits = st.reassembly;
-                            st.fragments
-                                .entry(writer)
-                                .or_insert_with(|| Reassembler::new(limits, Keep::Highest))
-                                .add(writer, &d, r.timestamp)
-                                .into_iter()
-                                .collect()
-                        }
-                        None => Vec::new(),
-                    },
-                    &mut result,
-                    listeners,
-                );
+                for_readers(inner, d.reader_id, |st| match st.rtps.as_mut() {
+                    Some(rtps) => rtps.handle_data_frag(writer, &d, r.timestamp),
+                    // Best effort: the newest incomplete samples are
+                    // kept, and only those of matched writers.
+                    None if st.matched.contains(&writer) => {
+                        let limits = st.reassembly;
+                        st.fragments
+                            .entry(writer)
+                            .or_insert_with(|| Reassembler::new(limits, Keep::Highest))
+                            .add(writer, &d, r.timestamp)
+                            .into_iter()
+                            .collect()
+                    }
+                    None => Vec::new(),
+                });
             }
             Submessage::HeartbeatFrag(h) => {
                 let writer = Guid::new(src, h.writer_id);
-                for_readers(
-                    inner,
-                    h.reader_id,
-                    |st| {
-                        if let Some(rtps) = st.rtps.as_mut() {
-                            rtps.handle_heartbeat_frag(writer, &h, now);
-                        }
-                        Vec::new()
-                    },
-                    &mut result,
-                    listeners,
-                );
+                for_readers(inner, h.reader_id, |st| {
+                    if let Some(rtps) = st.rtps.as_mut() {
+                        rtps.handle_heartbeat_frag(writer, &h, now);
+                    }
+                    Vec::new()
+                });
             }
             Submessage::NackFrag(n) => {
                 if let Some(w) = inner.writers.get_mut(&Guid::new(local, n.writer_id)) {
@@ -1526,16 +1784,10 @@ fn user_traffic(
             }
             Submessage::Gap(gap) => {
                 let writer = Guid::new(src, gap.writer_id);
-                for_readers(
-                    inner,
-                    gap.reader_id,
-                    |st| match st.rtps.as_mut() {
-                        Some(rtps) => rtps.handle_gap(writer, &gap),
-                        None => Vec::new(),
-                    },
-                    &mut result,
-                    listeners,
-                );
+                for_readers(inner, gap.reader_id, |st| match st.rtps.as_mut() {
+                    Some(rtps) => rtps.handle_gap(writer, &gap),
+                    None => Vec::new(),
+                });
             }
             Submessage::Heartbeat(h) => {
                 let writer = Guid::new(src, h.writer_id);
@@ -1543,21 +1795,15 @@ fn user_traffic(
                     // MANUAL_BY_TOPIC assert_liveliness (8.7.2.2.3).
                     inner.remote_writer_asserted(&writer, now);
                 }
-                for_readers(
-                    inner,
-                    h.reader_id,
-                    |st| match st.rtps.as_mut() {
-                        Some(rtps) => rtps.handle_heartbeat(writer, &h, now),
-                        None => Vec::new(),
-                    },
-                    &mut result,
-                    listeners,
-                );
+                for_readers(inner, h.reader_id, |st| match st.rtps.as_mut() {
+                    Some(rtps) => rtps.handle_heartbeat(writer, &h, now),
+                    None => Vec::new(),
+                });
             }
             _ => {}
         }
     }
-    result
+    acked
 }
 
 /// Runs `f` on the local readers a submessage is for (`reader_id`, or
@@ -1567,8 +1813,6 @@ fn for_readers(
     inner: &mut Inner,
     reader_id: EntityId,
     mut f: impl FnMut(&mut ReaderState) -> Vec<Change>,
-    result: &mut UserTraffic,
-    listeners: &mut Vec<Listener>,
 ) {
     for (rg, st) in inner.readers.iter_mut() {
         if reader_id != EntityId::UNKNOWN && reader_id != rg.entity_id {
@@ -1578,11 +1822,9 @@ fn for_readers(
             let Some(c) = st.incoming(c) else {
                 continue;
             };
-            if st.accept(c) {
-                result.delivered = true;
-                if let Some(l) = &st.listener {
-                    listeners.push(l.clone());
-                }
+            let k = st.accept(c);
+            if !k.is_empty() {
+                inner.pending.push((*rg, k));
             }
         }
     }

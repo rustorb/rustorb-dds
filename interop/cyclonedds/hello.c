@@ -103,8 +103,13 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
     fflush(stdout);
     dds_sleepfor(DDS_MSECS(interval_ms));
   }
-  if (transient_local)
+  if (transient_local) {
     wait_for_reader(writer);
+    /* Give the reader time to match this writer and answer a HEARTBEAT:
+     * dds_wait_for_acks does not wait for a reader that has not answered
+     * one yet, and would return before the samples are sent. */
+    dds_sleepfor(DDS_MSECS(500));
+  }
   if (reliable) {
     dds_return_t rc = dds_wait_for_acks(writer, DDS_SECS(30));
     if (rc != DDS_RETCODE_OK) {
