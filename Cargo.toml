@@ -5,6 +5,7 @@ members = [
     "crates/rustorb-rtps",
     "crates/rustorb-dds",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"

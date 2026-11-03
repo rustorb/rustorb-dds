@@ -1,0 +1,23 @@
+[package]
+name = "rustorb-dds-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rustorb-rtps = { path = "../crates/rustorb-rtps" }
+
+# Not part of the main workspace: it needs a nightly toolchain.
+[workspace]
+
+[[bin]]
+name = "rtps_message"
+path = "fuzz_targets/rtps_message.rs"
+test = false
+doc = false
+bench = false
