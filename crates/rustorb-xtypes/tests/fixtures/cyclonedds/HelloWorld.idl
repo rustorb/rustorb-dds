@@ -1,0 +1,12 @@
+// The hello world type shared by every implementation in the interop
+// tests. rustorb-dds has a hand-written type support for it in
+// crates/rustorb-dds/examples/hello_world/greeting.rs.
+//
+// No extensibility annotation: every implementation used here makes it
+// @final by default, and older generators do not read the annotation.
+module HelloWorld {
+    struct Greeting {
+        unsigned long index;
+        string message;
+    };
+};

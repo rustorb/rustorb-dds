@@ -11,6 +11,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rustorb-rtps = { path = "../crates/rustorb-rtps" }
+rustorb-xtypes = { path = "../crates/rustorb-xtypes" }
+rustorb-cdr = "0.2.0"
 
 # Not part of the main workspace: it needs a nightly toolchain.
 [workspace]
@@ -18,6 +20,13 @@ rustorb-rtps = { path = "../crates/rustorb-rtps" }
 [[bin]]
 name = "rtps_message"
 path = "fuzz_targets/rtps_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "type_object"
+path = "fuzz_targets/type_object.rs"
 test = false
 doc = false
 bench = false
