@@ -1,13 +1,16 @@
 //! The DDSI-RTPS 2.5 wire protocol for rustorb-dds.
 //!
-//! What is here so far (rustorb-dds#3): reading and writing RTPS messages
-//! and submessages, following DDSI-RTPS 2.5 clauses 8.3 and 9.4.
+//! What is here so far: reading and writing RTPS messages and
+//! submessages (DDSI-RTPS 2.5 clauses 8.3 and 9.4, rustorb-dds#3), and the
+//! UDP transport (9.6.2, rustorb-dds#4).
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
 //!   are kept as [`UnknownSubmessage`] and skipped by receivers.
 //! - The basic types: [`Guid`], [`EntityId`], [`SequenceNumber`],
 //!   [`SequenceNumberSet`], [`Time`], [`Locator`] and so on.
+//! - The UDPv4 transport and the default port numbers, in [`udp`]
+//!   (rustorb-dds#4).
 //! - [`ParameterList`] framing. Parameter values and serialized payloads
 //!   stay as raw octets; PL_CDR and the payload encodings are read by
 //!   higher layers.
@@ -34,8 +37,8 @@
 //! assert_eq!(Message::decode(&bytes).unwrap(), msg);
 //! ```
 //!
-//! Still to come (rustorb/rustorb#111, stages D1 and D2): the UDP
-//! transport, SPDP/SEDP discovery, and best-effort then reliable writers
+//! Still to come (rustorb/rustorb#111, stages D1 and D2): SPDP/SEDP
+//! discovery, and best-effort then reliable writers
 //! and readers.
 
 mod error;
@@ -43,6 +46,7 @@ mod message;
 mod parameter;
 mod submessage;
 mod types;
+pub mod udp;
 mod wire;
 
 pub use error::{DecodeError, EncodeError};

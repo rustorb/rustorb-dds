@@ -23,6 +23,9 @@ rustorb-rtps = { path = "crates/rustorb-rtps" }
 # Until rustorb releases the shared parts (rustorb/rustorb#114), use the
 # main branch. Only rustorb-cdr (MIT OR Apache-2.0) is used, never the
 # GPL generator.
+# Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
+# MIT OR Apache-2.0.
+socket2 = { version = "0.6", features = ["all"] }
 rustorb-cdr = { git = "https://github.com/rustorb/rustorb", branch = "main" }
 
 [workspace.lints.rust]
