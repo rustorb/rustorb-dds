@@ -321,6 +321,13 @@ impl ReaderHistory {
         self.instances.contains_key(h)
     }
 
+    /// Whether the reader has the instance and it is ALIVE.
+    pub(crate) fn is_alive(&self, h: &InstanceHandle) -> bool {
+        self.instances
+            .get(h)
+            .is_some_and(|i| i.state == InstanceState::Alive)
+    }
+
     /// Whether some sample has not been read.
     pub(crate) fn has_unread(&self) -> bool {
         self.instances
@@ -441,6 +448,18 @@ impl ReaderHistory {
         let s = self.rejected;
         self.rejected.total_count_change = 0;
         s
+    }
+
+    /// A writer lost its liveliness (DDS 1.4, 2.2.3.11): its instances
+    /// lose it as a writer, as in [`Self::writer_gone`], but what it sent
+    /// before is still told apart from what it sends once it is back.
+    pub(crate) fn writer_lost(&mut self, writer: &Guid) -> bool {
+        let last = self.last_sn.get(writer).copied();
+        let added = self.writer_gone(writer);
+        if let Some(sn) = last {
+            self.last_sn.insert(*writer, sn);
+        }
+        added
     }
 
     /// A writer is gone (unmatched, or deleted): the instances it wrote

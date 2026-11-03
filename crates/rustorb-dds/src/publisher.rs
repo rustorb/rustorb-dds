@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
 use crate::participant::{Shared, WriteOp};
 use crate::qos::{DataWriterQos, DurabilityKind, PublisherQos, duration_to_rtps};
-use crate::status::IncompatibleQosStatus;
+use crate::status::{DeadlineMissedStatus, IncompatibleQosStatus, LivelinessLostStatus};
 use crate::topic::Topic;
 use crate::typed::instance_of;
 
@@ -222,6 +222,36 @@ impl<T: TopicType> DataWriter<T> {
         g.writers
             .get_mut(&self.guid)
             .map(|w| w.incompatible.take())
+            .unwrap_or_default()
+    }
+
+    /// Asserts the writer's liveliness (`assert_liveliness`, DDS 1.4,
+    /// 2.2.2.4.2.22), for a MANUAL_BY_PARTICIPANT or MANUAL_BY_TOPIC
+    /// writer that has nothing to write; writing asserts it too. It does
+    /// nothing for an AUTOMATIC writer, whose participant asserts it.
+    pub fn assert_liveliness(&self) -> Result<()> {
+        self.shared.assert_writer_liveliness(&self.guid)
+    }
+
+    /// The LIVELINESS_LOST status: how many times the writer's lease
+    /// passed without it asserting its liveliness. Reading it resets
+    /// `total_count_change`.
+    pub fn liveliness_lost_status(&self) -> LivelinessLostStatus {
+        let mut g = self.shared.lock_any();
+        g.writers
+            .get_mut(&self.guid)
+            .map(|w| w.liveliness_lost.take())
+            .unwrap_or_default()
+    }
+
+    /// The OFFERED_DEADLINE_MISSED status: DEADLINE periods in which a
+    /// registered instance was not written. Reading it resets
+    /// `total_count_change`.
+    pub fn offered_deadline_missed_status(&self) -> DeadlineMissedStatus {
+        let mut g = self.shared.lock_any();
+        g.writers
+            .get_mut(&self.guid)
+            .map(|w| w.deadlines.missed.take())
             .unwrap_or_default()
     }
 

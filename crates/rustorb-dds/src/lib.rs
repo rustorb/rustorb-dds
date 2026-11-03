@@ -32,16 +32,17 @@
 //! TRANSIENT_LOCAL writers and readers, in partitions (with wildcards),
 //! over UDPv4. Endpoints whose QoS do not match are counted in the
 //! incompatible QoS statuses; readers reject samples beyond their
-//! RESOURCE_LIMITS. A participant that is deleted tells the others. Keyed types
+//! RESOURCE_LIMITS. LIVELINESS (with the Writer Liveliness Protocol) and
+//! DEADLINE are kept and reported in statuses. A participant that is
+//! deleted tells the others. Keyed types
 //! have instances: writers register, write, dispose and unregister them;
 //! readers keep a history per instance with its states (DDS 1.4,
 //! 2.2.2.5.1). Samples larger than a datagram go as DATA_FRAG, and lost
 //! fragments are repaired. Samples are written in XCDR1. Writers and
 //! readers in the same participant are matched with each other too.
 //!
-//! Still to come in D2 (rustorb-dds#15): LIVELINESS and DEADLINE
-//! behaviour (they are announced and matched on already), WaitSets, ROS 2;
-//! then the XTypes type information (D3).
+//! Still to come in D2 (rustorb-dds#15): WaitSets and ROS 2; then the
+//! XTypes type information (D3).
 
 mod error;
 mod instance;
@@ -71,7 +72,8 @@ pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
 pub use status::{
-    IncompatibleQosStatus, QosPolicyCount, SampleRejectedReason, SampleRejectedStatus,
+    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
+    QosPolicyCount, SampleRejectedReason, SampleRejectedStatus,
 };
 pub use subscriber::{DataReader, Sample, Subscriber};
 pub use topic::Topic;

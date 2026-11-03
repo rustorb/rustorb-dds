@@ -5,7 +5,8 @@ implementations on one host, in both directions, and checks that the
 subscriber receives the samples (rustorb-dds#8), best-effort and reliable
 (rustorb-dds#16), keyed instances with dispose and unregister
 (rustorb-dds#17), samples too large for a datagram, sent as DATA_FRAG
-(rustorb-dds#18), and TRANSIENT_LOCAL late joiners (rustorb-dds#19).
+(rustorb-dds#18), TRANSIENT_LOCAL late joiners and LIVELINESS
+(rustorb-dds#19).
 
 | Peer | Where it comes from | Program |
 |---|---|---|
@@ -51,6 +52,18 @@ once, before there is a subscriber, then waits for one and for its
 acknowledgments. The subscriber creates its reader two seconds late and
 must still get all of them, in order.
 
+The `-liveliness-<kind>` cases use the `liveliness` programs (the
+`liveliness` example on the rustorb-dds side) with the LIVELINESS kind
+`automatic`, `participant` (MANUAL_BY_PARTICIPANT) or `topic`
+(MANUAL_BY_TOPIC) and a lease of `LEASE` ms (default 1000) on both
+sides. The publisher writes sample 1, asserts its liveliness every
+quarter lease for three leases (on the participant or on the writer;
+nothing for automatic), writes sample 2, keeps silent for four leases
+and writes sample 3. The subscriber checks its reader's
+LIVELINESS_CHANGED status: the writer stays alive up to sample 2; after
+it a manual writer becomes not alive and an automatic one stays alive;
+after sample 3 the writer is alive. `ONLY=liveliness` runs only these.
+
 The `-large` cases send hello world samples whose message is
 `LARGE_SIZE` octets (default 300000), more than a UDP datagram holds, so
 both sides send them as DATA_FRAG. Each message is letters that depend on
@@ -88,6 +101,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#17 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 12 cases pass |
 | 2026-11-03 | rustorb-dds#18 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 20 cases pass |
 | 2026-11-03 | rustorb-dds#19 (part 1) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 24 cases pass |
+| 2026-11-03 | rustorb-dds#19 (part 2) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 
 Found on the way:
 
@@ -141,3 +155,11 @@ Found on the way:
   to KEEP_ALL too: that policy, KEEP_LAST 1 by default, bounds what it
   keeps for late joiners. `cyclonedds/hello.c` sets it. Fast DDS 2.11.2
   sends the writer's whole history.
+- LIVELINESS (rustorb-dds#19): Fast DDS 2.11.2 marks the payload of its
+  participant messages (`ParticipantMessageData`, 9.6.3.1) `PL_CDR_LE`,
+  though what follows is plain CDR; Cyclone DDS 0.10.4 marks it `CDR_LE`.
+  rustorb-dds reads both and sends `CDR`. Fast DDS writes an automatic
+  liveliness message every `announcement_period` (a Fast DDS setting,
+  set to a third of the lease here). The locators it announces include
+  some that are not UDPv4; a MANUAL_BY_TOPIC liveliness HEARTBEAT that
+  cannot be sent to those is skipped, as a write's DATA is.

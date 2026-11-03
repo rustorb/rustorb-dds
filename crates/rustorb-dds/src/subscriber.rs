@@ -12,7 +12,9 @@ use crate::error::Result;
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
 use crate::participant::Shared;
 use crate::qos::{DataReaderQos, SubscriberQos, duration_to_rtps};
-use crate::status::{IncompatibleQosStatus, SampleRejectedStatus};
+use crate::status::{
+    DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, SampleRejectedStatus,
+};
 use crate::topic::Topic;
 use crate::typed::{Typed, instance_of};
 
@@ -315,6 +317,27 @@ impl<T: TopicType> DataReader<T> {
         g.readers
             .get_mut(&self.guid)
             .map(|r| r.samples.take_rejected_status())
+            .unwrap_or_default()
+    }
+
+    /// The LIVELINESS_CHANGED status: how many matched writers are alive
+    /// and how many are not. Reading it resets the `*_change` counts.
+    pub fn liveliness_changed_status(&self) -> LivelinessChangedStatus {
+        let mut g = self.shared.lock_any();
+        g.readers
+            .get_mut(&self.guid)
+            .map(|r| r.liveliness_changed.take())
+            .unwrap_or_default()
+    }
+
+    /// The REQUESTED_DEADLINE_MISSED status: DEADLINE periods in which an
+    /// alive instance got no sample. Reading it resets
+    /// `total_count_change`.
+    pub fn requested_deadline_missed_status(&self) -> DeadlineMissedStatus {
+        let mut g = self.shared.lock_any();
+        g.readers
+            .get_mut(&self.guid)
+            .map(|r| r.deadlines.missed.take())
             .unwrap_or_default()
     }
 

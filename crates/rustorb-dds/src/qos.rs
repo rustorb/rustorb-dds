@@ -178,9 +178,15 @@ pub struct DataWriterQos {
     /// [`crate::Error::Unsupported`].
     pub durability: DurabilityKind,
     /// DEADLINE period (DDS 1.4, 2.2.3.7); `None`, infinite, by default.
-    /// It is announced and matched on.
+    /// Each period in which a registered instance is not written counts
+    /// in [`crate::DataWriter::offered_deadline_missed_status`]; a
+    /// disposed instance is not counted until it is written again.
     pub deadline: Option<Duration>,
-    /// LIVELINESS. It is announced and matched on.
+    /// LIVELINESS (DDS 1.4, 2.2.3.11). The participant asserts AUTOMATIC
+    /// writers; a MANUAL_BY_PARTICIPANT or MANUAL_BY_TOPIC writer is
+    /// asserted by writing or by `assert_liveliness`, and is lost
+    /// ([`crate::DataWriter::liveliness_lost_status`]) when its lease
+    /// passes without that.
     pub liveliness: Liveliness,
 }
 
@@ -211,10 +217,14 @@ pub struct DataReaderQos {
     /// DURABILITY; VOLATILE by default. A TRANSIENT_LOCAL reader gets
     /// what a TRANSIENT_LOCAL writer kept from before they matched.
     pub durability: DurabilityKind,
-    /// DEADLINE period; `None`, infinite, by default. It is announced
-    /// and matched on.
+    /// DEADLINE period; `None`, infinite, by default. Each period in
+    /// which an alive instance gets no sample counts in
+    /// [`crate::DataReader::requested_deadline_missed_status`].
     pub deadline: Option<Duration>,
-    /// LIVELINESS. It is announced and matched on.
+    /// LIVELINESS: the most the reader accepts from writers (the kind and
+    /// the lease are matched on). Matched writers that lose their
+    /// liveliness count in [`crate::DataReader::liveliness_changed_status`],
+    /// and the instances only they wrote become NOT_ALIVE_NO_WRITERS.
     pub liveliness: Liveliness,
 }
 
