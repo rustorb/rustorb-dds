@@ -1,9 +1,12 @@
 //! The DDSI-RTPS 2.5 wire protocol for rustorb-dds.
 //!
 //! What is here so far: reading and writing RTPS messages and
-//! submessages (DDSI-RTPS 2.5 clauses 8.3 and 9.4, rustorb-dds#3), and the
-//! UDP transport (9.6.2, rustorb-dds#4), and participant discovery (SPDP,
-//! 8.5.3, rustorb-dds#5) in [`spdp`] with the PL_CDR helpers in [`pl`].
+//! submessages (DDSI-RTPS 2.5 clauses 8.3 and 9.4, rustorb-dds#3), the
+//! UDP transport (9.6.2, rustorb-dds#4), participant discovery (SPDP,
+//! 8.5.3, rustorb-dds#5) in [`spdp`] with the PL_CDR helpers in [`pl`],
+//! and endpoint discovery and matching (SEDP, 8.5.4, rustorb-dds#6) in
+//! [`sedp`], built on the reliable writer and reader of [`reliable`], the
+//! message receiver of [`receiver`] and the QoS policies of [`qos`].
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -38,14 +41,17 @@
 //! assert_eq!(Message::decode(&bytes).unwrap(), msg);
 //! ```
 //!
-//! Still to come (rustorb/rustorb#111, stages D1 and D2): SEDP
-//! discovery, and best-effort then reliable writers
-//! and readers.
+//! Still to come (rustorb/rustorb#111, stages D1 and D2): best-effort
+//! then reliable user writers and readers.
 
 mod error;
 mod message;
 mod parameter;
 pub mod pl;
+pub mod qos;
+pub mod receiver;
+pub mod reliable;
+pub mod sedp;
 pub mod spdp;
 mod submessage;
 mod types;

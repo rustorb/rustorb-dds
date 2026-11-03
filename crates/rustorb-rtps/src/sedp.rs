@@ -1,0 +1,1033 @@
+//! The Simple Endpoint Discovery Protocol (DDSI-RTPS 2.5, 8.5.4, 8.5.5
+//! and 9.6.3).
+//!
+//! [`EndpointData`] is `DiscoveredWriterData` and `DiscoveredReaderData`
+//! and their PL_CDR form. [`Sedp`] holds the four built-in SEDP endpoints
+//! of a participant (publications and subscriptions, each a writer and a
+//! reader), without doing any I/O. They are reliable, using
+//! [`crate::reliable`]. The optional topic endpoints (8.5.4.3) are not
+//! provided.
+//!
+//! [`Sedp`] also matches local and remote endpoints: same topic name and
+//! type name, compatible RELIABILITY and DURABILITY, and a shared
+//! partition ([`crate::qos`]).
+//!
+//! The caller connects it to SPDP: [`Sedp::add_participant`] when a
+//! participant is discovered or updated, [`Sedp::remove_participant`]
+//! when it is gone, and adds [`Sedp::BUILTIN_ENDPOINTS`] to the local
+//! `availableBuiltinEndpoints`.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
+
+use crate::error::DecodeError;
+use crate::parameter::{Parameter, ParameterList};
+use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
+use crate::qos::{DurabilityKind, Reliability, compatible, partitions_match};
+use crate::receiver::receive;
+use crate::reliable::{
+    Change, Outgoing, ReaderConfig, ReliableReader, ReliableWriter, WriterConfig,
+};
+use crate::spdp::ParticipantData;
+use crate::submessage::{PayloadKind, SerializedPayload, Submessage};
+use crate::types::{
+    BuiltinEndpointSet, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, VendorId,
+};
+use crate::wire::Endianness;
+
+/// `DiscoveredWriterData` or `DiscoveredReaderData` (8.5.4.4, 9.6.3.2):
+/// the parts of `PublicationBuiltinTopicData` or
+/// `SubscriptionBuiltinTopicData` modelled here, with the writer or
+/// reader proxy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointData {
+    /// `key`, the endpoint's GUID (`PID_ENDPOINT_GUID`).
+    pub guid: Guid,
+    /// `participant_key` (`PID_PARTICIPANT_GUID`).
+    pub participant_guid: Guid,
+    /// `topic_name`.
+    pub topic_name: String,
+    /// `type_name`.
+    pub type_name: String,
+    /// RELIABILITY.
+    pub reliability: Reliability,
+    /// DURABILITY.
+    pub durability: DurabilityKind,
+    /// PARTITION; empty means the default partition.
+    pub partitions: Vec<String>,
+    /// USER_DATA.
+    pub user_data: Vec<u8>,
+    /// `unicastLocatorList`. When both lists are empty, the participant's
+    /// default locators apply.
+    pub unicast_locators: Vec<Locator>,
+    /// `multicastLocatorList`.
+    pub multicast_locators: Vec<Locator>,
+    /// `expectsInlineQos` (readers only).
+    pub expects_inline_qos: bool,
+}
+
+impl EndpointData {
+    /// A writer with the DDS defaults: RELIABLE, VOLATILE.
+    pub fn writer(guid: Guid, topic_name: &str, type_name: &str) -> Self {
+        Self::new(guid, topic_name, type_name, Reliability::writer_default())
+    }
+
+    /// A reader with the DDS defaults: BEST_EFFORT, VOLATILE.
+    pub fn reader(guid: Guid, topic_name: &str, type_name: &str) -> Self {
+        Self::new(guid, topic_name, type_name, Reliability::reader_default())
+    }
+
+    fn new(guid: Guid, topic_name: &str, type_name: &str, reliability: Reliability) -> Self {
+        EndpointData {
+            guid,
+            participant_guid: Guid::new(guid.prefix, EntityId::PARTICIPANT),
+            topic_name: topic_name.to_owned(),
+            type_name: type_name.to_owned(),
+            reliability,
+            durability: DurabilityKind::Volatile,
+            partitions: Vec::new(),
+            user_data: Vec::new(),
+            unicast_locators: Vec::new(),
+            multicast_locators: Vec::new(),
+            expects_inline_qos: false,
+        }
+    }
+
+    /// The parameter list. RELIABILITY and DURABILITY are always written;
+    /// other values equal to their defaults are left out, as is the
+    /// separate proxy GUID (Table 9.17).
+    pub fn to_parameter_list(&self, endianness: Endianness) -> ParameterList {
+        let b = PlBuilder::new(endianness);
+        let mut l = ParameterList::new();
+        l.push(b.guid(pid::ENDPOINT_GUID, self.guid));
+        l.push(b.guid(pid::PARTICIPANT_GUID, self.participant_guid));
+        l.push(b.string(pid::TOPIC_NAME, &self.topic_name));
+        l.push(b.string(pid::TYPE_NAME, &self.type_name));
+        l.push(self.reliability.to_parameter(&b));
+        l.push(self.durability.to_parameter(&b));
+        if !self.partitions.is_empty() {
+            l.push(b.strings(pid::PARTITION, &self.partitions));
+        }
+        if !self.user_data.is_empty() {
+            l.push(b.octets(pid::USER_DATA, &self.user_data));
+        }
+        for loc in &self.unicast_locators {
+            l.push(b.locator(pid::UNICAST_LOCATOR, loc));
+        }
+        for loc in &self.multicast_locators {
+            l.push(b.locator(pid::MULTICAST_LOCATOR, loc));
+        }
+        if self.expects_inline_qos {
+            l.push(b.bool(pid::EXPECTS_INLINE_QOS, true));
+        }
+        l
+    }
+
+    /// The serialized payload: `PL_CDR_*` header and parameter list.
+    pub fn to_payload(&self, endianness: Endianness) -> Vec<u8> {
+        encode_pl_payload(&self.to_parameter_list(endianness), endianness)
+    }
+
+    /// Reads the data from a parameter list. `writer` selects the
+    /// RELIABILITY default when the parameter is absent (RELIABLE for
+    /// writers, BEST_EFFORT for readers).
+    ///
+    /// `PID_ENDPOINT_GUID`, `PID_TOPIC_NAME` and `PID_TYPE_NAME` are
+    /// required. The participant GUID defaults to the endpoint's prefix.
+    /// Unknown parameters are skipped, except protocol-defined ones with
+    /// the must-understand bit (Table 9.6).
+    pub fn from_parameter_list(
+        list: &ParameterList,
+        endianness: Endianness,
+        writer: bool,
+    ) -> Result<Self, DecodeError> {
+        let v = PlValues::new(endianness);
+        let mut guid = None;
+        let mut participant = None;
+        let mut topic = None;
+        let mut type_name = None;
+        let mut d = EndpointData::new(
+            Guid::UNKNOWN,
+            "",
+            "",
+            if writer {
+                Reliability::writer_default()
+            } else {
+                Reliability::reader_default()
+            },
+        );
+        for p in &list.parameters {
+            match p.id {
+                pid::ENDPOINT_GUID => guid = Some(v.guid(p)?),
+                pid::PARTICIPANT_GUID => participant = Some(v.guid(p)?),
+                pid::TOPIC_NAME => topic = Some(v.string(p)?),
+                pid::TYPE_NAME => type_name = Some(v.string(p)?),
+                pid::RELIABILITY => d.reliability = Reliability::from_parameter(&v, p)?,
+                pid::DURABILITY => d.durability = DurabilityKind::from_parameter(&v, p)?,
+                pid::PARTITION => d.partitions = v.strings(p)?,
+                pid::USER_DATA => d.user_data = v.octets(p)?,
+                pid::UNICAST_LOCATOR => d.unicast_locators.push(v.locator(p)?),
+                pid::MULTICAST_LOCATOR => d.multicast_locators.push(v.locator(p)?),
+                pid::EXPECTS_INLINE_QOS => d.expects_inline_qos = v.bool(p)?,
+                id if !id.is_vendor_specific() && id.must_understand() => {
+                    return Err(DecodeError::MustUnderstand(id));
+                }
+                _ => {}
+            }
+        }
+        d.guid = guid.ok_or(DecodeError::MissingParameter(pid::ENDPOINT_GUID))?;
+        d.participant_guid = participant.unwrap_or(Guid::new(d.guid.prefix, EntityId::PARTICIPANT));
+        d.topic_name = topic.ok_or(DecodeError::MissingParameter(pid::TOPIC_NAME))?;
+        d.type_name = type_name.ok_or(DecodeError::MissingParameter(pid::TYPE_NAME))?;
+        Ok(d)
+    }
+
+    /// Reads the data from a serialized payload.
+    pub fn from_payload(bytes: &[u8], writer: bool) -> Result<Self, DecodeError> {
+        let (list, e) = decode_pl_payload(bytes)?;
+        Self::from_parameter_list(&list, e, writer)
+    }
+}
+
+/// Whether a writer and a reader match: same topic and type names,
+/// compatible RELIABILITY and DURABILITY, and a shared partition.
+pub fn endpoints_match(writer: &EndpointData, reader: &EndpointData) -> bool {
+    writer.topic_name == reader.topic_name
+        && writer.type_name == reader.type_name
+        && compatible(
+            (writer.reliability.kind, writer.durability),
+            (reader.reliability.kind, reader.durability),
+        )
+        && partitions_match(&writer.partitions, &reader.partitions)
+}
+
+/// Settings of [`Sedp`]: the timing of its reliable endpoints.
+#[derive(Clone, Debug, Default)]
+pub struct SedpConfig {
+    /// For the built-in writers.
+    pub writer: WriterConfig,
+    /// For the built-in readers.
+    pub reader: ReaderConfig,
+}
+
+/// A change in the remote endpoints or in the matches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SedpEvent {
+    /// A remote writer was seen for the first time.
+    WriterDiscovered(EndpointData),
+    /// A known remote writer announced different data.
+    WriterUpdated(EndpointData),
+    /// A remote writer is gone.
+    WriterRemoved(Guid),
+    /// A remote reader was seen for the first time.
+    ReaderDiscovered(EndpointData),
+    /// A known remote reader announced different data.
+    ReaderUpdated(EndpointData),
+    /// A remote reader is gone.
+    ReaderRemoved(Guid),
+    /// A local endpoint now matches a remote one.
+    Matched {
+        /// The local writer or reader.
+        local: Guid,
+        /// The remote reader or writer.
+        remote: Guid,
+    },
+    /// A local endpoint no longer matches a remote one.
+    Unmatched {
+        /// The local writer or reader.
+        local: Guid,
+        /// The remote reader or writer.
+        remote: Guid,
+    },
+}
+
+/// `StatusInfo_t` flags (9.6.4.9).
+const STATUS_DISPOSED: u8 = 0x01;
+const STATUS_UNREGISTERED: u8 = 0x02;
+
+#[derive(Debug)]
+struct Local {
+    data: EndpointData,
+    sn: SequenceNumber,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Writer,
+    Reader,
+}
+
+/// The SEDP built-in endpoints of one participant, and the endpoint
+/// matching.
+#[derive(Debug)]
+pub struct Sedp {
+    prefix: GuidPrefix,
+    pub_writer: ReliableWriter,
+    pub_reader: ReliableReader,
+    sub_writer: ReliableWriter,
+    sub_reader: ReliableReader,
+    /// Default locators of the remote participants.
+    participants: HashMap<GuidPrefix, (Vec<Locator>, Vec<Locator>)>,
+    local_writers: BTreeMap<Guid, Local>,
+    local_readers: BTreeMap<Guid, Local>,
+    remote_writers: HashMap<Guid, EndpointData>,
+    remote_readers: HashMap<Guid, EndpointData>,
+    /// (local, remote) pairs that match.
+    matches: HashSet<(Guid, Guid)>,
+}
+
+impl Sedp {
+    /// The SEDP bits of `availableBuiltinEndpoints` for the endpoints
+    /// provided here (9.3.2.12).
+    pub const BUILTIN_ENDPOINTS: u32 = BuiltinEndpointSet::PUBLICATIONS_ANNOUNCER
+        | BuiltinEndpointSet::PUBLICATIONS_DETECTOR
+        | BuiltinEndpointSet::SUBSCRIPTIONS_ANNOUNCER
+        | BuiltinEndpointSet::SUBSCRIPTIONS_DETECTOR;
+
+    /// The SEDP endpoints of the participant `prefix`.
+    pub fn new(prefix: GuidPrefix, vendor_id: VendorId, config: SedpConfig) -> Self {
+        let g = |e| Guid::new(prefix, e);
+        Sedp {
+            prefix,
+            pub_writer: ReliableWriter::new(
+                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER),
+                vendor_id,
+                config.writer.clone(),
+            ),
+            pub_reader: ReliableReader::new(
+                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
+                vendor_id,
+                config.reader.clone(),
+            ),
+            sub_writer: ReliableWriter::new(
+                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER),
+                vendor_id,
+                config.writer,
+            ),
+            sub_reader: ReliableReader::new(
+                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
+                vendor_id,
+                config.reader,
+            ),
+            participants: HashMap::new(),
+            local_writers: BTreeMap::new(),
+            local_readers: BTreeMap::new(),
+            remote_writers: HashMap::new(),
+            remote_readers: HashMap::new(),
+            matches: HashSet::new(),
+        }
+    }
+
+    /// Connects the SEDP endpoints with those of a discovered participant,
+    /// as far as its `availableBuiltinEndpoints` says it has them
+    /// (8.5.5.1). Calling it again for the same participant updates the
+    /// locators. The local participant itself is ignored.
+    pub fn add_participant(&mut self, p: &ParticipantData, now: Instant) {
+        if p.guid_prefix == self.prefix {
+            return;
+        }
+        let set = p.available_builtin_endpoints;
+        let uc = p.metatraffic_unicast_locators.clone();
+        let mc = p.metatraffic_multicast_locators.clone();
+        let g = |e| Guid::new(p.guid_prefix, e);
+        if set.contains(BuiltinEndpointSet::PUBLICATIONS_DETECTOR) {
+            self.pub_writer.add_reader(
+                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
+                uc.clone(),
+                mc.clone(),
+            );
+        }
+        if set.contains(BuiltinEndpointSet::PUBLICATIONS_ANNOUNCER) {
+            self.pub_reader.add_writer(
+                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER),
+                uc.clone(),
+                mc.clone(),
+                now,
+            );
+        }
+        if set.contains(BuiltinEndpointSet::SUBSCRIPTIONS_DETECTOR) {
+            self.sub_writer.add_reader(
+                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
+                uc.clone(),
+                mc.clone(),
+            );
+        }
+        if set.contains(BuiltinEndpointSet::SUBSCRIPTIONS_ANNOUNCER) {
+            self.sub_reader.add_writer(
+                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER),
+                uc,
+                mc,
+                now,
+            );
+        }
+        self.participants.insert(
+            p.guid_prefix,
+            (
+                p.default_unicast_locators.clone(),
+                p.default_multicast_locators.clone(),
+            ),
+        );
+    }
+
+    /// Disconnects from a participant that is gone (8.5.5.2) and forgets
+    /// its endpoints.
+    pub fn remove_participant(&mut self, prefix: &GuidPrefix) -> Vec<SedpEvent> {
+        self.pub_writer.remove_readers_of(prefix);
+        self.pub_reader.remove_writers_of(prefix);
+        self.sub_writer.remove_readers_of(prefix);
+        self.sub_reader.remove_writers_of(prefix);
+        self.participants.remove(prefix);
+        let mut events = Vec::new();
+        let writers: Vec<Guid> = self
+            .remote_writers
+            .keys()
+            .filter(|g| g.prefix == *prefix)
+            .copied()
+            .collect();
+        for g in writers {
+            self.remove_remote(Kind::Writer, g, &mut events);
+        }
+        let readers: Vec<Guid> = self
+            .remote_readers
+            .keys()
+            .filter(|g| g.prefix == *prefix)
+            .copied()
+            .collect();
+        for g in readers {
+            self.remove_remote(Kind::Reader, g, &mut events);
+        }
+        events
+    }
+
+    /// Announces a local writer, or its new data if it is already
+    /// announced, and matches it with the remote readers.
+    pub fn add_writer(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        self.add_local(Kind::Writer, data)
+    }
+
+    /// Announces a local reader, or its new data, and matches it with the
+    /// remote writers.
+    pub fn add_reader(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        self.add_local(Kind::Reader, data)
+    }
+
+    /// Announces that a local writer is gone.
+    pub fn remove_writer(&mut self, guid: &Guid) -> Vec<SedpEvent> {
+        self.remove_local(Kind::Writer, guid)
+    }
+
+    /// Announces that a local reader is gone.
+    pub fn remove_reader(&mut self, guid: &Guid) -> Vec<SedpEvent> {
+        self.remove_local(Kind::Reader, guid)
+    }
+
+    /// The remote writers known.
+    pub fn remote_writers(&self) -> impl Iterator<Item = &EndpointData> {
+        self.remote_writers.values()
+    }
+
+    /// The remote readers known.
+    pub fn remote_readers(&self) -> impl Iterator<Item = &EndpointData> {
+        self.remote_readers.values()
+    }
+
+    /// Looks up a remote writer.
+    pub fn remote_writer(&self, guid: &Guid) -> Option<&EndpointData> {
+        self.remote_writers.get(guid)
+    }
+
+    /// Looks up a remote reader.
+    pub fn remote_reader(&self, guid: &Guid) -> Option<&EndpointData> {
+        self.remote_readers.get(guid)
+    }
+
+    /// The remote endpoints that match a local one.
+    pub fn matched(&self, local: &Guid) -> impl Iterator<Item = &Guid> {
+        self.matches
+            .iter()
+            .filter(move |(l, _)| l == local)
+            .map(|(_, r)| r)
+    }
+
+    /// Processes one received RTPS message and returns what changed.
+    pub fn handle_message(&mut self, bytes: &[u8], now: Instant) -> Vec<SedpEvent> {
+        let Some((_, received)) = receive(bytes, self.prefix) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for r in received {
+            let src = r.source_prefix;
+            match r.submessage {
+                Submessage::Data(d) => {
+                    let w = Guid::new(src, d.writer_id);
+                    if d.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        for c in self.pub_reader.handle_data(w, &d, r.timestamp) {
+                            self.apply(Kind::Writer, &c, &mut events);
+                        }
+                    } else if d.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        for c in self.sub_reader.handle_data(w, &d, r.timestamp) {
+                            self.apply(Kind::Reader, &c, &mut events);
+                        }
+                    }
+                }
+                Submessage::Gap(g) => {
+                    let w = Guid::new(src, g.writer_id);
+                    if g.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        for c in self.pub_reader.handle_gap(w, &g) {
+                            self.apply(Kind::Writer, &c, &mut events);
+                        }
+                    } else if g.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        for c in self.sub_reader.handle_gap(w, &g) {
+                            self.apply(Kind::Reader, &c, &mut events);
+                        }
+                    }
+                }
+                Submessage::Heartbeat(h) => {
+                    let w = Guid::new(src, h.writer_id);
+                    if h.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        for c in self.pub_reader.handle_heartbeat(w, &h, now) {
+                            self.apply(Kind::Writer, &c, &mut events);
+                        }
+                    } else if h.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        for c in self.sub_reader.handle_heartbeat(w, &h, now) {
+                            self.apply(Kind::Reader, &c, &mut events);
+                        }
+                    }
+                }
+                Submessage::AckNack(a) => {
+                    let reader = Guid::new(src, a.reader_id);
+                    if a.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        self.pub_writer.handle_acknack(reader, &a, now);
+                    } else if a.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        self.sub_writer.handle_acknack(reader, &a, now);
+                    }
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+
+    /// The datagrams due at `now`.
+    pub fn poll(&mut self, now: Instant) -> Vec<Outgoing> {
+        let mut out = self.pub_writer.poll(now);
+        out.extend(self.sub_writer.poll(now));
+        out.extend(self.pub_reader.poll(now));
+        out.extend(self.sub_reader.poll(now));
+        out
+    }
+
+    /// When [`Sedp::poll`] next has something to do, if no message comes
+    /// in before.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.pub_writer.next_deadline(),
+            self.sub_writer.next_deadline(),
+            self.pub_reader.next_deadline(),
+            self.sub_reader.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    fn add_local(&mut self, kind: Kind, data: EndpointData) -> Vec<SedpEvent> {
+        let mut qos = ParameterList::new();
+        qos.push(Parameter::new(pid::KEY_HASH, data.guid.to_bytes()));
+        let payload = SerializedPayload {
+            kind: PayloadKind::Data,
+            bytes: data.to_payload(Endianness::NATIVE),
+        };
+        let (writer, locals) = match kind {
+            Kind::Writer => (&mut self.pub_writer, &mut self.local_writers),
+            Kind::Reader => (&mut self.sub_writer, &mut self.local_readers),
+        };
+        let sn = writer.add_change(Some(qos), Some(payload));
+        // The history keeps one change per endpoint (8.5.4.4).
+        if let Some(old) = locals.insert(
+            data.guid,
+            Local {
+                data: data.clone(),
+                sn,
+            },
+        ) {
+            writer.remove_change(old.sn);
+        }
+        let mut events = Vec::new();
+        let remotes: Vec<Guid> = match kind {
+            Kind::Writer => self.remote_readers.keys().copied().collect(),
+            Kind::Reader => self.remote_writers.keys().copied().collect(),
+        };
+        for r in remotes {
+            self.update_match(kind, data.guid, r, &mut events);
+        }
+        events
+    }
+
+    fn remove_local(&mut self, kind: Kind, guid: &Guid) -> Vec<SedpEvent> {
+        let (writer, locals) = match kind {
+            Kind::Writer => (&mut self.pub_writer, &mut self.local_writers),
+            Kind::Reader => (&mut self.sub_writer, &mut self.local_readers),
+        };
+        let Some(old) = locals.remove(guid) else {
+            return Vec::new();
+        };
+        writer.remove_change(old.sn);
+        // A dispose: the key in-line and as a key-only payload (9.6.3.2).
+        let e = Endianness::NATIVE;
+        let b = PlBuilder::new(e);
+        let mut qos = ParameterList::new();
+        qos.push(Parameter::new(pid::KEY_HASH, guid.to_bytes()));
+        qos.push(Parameter::new(
+            pid::STATUS_INFO,
+            [0, 0, 0, STATUS_DISPOSED | STATUS_UNREGISTERED],
+        ));
+        let mut key = ParameterList::new();
+        key.push(b.guid(pid::ENDPOINT_GUID, *guid));
+        writer.add_change(
+            Some(qos),
+            Some(SerializedPayload {
+                kind: PayloadKind::Key,
+                bytes: encode_pl_payload(&key, e),
+            }),
+        );
+        let mut events = Vec::new();
+        let pairs: Vec<(Guid, Guid)> = self
+            .matches
+            .iter()
+            .filter(|(l, _)| l == guid)
+            .copied()
+            .collect();
+        for (l, r) in pairs {
+            self.matches.remove(&(l, r));
+            events.push(SedpEvent::Unmatched {
+                local: l,
+                remote: r,
+            });
+        }
+        events
+    }
+
+    /// Applies a change received from a remote SEDP writer: `kind` is the
+    /// kind of the endpoints it describes.
+    fn apply(&mut self, kind: Kind, c: &Change, events: &mut Vec<SedpEvent>) {
+        let status = c
+            .inline_qos
+            .as_ref()
+            .and_then(|q| q.get(pid::STATUS_INFO))
+            .and_then(|p| p.value.get(3).copied())
+            .unwrap_or(0);
+        if status & (STATUS_DISPOSED | STATUS_UNREGISTERED) != 0 {
+            if let Some(g) = disposed_key(c) {
+                self.remove_remote(kind, g, events);
+            }
+            return;
+        }
+        let Some(p) = c.payload.as_ref().filter(|p| p.kind == PayloadKind::Data) else {
+            return;
+        };
+        let Ok(mut data) = EndpointData::from_payload(&p.bytes, kind == Kind::Writer) else {
+            return;
+        };
+        if data.guid.prefix == self.prefix {
+            return;
+        }
+        if data.unicast_locators.is_empty() && data.multicast_locators.is_empty() {
+            if let Some((uc, mc)) = self.participants.get(&data.guid.prefix) {
+                data.unicast_locators = uc.clone();
+                data.multicast_locators = mc.clone();
+            }
+        }
+        let guid = data.guid;
+        let remotes = match kind {
+            Kind::Writer => &mut self.remote_writers,
+            Kind::Reader => &mut self.remote_readers,
+        };
+        match remotes.insert(guid, data.clone()) {
+            Some(old) if old == data => return,
+            Some(_) => events.push(match kind {
+                Kind::Writer => SedpEvent::WriterUpdated(data),
+                Kind::Reader => SedpEvent::ReaderUpdated(data),
+            }),
+            None => events.push(match kind {
+                Kind::Writer => SedpEvent::WriterDiscovered(data),
+                Kind::Reader => SedpEvent::ReaderDiscovered(data),
+            }),
+        }
+        let locals: Vec<Guid> = match kind {
+            Kind::Writer => self.local_readers.keys().copied().collect(),
+            Kind::Reader => self.local_writers.keys().copied().collect(),
+        };
+        let local_kind = match kind {
+            Kind::Writer => Kind::Reader,
+            Kind::Reader => Kind::Writer,
+        };
+        for l in locals {
+            self.update_match(local_kind, l, guid, events);
+        }
+    }
+
+    fn remove_remote(&mut self, kind: Kind, guid: Guid, events: &mut Vec<SedpEvent>) {
+        let removed = match kind {
+            Kind::Writer => self.remote_writers.remove(&guid),
+            Kind::Reader => self.remote_readers.remove(&guid),
+        };
+        if removed.is_none() {
+            return;
+        }
+        let mut pairs: Vec<(Guid, Guid)> = self
+            .matches
+            .iter()
+            .filter(|(_, r)| *r == guid)
+            .copied()
+            .collect();
+        pairs.sort();
+        for (l, r) in pairs {
+            self.matches.remove(&(l, r));
+            events.push(SedpEvent::Unmatched {
+                local: l,
+                remote: r,
+            });
+        }
+        events.push(match kind {
+            Kind::Writer => SedpEvent::WriterRemoved(guid),
+            Kind::Reader => SedpEvent::ReaderRemoved(guid),
+        });
+    }
+
+    /// Re-evaluates whether the local endpoint `local` (of `kind`) and the
+    /// remote endpoint `remote` match, and reports a change.
+    fn update_match(&mut self, kind: Kind, local: Guid, remote: Guid, events: &mut Vec<SedpEvent>) {
+        let now = match kind {
+            Kind::Writer => match (
+                self.local_writers.get(&local),
+                self.remote_readers.get(&remote),
+            ) {
+                (Some(w), Some(r)) => endpoints_match(&w.data, r),
+                _ => false,
+            },
+            Kind::Reader => match (
+                self.remote_writers.get(&remote),
+                self.local_readers.get(&local),
+            ) {
+                (Some(w), Some(r)) => endpoints_match(w, &r.data),
+                _ => false,
+            },
+        };
+        let was = self.matches.contains(&(local, remote));
+        if now && !was {
+            self.matches.insert((local, remote));
+            events.push(SedpEvent::Matched { local, remote });
+        } else if !now && was {
+            self.matches.remove(&(local, remote));
+            events.push(SedpEvent::Unmatched { local, remote });
+        }
+    }
+}
+
+/// The endpoint a dispose or unregister refers to: from the payload's
+/// `PID_ENDPOINT_GUID` (9.6.3.2), or else from the in-line
+/// `PID_KEY_HASH`, which for a GUID key is the GUID itself (9.6.4.8).
+fn disposed_key(c: &Change) -> Option<Guid> {
+    if let Some(p) = &c.payload {
+        if let Ok((list, e)) = decode_pl_payload(&p.bytes) {
+            if let Some(g) = list.get(pid::ENDPOINT_GUID) {
+                return PlValues::new(e).guid(g).ok();
+            }
+        }
+    }
+    let hash = c.inline_qos.as_ref()?.get(pid::KEY_HASH)?;
+    let b: [u8; 16] = hash.value.get(..16)?.try_into().ok()?;
+    let mut prefix = [0u8; 12];
+    prefix.copy_from_slice(&b[..12]);
+    Some(Guid::new(
+        GuidPrefix(prefix),
+        EntityId::from_bytes([b[12], b[13], b[14], b[15]]),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qos::ReliabilityKind;
+    use crate::types::entity_kind;
+    use std::time::Duration as StdDuration;
+
+    fn prefix(n: u8) -> GuidPrefix {
+        GuidPrefix([n; 12])
+    }
+
+    fn wguid(n: u8) -> Guid {
+        Guid::new(
+            prefix(n),
+            EntityId::user([0, 0, 1], entity_kind::USER_WRITER_NO_KEY),
+        )
+    }
+
+    fn rguid(n: u8) -> Guid {
+        Guid::new(
+            prefix(n),
+            EntityId::user([0, 0, 2], entity_kind::USER_READER_NO_KEY),
+        )
+    }
+
+    fn participant(n: u8) -> ParticipantData {
+        let mut p = ParticipantData::new(prefix(n), VendorId::UNKNOWN);
+        p.available_builtin_endpoints.0 |= Sedp::BUILTIN_ENDPOINTS;
+        p.metatraffic_unicast_locators = vec![Locator::udpv4(
+            format!("127.0.0.1:{}", 7000 + n as u16).parse().unwrap(),
+        )];
+        p.default_unicast_locators = vec![Locator::udpv4(
+            format!("127.0.0.1:{}", 8000 + n as u16).parse().unwrap(),
+        )];
+        p
+    }
+
+    fn sedp(n: u8) -> Sedp {
+        Sedp::new(prefix(n), VendorId::UNKNOWN, SedpConfig::default())
+    }
+
+    /// Two participants that know each other.
+    fn pair(t: Instant) -> (Sedp, Sedp) {
+        let (mut a, mut b) = (sedp(1), sedp(2));
+        a.add_participant(&participant(2), t);
+        b.add_participant(&participant(1), t);
+        (a, b)
+    }
+
+    /// Exchanges datagrams until both are quiet; `drop(i)` loses the
+    /// i-th datagram. Returns the events of a and of b.
+    fn pump(
+        a: &mut Sedp,
+        b: &mut Sedp,
+        t: Instant,
+        drop: impl Fn(usize) -> bool,
+    ) -> (Vec<SedpEvent>, Vec<SedpEvent>) {
+        let (mut ea, mut eb) = (Vec::new(), Vec::new());
+        let mut i = 0;
+        for round in 0..50 {
+            let now = t + StdDuration::from_secs(round);
+            let out_a = a.poll(now);
+            let out_b = b.poll(now);
+            if out_a.is_empty() && out_b.is_empty() && round > 0 {
+                break;
+            }
+            for o in out_a {
+                if !drop(i) {
+                    eb.extend(b.handle_message(&o.bytes, now));
+                }
+                i += 1;
+            }
+            for o in out_b {
+                if !drop(i) {
+                    ea.extend(a.handle_message(&o.bytes, now));
+                }
+                i += 1;
+            }
+        }
+        (ea, eb)
+    }
+
+    #[test]
+    fn endpoint_data_round_trip() {
+        let mut d = EndpointData::reader(rguid(1), "Square", "ShapeType");
+        d.reliability.kind = ReliabilityKind::Reliable;
+        d.durability = DurabilityKind::TransientLocal;
+        d.partitions = vec!["p1".into(), "p2".into()];
+        d.user_data = vec![1, 2];
+        d.unicast_locators = participant(1).default_unicast_locators;
+        d.multicast_locators = vec![Locator::udpv4("239.255.0.1:7401".parse().unwrap())];
+        d.expects_inline_qos = true;
+        for e in [Endianness::Big, Endianness::Little] {
+            assert_eq!(
+                EndpointData::from_payload(&d.to_payload(e), false).unwrap(),
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_data_defaults_and_rules() {
+        let e = Endianness::Little;
+        let b = PlBuilder::new(e);
+        let mut l = ParameterList::new();
+        l.push(b.guid(pid::ENDPOINT_GUID, wguid(3)));
+        assert_eq!(
+            EndpointData::from_parameter_list(&l, e, true),
+            Err(DecodeError::MissingParameter(pid::TOPIC_NAME))
+        );
+        l.push(b.string(pid::TOPIC_NAME, "T"));
+        l.push(b.string(pid::TYPE_NAME, "X"));
+        // Without RELIABILITY: RELIABLE for a writer, BEST_EFFORT for a
+        // reader; participant from the endpoint's prefix.
+        let w = EndpointData::from_parameter_list(&l, e, true).unwrap();
+        assert_eq!(w, EndpointData::writer(wguid(3), "T", "X"));
+        assert_eq!(w.participant_guid.prefix, prefix(3));
+        let r = EndpointData::from_parameter_list(&l, e, false).unwrap();
+        assert_eq!(r.reliability.kind, ReliabilityKind::BestEffort);
+        l.push(Parameter::new(
+            crate::parameter::ParameterId(0x4fff),
+            [0; 4],
+        ));
+        assert!(matches!(
+            EndpointData::from_parameter_list(&l, e, true),
+            Err(DecodeError::MustUnderstand(_))
+        ));
+    }
+
+    #[test]
+    fn match_rules() {
+        let w = EndpointData::writer(wguid(1), "T", "X");
+        let r = EndpointData::reader(rguid(2), "T", "X");
+        assert!(endpoints_match(&w, &r));
+        let mut r2 = r.clone();
+        r2.topic_name = "U".into();
+        assert!(!endpoints_match(&w, &r2));
+        let mut r2 = r.clone();
+        r2.type_name = "Y".into();
+        assert!(!endpoints_match(&w, &r2));
+        let mut r2 = r.clone();
+        r2.durability = DurabilityKind::TransientLocal;
+        assert!(!endpoints_match(&w, &r2));
+        let mut w2 = w.clone();
+        w2.reliability.kind = ReliabilityKind::BestEffort;
+        let mut r2 = r.clone();
+        r2.reliability.kind = ReliabilityKind::Reliable;
+        assert!(!endpoints_match(&w2, &r2));
+        assert!(endpoints_match(&w, &r2));
+        let mut r2 = r.clone();
+        r2.partitions = vec!["x".into()];
+        assert!(!endpoints_match(&w, &r2));
+    }
+
+    #[test]
+    fn discover_match_and_remove() {
+        let t = Instant::now();
+        let (mut a, mut b) = pair(t);
+        assert!(
+            a.add_writer(EndpointData::writer(wguid(1), "T", "X"))
+                .is_empty()
+        );
+        assert!(
+            b.add_reader(EndpointData::reader(rguid(2), "T", "X"))
+                .is_empty()
+        );
+        let (ea, eb) = pump(&mut a, &mut b, t, |_| false);
+
+        // b learns the writer, with a's default locators filled in.
+        let mut w = EndpointData::writer(wguid(1), "T", "X");
+        w.unicast_locators = participant(1).default_unicast_locators;
+        assert_eq!(
+            eb,
+            [
+                SedpEvent::WriterDiscovered(w),
+                SedpEvent::Matched {
+                    local: rguid(2),
+                    remote: wguid(1)
+                }
+            ]
+        );
+        assert_eq!(ea.len(), 2);
+        assert_eq!(
+            ea[1],
+            SedpEvent::Matched {
+                local: wguid(1),
+                remote: rguid(2)
+            }
+        );
+        assert_eq!(a.matched(&wguid(1)).collect::<Vec<_>>(), [&rguid(2)]);
+        assert!(a.remote_reader(&rguid(2)).is_some());
+
+        // Removing the writer reaches b as a dispose.
+        assert_eq!(
+            a.remove_writer(&wguid(1)),
+            [SedpEvent::Unmatched {
+                local: wguid(1),
+                remote: rguid(2)
+            }]
+        );
+        let (_, eb) = pump(&mut a, &mut b, t + StdDuration::from_secs(100), |_| false);
+        assert_eq!(
+            eb,
+            [
+                SedpEvent::Unmatched {
+                    local: rguid(2),
+                    remote: wguid(1)
+                },
+                SedpEvent::WriterRemoved(wguid(1))
+            ]
+        );
+        assert_eq!(b.remote_writers().count(), 0);
+
+        // The participant goes away.
+        assert_eq!(
+            a.remove_participant(&prefix(2)),
+            [SedpEvent::ReaderRemoved(rguid(2))]
+        );
+    }
+
+    #[test]
+    fn qos_update_changes_the_match() {
+        let t = Instant::now();
+        let (mut a, mut b) = pair(t);
+        let mut w = EndpointData::writer(wguid(1), "T", "X");
+        w.reliability.kind = ReliabilityKind::BestEffort;
+        a.add_writer(w.clone());
+        let mut r = EndpointData::reader(rguid(2), "T", "X");
+        r.reliability.kind = ReliabilityKind::Reliable;
+        b.add_reader(r);
+        let (_, eb) = pump(&mut a, &mut b, t, |_| false);
+        assert_eq!(eb.len(), 1, "{eb:?}");
+        assert!(matches!(eb[0], SedpEvent::WriterDiscovered(_)));
+
+        w.reliability.kind = ReliabilityKind::Reliable;
+        a.add_writer(w);
+        let (_, eb) = pump(&mut a, &mut b, t + StdDuration::from_secs(100), |_| false);
+        assert!(matches!(eb[0], SedpEvent::WriterUpdated(_)));
+        assert_eq!(
+            eb[1],
+            SedpEvent::Matched {
+                local: rguid(2),
+                remote: wguid(1)
+            }
+        );
+    }
+
+    #[test]
+    fn survives_loss() {
+        let t = Instant::now();
+        let (mut a, mut b) = pair(t);
+        for i in 0..5u8 {
+            let g = Guid::new(
+                prefix(1),
+                EntityId::user([0, 1, i], entity_kind::USER_WRITER_NO_KEY),
+            );
+            a.add_writer(EndpointData::writer(g, "T", "X"));
+        }
+        b.add_reader(EndpointData::reader(rguid(2), "T", "X"));
+        // Lose every other datagram at first.
+        let (_, eb) = pump(&mut a, &mut b, t, |i| i < 12 && i % 2 == 0);
+        let matched = eb
+            .iter()
+            .filter(|e| matches!(e, SedpEvent::Matched { .. }))
+            .count();
+        assert_eq!(matched, 5, "{eb:?}");
+        assert_eq!(b.remote_writers().count(), 5);
+    }
+
+    #[test]
+    fn own_and_unknown_participants_are_ignored() {
+        let t = Instant::now();
+        let mut a = sedp(1);
+        a.add_participant(&participant(1), t);
+        assert!(a.poll(t).is_empty());
+        // Data from a participant not added is not taken.
+        let mut c = sedp(3);
+        c.add_participant(&participant(1), t);
+        c.add_writer(EndpointData::writer(wguid(3), "T", "X"));
+        for o in c.poll(t) {
+            assert!(a.handle_message(&o.bytes, t).is_empty());
+        }
+        assert!(a.handle_message(b"junk", t).is_empty());
+    }
+}
