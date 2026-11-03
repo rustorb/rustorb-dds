@@ -7,8 +7,8 @@
 //! `HelloWorld::Greeting`. The full form, used by `interop/run.sh`:
 //!
 //! ```text
-//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable]
-//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable]
+//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
+//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
 //! ```
 //!
 //! The publisher waits for a subscriber, then writes `count` samples. The
@@ -19,6 +19,11 @@
 //! default). When reliable, the publisher keeps every sample (KEEP_ALL)
 //! and waits for the subscriber to acknowledge them before it exits, and
 //! the subscriber checks that it gets 1, 2, 3... with none missing.
+//!
+//! The message is "Hello, world!", or with `size`, `size` letters that
+//! depend on the index (`a` + (i + index) % 26 for the i-th), so that a
+//! sample too large for a datagram goes as DATA_FRAG. The subscriber
+//! checks it.
 //!
 //! Setting `RUSTORB_DROP_ONE_IN=n` drops one in `n` user datagrams
 //! received, at random, to test that reliable delivery repairs losses.
@@ -47,6 +52,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None | Some("best_effort") => false,
         Some("reliable") => true,
         Some(other) => return Err(format!("unknown reliability {other:?}").into()),
+    };
+    let size = match args.get(6) {
+        Some(v) => Some(v.parse::<usize>()?),
+        None => None,
+    };
+    let message = |index: u32| -> String {
+        match size {
+            None => "Hello, world!".into(),
+            Some(n) => (0..n)
+                .map(|i| char::from(b'a' + ((i as u64 + index as u64) % 26) as u8))
+                .collect(),
+        }
     };
     let mut config = ParticipantConfig::new(domain);
     if let Ok(n) = std::env::var("RUSTORB_DROP_ONE_IN") {
@@ -79,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for index in 1..=count {
                 let g = Greeting {
                     index,
-                    message: "Hello, world!".into(),
+                    message: message(index),
                 };
                 writer.write(&g)?;
                 println!("rustorb-dds: sent {index}");
@@ -112,8 +129,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if reader.wait_for_data(Duration::from_millis(200)) {
                     // Samples without data tell that the writer is gone.
                     for s in reader.take().into_iter().filter_map(|s| s.data) {
-                        if s.message != "Hello, world!" {
-                            return Err(format!("bad message {:?}", s.message).into());
+                        if s.message != message(s.index) {
+                            let start: String = s.message.chars().take(40).collect();
+                            return Err(format!(
+                                "bad message {start:?}... ({} octets) for {}",
+                                s.message.len(),
+                                s.index
+                            )
+                            .into());
                         }
                         println!("rustorb-dds: received {}", s.index);
                         got += 1;

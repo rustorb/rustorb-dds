@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use rustorb_rtps::frag::{Keep, Reassembler, ReassemblyLimits};
 use rustorb_rtps::pl::pid;
 use rustorb_rtps::qos::ReliabilityKind;
 use rustorb_rtps::receiver::receive;
@@ -100,6 +101,11 @@ pub(crate) struct ReaderState {
     pub(crate) rtps: Option<ReliableReader>,
     /// Matched writers, local and remote.
     pub(crate) matched: BTreeSet<Guid>,
+    /// For a BEST_EFFORT reader, the changes of each remote writer that
+    /// came as DATA_FRAG and are not all in yet (a RELIABLE reader keeps
+    /// them in `rtps`).
+    pub(crate) fragments: HashMap<Guid, Reassembler>,
+    pub(crate) reassembly: ReassemblyLimits,
     /// The samples and the instances.
     pub(crate) samples: ReaderHistory,
     pub(crate) keys: Arc<dyn KeyOps>,
@@ -480,6 +486,8 @@ impl Shared {
                 data: data.clone(),
                 rtps,
                 matched,
+                fragments: HashMap::new(),
+                reassembly: inner.reader_config.reassembly,
                 samples: ReaderHistory::new(qos.history),
                 keys,
                 listener: None,
@@ -746,6 +754,7 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant, no
                     w.rtps.remove_reader(&remote);
                     w.trim();
                 } else if let Some(r) = inner.readers.get_mut(&local) {
+                    r.fragments.remove(&remote);
                     if r.matched.remove(&remote) && r.samples.writer_gone(&remote) {
                         notify.delivered = true;
                         if let Some(l) = &r.listener {
@@ -1010,8 +1019,9 @@ struct UserTraffic {
     acked: bool,
 }
 
-/// Handles a user-traffic message: DATA, GAP and HEARTBEAT for the local
-/// readers, ACKNACK for the local writers.
+/// Handles a user-traffic message: DATA, DATA_FRAG, GAP, HEARTBEAT and
+/// HEARTBEAT_FRAG for the local readers, ACKNACK and NACK_FRAG for the
+/// local writers.
 fn user_traffic(
     local: GuidPrefix,
     inner: &mut Inner,
@@ -1051,6 +1061,50 @@ fn user_traffic(
                     &mut result,
                     listeners,
                 );
+            }
+            Submessage::DataFrag(d) => {
+                let writer = Guid::new(src, d.writer_id);
+                for_readers(
+                    inner,
+                    d.reader_id,
+                    |st| match st.rtps.as_mut() {
+                        Some(rtps) => rtps.handle_data_frag(writer, &d, r.timestamp),
+                        // Best effort: the newest incomplete samples are
+                        // kept, and only those of matched writers.
+                        None if st.matched.contains(&writer) => {
+                            let limits = st.reassembly;
+                            st.fragments
+                                .entry(writer)
+                                .or_insert_with(|| Reassembler::new(limits, Keep::Highest))
+                                .add(writer, &d, r.timestamp)
+                                .into_iter()
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    },
+                    &mut result,
+                    listeners,
+                );
+            }
+            Submessage::HeartbeatFrag(h) => {
+                let writer = Guid::new(src, h.writer_id);
+                for_readers(
+                    inner,
+                    h.reader_id,
+                    |st| {
+                        if let Some(rtps) = st.rtps.as_mut() {
+                            rtps.handle_heartbeat_frag(writer, &h, now);
+                        }
+                        Vec::new()
+                    },
+                    &mut result,
+                    listeners,
+                );
+            }
+            Submessage::NackFrag(n) => {
+                if let Some(w) = inner.writers.get_mut(&Guid::new(local, n.writer_id)) {
+                    w.rtps.handle_nackfrag(Guid::new(src, n.reader_id), &n, now);
+                }
             }
             Submessage::Gap(gap) => {
                 let writer = Guid::new(src, gap.writer_id);

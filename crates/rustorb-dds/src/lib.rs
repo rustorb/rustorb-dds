@@ -32,12 +32,13 @@
 //! writers and readers in the default partition, over UDPv4. Keyed types
 //! have instances: writers register, write, dispose and unregister them;
 //! readers keep a history per instance with its states (DDS 1.4,
-//! 2.2.2.5.1). Samples are written in XCDR1. Writers and readers in the
-//! same participant are matched with each other too.
+//! 2.2.2.5.1). Samples larger than a datagram go as DATA_FRAG, and lost
+//! fragments are repaired. Samples are written in XCDR1. Writers and
+//! readers in the same participant are matched with each other too.
 //!
 //! Still to come in D2 (rustorb-dds#15): more QoS (durability, liveliness,
-//! deadline, partitions in the API), DATA_FRAG for samples larger than a
-//! datagram, WaitSets; then the XTypes type information (D3).
+//! deadline, partitions in the API), WaitSets; then the XTypes type
+//! information (D3).
 
 mod error;
 mod instance;

@@ -7,6 +7,8 @@
 //! and endpoint discovery and matching (SEDP, 8.5.4, rustorb-dds#6) in
 //! [`sedp`], built on the reliable writer and reader of [`reliable`], the
 //! message receiver of [`receiver`] and the QoS policies of [`qos`].
+//! Changes too large for a datagram are split into DATA_FRAG and put back
+//! together by [`frag`] (8.4.14.1, rustorb-dds#18).
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -41,10 +43,10 @@
 //! assert_eq!(Message::decode(&bytes).unwrap(), msg);
 //! ```
 //!
-//! Still to come (rustorb/rustorb#111, stages D1 and D2): best-effort
-//! then reliable user writers and readers.
+//! The user writers and readers built on these are in rustorb-dds.
 
 mod error;
+pub mod frag;
 mod message;
 mod parameter;
 pub mod pl;

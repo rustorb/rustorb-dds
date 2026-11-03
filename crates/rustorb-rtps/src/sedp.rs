@@ -470,6 +470,18 @@ impl Sedp {
                         }
                     }
                 }
+                Submessage::DataFrag(d) => {
+                    let w = Guid::new(src, d.writer_id);
+                    if d.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        for c in self.pub_reader.handle_data_frag(w, &d, r.timestamp) {
+                            self.apply(Kind::Writer, &c, &mut events);
+                        }
+                    } else if d.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        for c in self.sub_reader.handle_data_frag(w, &d, r.timestamp) {
+                            self.apply(Kind::Reader, &c, &mut events);
+                        }
+                    }
+                }
                 Submessage::Gap(g) => {
                     let w = Guid::new(src, g.writer_id);
                     if g.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
@@ -492,6 +504,14 @@ impl Sedp {
                         for c in self.sub_reader.handle_heartbeat(w, &h, now) {
                             self.apply(Kind::Reader, &c, &mut events);
                         }
+                    }
+                }
+                Submessage::NackFrag(n) => {
+                    let reader = Guid::new(src, n.reader_id);
+                    if n.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
+                        self.pub_writer.handle_nackfrag(reader, &n, now);
+                    } else if n.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
+                        self.sub_writer.handle_nackfrag(reader, &n, now);
                     }
                 }
                 Submessage::AckNack(a) => {

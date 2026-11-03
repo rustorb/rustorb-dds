@@ -1,8 +1,8 @@
 // Hello world publisher and subscriber for Fast DDS, written against its
 // public C++ API only. Used by interop/run.sh.
 //
-//   hello pub <domain> <count> <interval_ms> [best_effort|reliable]
-//   hello sub <domain> <count> <timeout_s> [best_effort|reliable]
+//   hello pub <domain> <count> <interval_ms> [best_effort|reliable [size]]
+//   hello sub <domain> <count> <timeout_s> [best_effort|reliable [size]]
 //
 // The publisher waits for a matched reader, then writes <count> samples.
 // The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -11,6 +11,10 @@
 // Best effort by default. When reliable, both sides keep every sample
 // (KEEP_ALL), the publisher waits for acknowledgments before it exits and
 // the subscriber checks that it gets 1, 2, 3... with none missing.
+//
+// The message is "Hello, world!", or with <size>, <size> letters that
+// depend on the index ('a' + (i + index) % 26 for the i-th), so that the
+// sample is too large for a datagram.
 
 #include <chrono>
 #include <cstdio>
@@ -33,6 +37,19 @@ using namespace eprosima::fastdds::dds;
 
 static const char* MESSAGE = "Hello, world!";
 static bool reliable = false;
+static long size = -1;
+
+static std::string message(uint32_t index)
+{
+    if (size < 0) {
+        return MESSAGE;
+    }
+    std::string m(static_cast<size_t>(size), 'a');
+    for (long i = 0; i < size; i++) {
+        m[static_cast<size_t>(i)] = static_cast<char>('a' + (i + index) % 26);
+    }
+    return m;
+}
 
 static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_ms)
 {
@@ -62,7 +79,7 @@ static int publish(DomainParticipant* pp, Topic* topic, int count, int interval_
     for (int i = 1; i <= count; i++) {
         HelloWorld::Greeting g;
         g.index(static_cast<uint32_t>(i));
-        g.message(MESSAGE);
+        g.message(message(static_cast<uint32_t>(i)));
         if (!writer->write(&g)) {
             std::fprintf(stderr, "fastdds: write failed\n");
             return 1;
@@ -102,8 +119,9 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
             if (!info.valid_data) {
                 continue;
             }
-            if (g.message() != MESSAGE) {
-                std::fprintf(stderr, "fastdds: bad message \"%s\"\n", g.message().c_str());
+            if (g.message() != message(g.index())) {
+                std::fprintf(stderr, "fastdds: bad message \"%.40s\" (%zu octets) for %u\n",
+                             g.message().c_str(), g.message().size(), g.index());
                 return 1;
             }
             std::printf("fastdds: received %u\n", g.index());
@@ -126,13 +144,16 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
 
 int main(int argc, char** argv)
 {
-    if (argc != 5 && argc != 6) {
+    if (argc < 5 || argc > 7) {
         std::fprintf(stderr,
-                     "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable]\n",
+                     "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable [size]]\n",
                      argv[0]);
         return 2;
     }
-    reliable = argc == 6 && std::string(argv[5]) == "reliable";
+    reliable = argc >= 6 && std::string(argv[5]) == "reliable";
+    if (argc == 7) {
+        size = std::atol(argv[6]);
+    }
     int domain = std::atoi(argv[2]);
     int count = std::atoi(argv[3]);
     int arg = std::atoi(argv[4]);

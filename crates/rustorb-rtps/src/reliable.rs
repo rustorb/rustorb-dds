@@ -17,19 +17,27 @@
 //! RELIABLE writer matches BEST_EFFORT readers too): they are sent each
 //! change once, and no HEARTBEAT, GAP or repair.
 //!
+//! Changes too large for a datagram go as DATA_FRAG (8.4.14.1, see
+//! [`crate::frag`]): the writer resends the fragments a NACK_FRAG asks
+//! for, and the reader asks with NACK_FRAG for the fragments it misses
+//! of a change it has part of.
+//!
 //! The caller passes in received submessages and the time, calls `poll`
 //! to get the datagrams to send, and waits until `next_deadline`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
+use crate::frag::{self, Fragmentation, Keep, MESSAGE_OVERHEAD, Reassembler, ReassemblyLimits};
 use crate::message::{Header, Message};
 use crate::parameter::ParameterList;
 use crate::submessage::{
-    AckNack, Data, Gap, Heartbeat, InfoDestination, InfoTimestamp, SerializedPayload, Submessage,
+    AckNack, Data, DataFrag, Gap, Heartbeat, HeartbeatFrag, InfoDestination, InfoTimestamp,
+    NackFrag, SerializedPayload, Submessage,
 };
 use crate::types::{
-    Count, EntityId, Guid, GuidPrefix, Locator, SequenceNumber, SequenceNumberSet, Time, VendorId,
+    Count, EntityId, FragmentNumber, FragmentNumberSet, Guid, GuidPrefix, Locator, SequenceNumber,
+    SequenceNumberSet, Time, VendorId,
 };
 use crate::wire::Endianness;
 
@@ -93,21 +101,36 @@ impl Batcher {
         }
     }
 
-    /// Pushes a DATA, preceded by an INFO_TS when its timestamp differs
-    /// from the one in force.
-    fn push_data(&mut self, reader_id: EntityId, c: &Change) {
-        let size = approx_data_size(c) + 12;
-        self.start_if_full(size);
-        if self.timestamp != c.timestamp {
-            self.timestamp = c.timestamp;
-            self.push_unchecked(
-                Submessage::InfoTimestamp(InfoTimestamp {
-                    timestamp: c.timestamp,
-                }),
-                12,
-            );
+    /// Pushes a change: a DATA, or DATA_FRAGs when it is too large
+    /// (only the fragments in `fragments`, when given).
+    fn push_change(
+        &mut self,
+        reader_id: EntityId,
+        c: &Change,
+        frag: &Fragmentation,
+        fragments: Option<&BTreeSet<u32>>,
+    ) {
+        if !frag.needed(c) {
+            self.push_timestamped(c.timestamp, data(reader_id, c), frag::data_len(c));
+            return;
         }
-        self.push_unchecked(data(reader_id, c), size - 12);
+        for d in frag.data_frags(reader_id, c, fragments, self.max_size) {
+            let size = 36
+                + frag::inline_qos_len(d.inline_qos.as_ref())
+                + d.serialized_payload.len().next_multiple_of(4);
+            self.push_timestamped(c.timestamp, Submessage::DataFrag(d), size);
+        }
+    }
+
+    /// Pushes a DATA or DATA_FRAG, preceded by an INFO_TS when its
+    /// timestamp differs from the one in force.
+    fn push_timestamped(&mut self, timestamp: Option<Time>, sub: Submessage, size: usize) {
+        self.start_if_full(size + 12);
+        if self.timestamp != timestamp {
+            self.timestamp = timestamp;
+            self.push_unchecked(Submessage::InfoTimestamp(InfoTimestamp { timestamp }), 12);
+        }
+        self.push_unchecked(sub, size);
     }
 
     fn push(&mut self, sub: Submessage, approx_size: usize) {
@@ -123,7 +146,7 @@ impl Batcher {
                     guid_prefix: self.dest,
                 }));
             self.messages.push(m);
-            self.size = Header::SIZE + 16;
+            self.size = MESSAGE_OVERHEAD - 12;
             self.timestamp = None;
         }
     }
@@ -187,15 +210,6 @@ fn gap(
     })
 }
 
-fn approx_data_size(c: &Change) -> usize {
-    // Submessage header, ids, sequence number, payload and some in-line
-    // QoS.
-    24 + c.payload.as_ref().map_or(0, |p| p.bytes.len())
-        + c.inline_qos
-            .as_ref()
-            .map_or(0, |q| q.parameters.iter().map(|p| 4 + p.value.len()).sum())
-}
-
 /// Timing of a [`ReliableWriter`] (8.4.7.1). All of them can be tuned, as
 /// 8.4.2.1 requires.
 #[derive(Clone, Debug)]
@@ -205,8 +219,11 @@ pub struct WriterConfig {
     pub heartbeat_period: Duration,
     /// How long to wait after an ACKNACK before sending what it asks for.
     pub nack_response_delay: Duration,
-    /// The largest message to build, in octets.
+    /// The largest message to build, in octets. A change too large for
+    /// it still goes alone in a message, unless it has to be fragmented.
     pub max_message_size: usize,
+    /// When and how to send a change as DATA_FRAG.
+    pub fragmentation: Fragmentation,
 }
 
 impl Default for WriterConfig {
@@ -215,6 +232,7 @@ impl Default for WriterConfig {
             heartbeat_period: Duration::from_secs(1),
             nack_response_delay: Duration::ZERO,
             max_message_size: 16 * 1024,
+            fragmentation: Fragmentation::default(),
         }
     }
 }
@@ -250,6 +268,9 @@ struct ReaderProxy {
     acked: SequenceNumber,
     /// Sequence numbers the reader asked for again.
     requested: BTreeSet<SequenceNumber>,
+    /// Fragments the reader asked for again, by sequence number.
+    requested_fragments: BTreeMap<SequenceNumber, BTreeSet<u32>>,
+    last_nackfrag: Option<Count>,
     repair_at: Option<Instant>,
     last_acknack: Option<Count>,
     /// The reader asked for a HEARTBEAT (ACKNACK without the final flag).
@@ -408,6 +429,8 @@ impl ReliableWriter {
             highest_sent: before,
             acked: before,
             requested: BTreeSet::new(),
+            requested_fragments: BTreeMap::new(),
+            last_nackfrag: None,
             repair_at: None,
             last_acknack: None,
             heartbeat_due: false,
@@ -467,11 +490,37 @@ impl ReliableWriter {
             }
         }
         p.requested.retain(|sn| *sn > p.acked);
+        let acked = p.acked;
+        p.requested_fragments.retain(|sn, _| *sn > acked);
         if asked && p.repair_at.is_none() {
             p.repair_at = Some(now + self.config.nack_response_delay);
         }
         if !a.final_flag {
             p.heartbeat_due = true;
+        }
+    }
+
+    /// Handles a NACK_FRAG from `reader` (8.4.14.1): the fragments it
+    /// asks for are sent again, like a repair. Duplicates and NACK_FRAGs
+    /// from unmatched readers are ignored.
+    pub fn handle_nackfrag(&mut self, reader: Guid, n: &NackFrag, now: Instant) {
+        let Some(p) = self.readers.get_mut(&reader).filter(|p| p.reliable) else {
+            return;
+        };
+        if p.last_nackfrag.is_some_and(|c| n.count.0 <= c.0) {
+            return;
+        }
+        p.last_nackfrag = Some(n.count);
+        let sn = n.writer_sn;
+        if sn <= p.acked || sn > self.last_sn {
+            return;
+        }
+        let set = p.requested_fragments.entry(sn).or_default();
+        set.extend(n.fragment_number_state.iter().map(|f| f.0));
+        if set.is_empty() {
+            p.requested_fragments.remove(&sn);
+        } else if p.repair_at.is_none() {
+            p.repair_at = Some(now + self.config.nack_response_delay);
         }
     }
 
@@ -484,6 +533,7 @@ impl ReliableWriter {
         }
         let header = Header::new(self.vendor_id, self.guid.prefix);
         let writer_id = self.guid.entity_id;
+        let frag = self.config.fragmentation;
         let first_sn = self
             .history
             .keys()
@@ -502,7 +552,7 @@ impl ReliableWriter {
                 if p.highest_sent < self.last_sn {
                     let from = SequenceNumber(p.highest_sent.0 + 1);
                     for c in self.history.range(from..).map(|(_, c)| c) {
-                        b.push_data(g.entity_id, c);
+                        b.push_change(g.entity_id, c, &frag, None);
                     }
                     p.highest_sent = self.last_sn;
                     p.acked = self.last_sn;
@@ -515,12 +565,23 @@ impl ReliableWriter {
             if p.repair_at.is_some_and(|t| t <= now) {
                 p.repair_at = None;
                 let mut missing = Vec::new();
-                for sn in std::mem::take(&mut p.requested) {
+                let requested = std::mem::take(&mut p.requested);
+                for sn in &requested {
+                    match self.history.get(sn).filter(|_| *sn >= p.start) {
+                        Some(c) => b.push_change(g.entity_id, c, &frag, None),
+                        None => missing.push(*sn),
+                    }
+                }
+                for (sn, fragments) in std::mem::take(&mut p.requested_fragments) {
+                    if requested.contains(&sn) {
+                        continue;
+                    }
                     match self.history.get(&sn).filter(|_| sn >= p.start) {
-                        Some(c) => b.push_data(g.entity_id, c),
+                        Some(c) => b.push_change(g.entity_id, c, &frag, Some(&fragments)),
                         None => missing.push(sn),
                     }
                 }
+                missing.sort();
                 for s in gaps(g.entity_id, writer_id, &missing) {
                     b.push(s, 32);
                 }
@@ -536,7 +597,7 @@ impl ReliableWriter {
                             32,
                         );
                     }
-                    b.push_data(g.entity_id, c);
+                    b.push_change(g.entity_id, c, &frag, None);
                     next = SequenceNumber(sn.0 + 1);
                 }
                 if next <= self.last_sn {
@@ -613,12 +674,15 @@ fn data(reader_id: EntityId, c: &Change) -> Submessage {
 pub struct ReaderConfig {
     /// How long to wait after a HEARTBEAT before answering it.
     pub heartbeat_response_delay: Duration,
+    /// What is held, for each writer, of changes that come as DATA_FRAG.
+    pub reassembly: ReassemblyLimits,
 }
 
 impl Default for ReaderConfig {
     fn default() -> Self {
         ReaderConfig {
             heartbeat_response_delay: Duration::ZERO,
+            reassembly: ReassemblyLimits::default(),
         }
     }
 }
@@ -643,6 +707,12 @@ struct WriterProxy {
     available_max: SequenceNumber,
     last_heartbeat: Option<Count>,
     ack_at: Option<Instant>,
+    /// Changes of which some fragments are in.
+    fragments: Reassembler,
+    /// What HEARTBEAT_FRAGs said is available, by sequence number, not
+    /// yet answered.
+    heartbeat_frags: BTreeMap<SequenceNumber, FragmentNumber>,
+    last_heartbeat_frag: Option<Count>,
 }
 
 impl WriterProxy {
@@ -682,6 +752,38 @@ impl WriterProxy {
         }
     }
 
+    /// Forgets the fragments of changes that were delivered or will not
+    /// come.
+    fn tidy(&mut self) {
+        let next = self.next_expected;
+        let mut known = Vec::new();
+        for sn in self.fragments.incomplete() {
+            if sn < next || self.has(sn) {
+                known.push(sn);
+            }
+        }
+        for sn in known {
+            self.fragments.remove(sn);
+        }
+        let pending = &self.pending;
+        self.heartbeat_frags.retain(|sn, _| {
+            *sn >= next
+                && !pending.range(..=*sn).any(|(k, e)| match e {
+                    Pending::Change(_) => k == sn,
+                    Pending::Irrelevant(end) => sn <= end,
+                })
+        });
+    }
+
+    /// Whether some change the writer has is only partly in, so that
+    /// fragments are to be asked for.
+    fn wants_fragments(&self) -> bool {
+        self.fragments
+            .incomplete()
+            .any(|sn| sn <= self.available_max)
+            || !self.heartbeat_frags.is_empty()
+    }
+
     /// Whether `sn` (at or after `next_expected`) is known.
     fn has(&self, sn: SequenceNumber) -> bool {
         self.pending.range(..=sn).any(|(k, e)| match e {
@@ -691,12 +793,14 @@ impl WriterProxy {
     }
 
     /// Missing sequence numbers, from `next_expected` up to what the
-    /// writer has, at most 256 of them.
+    /// writer has, at most 256 of them. A change of which some fragments
+    /// are in is not missing: its other fragments are asked for with
+    /// NACK_FRAG (8.4.14.1).
     fn missing(&self) -> Vec<SequenceNumber> {
         let mut out = Vec::new();
         let mut sn = self.next_expected;
         while sn <= self.available_max && sn.0 < self.next_expected.0 + 256 {
-            if !self.has(sn) {
+            if !self.has(sn) && !self.fragments.contains(sn) {
                 out.push(sn);
             }
             sn.0 += 1;
@@ -715,6 +819,7 @@ pub struct ReliableReader {
     config: ReaderConfig,
     writers: HashMap<Guid, WriterProxy>,
     acknack_count: i32,
+    nackfrag_count: i32,
 }
 
 impl ReliableReader {
@@ -726,6 +831,7 @@ impl ReliableReader {
             config,
             writers: HashMap::new(),
             acknack_count: 0,
+            nackfrag_count: 0,
         }
     }
 
@@ -753,6 +859,9 @@ impl ReliableReader {
             available_max: SequenceNumber(0),
             last_heartbeat: None,
             ack_at: Some(now),
+            fragments: Reassembler::new(self.config.reassembly, Keep::Lowest),
+            heartbeat_frags: BTreeMap::new(),
+            last_heartbeat_frag: None,
         });
         p.unicast = unicast;
         p.multicast = multicast;
@@ -777,26 +886,52 @@ impl ReliableReader {
     /// that can now be delivered. DATA from unmatched writers and
     /// duplicates are ignored.
     pub fn handle_data(&mut self, writer: Guid, d: &Data, timestamp: Option<Time>) -> Vec<Change> {
-        let mut out = Vec::new();
+        self.handle_change(Change {
+            writer,
+            sequence_number: d.writer_sn,
+            inline_qos: d.inline_qos.clone(),
+            payload: d.serialized_payload.clone(),
+            timestamp,
+        })
+    }
+
+    /// Handles a DATA_FRAG from `writer` (8.4.14.1) and returns the
+    /// changes that can now be delivered: once all its fragments are in,
+    /// the change is handled like a DATA.
+    pub fn handle_data_frag(
+        &mut self,
+        writer: Guid,
+        d: &DataFrag,
+        timestamp: Option<Time>,
+    ) -> Vec<Change> {
         let Some(p) = self.writers.get_mut(&writer) else {
-            return out;
+            return Vec::new();
         };
         let sn = d.writer_sn;
         if sn < p.next_expected || p.has(sn) {
+            return Vec::new();
+        }
+        match p.fragments.add(writer, d, timestamp) {
+            Some(c) => self.handle_change(c),
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_change(&mut self, c: Change) -> Vec<Change> {
+        let mut out = Vec::new();
+        let Some(p) = self.writers.get_mut(&c.writer) else {
+            return out;
+        };
+        let sn = c.sequence_number;
+        if sn < p.next_expected || p.has(sn) {
             return out;
         }
-        p.pending.insert(
-            sn,
-            Pending::Change(Change {
-                writer,
-                sequence_number: sn,
-                inline_qos: d.inline_qos.clone(),
-                payload: d.serialized_payload.clone(),
-                timestamp,
-            }),
-        );
+        p.fragments.remove(sn);
+        p.heartbeat_frags.remove(&sn);
+        p.pending.insert(sn, Pending::Change(c));
         p.available_max = p.available_max.max(sn);
         p.drain(&mut out);
+        p.tidy();
         out
     }
 
@@ -813,6 +948,7 @@ impl ReliableReader {
             p.mark_irrelevant(sn, sn);
         }
         p.drain(&mut out);
+        p.tidy();
         out
     }
 
@@ -832,11 +968,35 @@ impl ReliableReader {
         p.mark_irrelevant(p.next_expected, SequenceNumber(h.first_sn.0 - 1));
         p.available_max = p.available_max.max(h.last_sn);
         p.drain(&mut out);
+        p.tidy();
         let liveliness_only = h.liveliness_flag && h.final_flag;
-        if !liveliness_only && (!h.final_flag || !p.missing().is_empty()) && p.ack_at.is_none() {
+        let wanted = !h.final_flag || !p.missing().is_empty() || p.wants_fragments();
+        if !liveliness_only && wanted && p.ack_at.is_none() {
             p.ack_at = Some(now + self.config.heartbeat_response_delay);
         }
         out
+    }
+
+    /// Handles a HEARTBEAT_FRAG from `writer` (8.3.8.7): the fragments of
+    /// a change it says it has, and this reader misses, are asked for
+    /// with NACK_FRAG at the next [`Self::poll`]. Duplicates are ignored.
+    pub fn handle_heartbeat_frag(&mut self, writer: Guid, h: &HeartbeatFrag, now: Instant) {
+        let Some(p) = self.writers.get_mut(&writer) else {
+            return;
+        };
+        if p.last_heartbeat_frag.is_some_and(|c| h.count.0 <= c.0) {
+            return;
+        }
+        p.last_heartbeat_frag = Some(h.count);
+        let sn = h.writer_sn;
+        if sn < p.next_expected || p.has(sn) {
+            return;
+        }
+        let last = p.heartbeat_frags.entry(sn).or_insert(h.last_fragment_num);
+        *last = (*last).max(h.last_fragment_num);
+        if p.ack_at.is_none() {
+            p.ack_at = Some(now + self.config.heartbeat_response_delay);
+        }
     }
 
     /// Builds the ACKNACKs due at `now` (8.4.12.2.5).
@@ -868,6 +1028,46 @@ impl ReliableReader {
             });
             let mut b = Batcher::new(header, g.prefix, usize::MAX);
             b.push(a, 0);
+            // NACK_FRAG for the changes partly in, which the writer has
+            // all of (HEARTBEAT) or some of (HEARTBEAT_FRAG).
+            let mut nacks: BTreeMap<SequenceNumber, FragmentNumberSet> = BTreeMap::new();
+            for sn in p.fragments.incomplete() {
+                if sn <= p.available_max {
+                    if let Some(set) = p.fragments.missing(sn, None) {
+                        nacks.insert(sn, set);
+                    }
+                }
+            }
+            for (sn, last) in std::mem::take(&mut p.heartbeat_frags) {
+                let set = if p.fragments.contains(sn) {
+                    p.fragments.missing(sn, Some(last))
+                } else {
+                    // Nothing of it is in: ask for all it has, up to 256.
+                    let n = last.0.min(256);
+                    let mut set = FragmentNumberSet::new(FragmentNumber(1), n)
+                        .expect("base 1, at most 256 bits");
+                    for f in 1..=n {
+                        set.insert(FragmentNumber(f));
+                    }
+                    Some(set)
+                };
+                if let Some(set) = set {
+                    nacks.entry(sn).or_insert(set);
+                }
+            }
+            for (sn, set) in nacks {
+                self.nackfrag_count = self.nackfrag_count.wrapping_add(1);
+                b.push(
+                    Submessage::NackFrag(NackFrag {
+                        reader_id: self.guid.entity_id,
+                        writer_id: g.entity_id,
+                        writer_sn: sn,
+                        fragment_number_state: set,
+                        count: Count(self.nackfrag_count),
+                    }),
+                    0,
+                );
+            }
             b.finish(&destination(&p.unicast, &p.multicast), &mut out);
         }
         out
@@ -943,8 +1143,15 @@ mod tests {
                         }
                         i += 1;
                     }
+                    Submessage::DataFrag(d) => {
+                        if !drop.contains(&i) {
+                            got.extend(r.handle_data_frag(w, &d, None));
+                        }
+                        i += 1;
+                    }
                     Submessage::Gap(g) => got.extend(r.handle_gap(w, &g)),
                     Submessage::Heartbeat(h) => got.extend(r.handle_heartbeat(w, &h, now)),
+                    Submessage::HeartbeatFrag(h) => r.handle_heartbeat_frag(w, &h, now),
                     _ => {}
                 }
             }
@@ -956,8 +1163,14 @@ mod tests {
         for o in out {
             let m = Message::decode(&o.bytes).unwrap();
             for s in m.submessages {
-                if let Submessage::AckNack(a) = s {
-                    w.handle_acknack(Guid::new(m.header.guid_prefix, a.reader_id), &a, now);
+                match s {
+                    Submessage::AckNack(a) => {
+                        w.handle_acknack(Guid::new(m.header.guid_prefix, a.reader_id), &a, now)
+                    }
+                    Submessage::NackFrag(n) => {
+                        w.handle_nackfrag(Guid::new(m.header.guid_prefix, n.reader_id), &n, now)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1293,5 +1506,162 @@ mod tests {
             .map(|x| x.timestamp)
             .collect();
         assert_eq!(stamps, [Some(ts), Some(ts), None]);
+    }
+
+    fn big(n: u8, size: usize) -> Option<SerializedPayload> {
+        let mut bytes = vec![0, 1, 0, 0];
+        bytes.extend((0..size).map(|i| (i as u8).wrapping_mul(n)));
+        Some(SerializedPayload {
+            kind: PayloadKind::Data,
+            bytes,
+        })
+    }
+
+    fn frag_config() -> WriterConfig {
+        WriterConfig {
+            max_message_size: 1200,
+            fragmentation: Fragmentation {
+                max_datagram_size: 1500,
+                fragment_size: 500,
+            },
+            ..WriterConfig::default()
+        }
+    }
+
+    #[test]
+    fn large_changes_are_fragmented_and_repaired() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, frag_config());
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        // 1: small, as DATA. 2 and 3: 4004 octets, 9 fragments of 500 in
+        // DATA_FRAGs of 2 fragments (each message at most 1200 octets).
+        w.add_change(None, payload(1));
+        w.add_change(None, big(2, 4000));
+        w.add_change(None, big(3, 4000));
+        let out = w.poll(t);
+        assert!(out.iter().all(|o| o.bytes.len() <= 1200));
+        let s = subs(&out);
+        let frags: Vec<(i64, u32, u16)> = s
+            .iter()
+            .filter_map(|s| match s {
+                Submessage::DataFrag(d) => Some((
+                    d.writer_sn.0,
+                    d.fragment_starting_num.0,
+                    d.fragments_in_submessage,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            frags[..5],
+            [(2, 1, 2), (2, 3, 2), (2, 5, 2), (2, 7, 2), (2, 9, 1)]
+        );
+        assert_eq!(frags.len(), 10);
+
+        // Lost: the DATA_FRAG with fragments 3-4 of change 2 (index 2
+        // counting the DATA), and the first one of change 3 (index 6).
+        let got = deliver(&mut r, &out, &[2, 6], t);
+        assert_eq!(got.len(), 1);
+        let acks = r.poll(t);
+        let s = subs(&acks);
+        // ACKNACK: 2 and 3 are not missing whole, so the ACKNACK only
+        // acknowledges 1; a NACK_FRAG for each.
+        let Submessage::AckNack(a) = &s[0] else {
+            panic!("{s:?}")
+        };
+        assert_eq!(a.reader_sn_state.base(), SequenceNumber(2));
+        assert_eq!(a.reader_sn_state.iter().count(), 0);
+        let nacks: Vec<(i64, Vec<u32>)> = s[1..]
+            .iter()
+            .map(|s| match s {
+                Submessage::NackFrag(n) => (
+                    n.writer_sn.0,
+                    n.fragment_number_state.iter().map(|f| f.0).collect(),
+                ),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(nacks, [(2, vec![3, 4]), (3, vec![1, 2])]);
+        acknacks(&mut w, &acks, t);
+
+        // Only the missing fragments come again.
+        let out = w.poll(t);
+        let s = subs(&out);
+        let resent: Vec<(i64, u32, u16)> = s
+            .iter()
+            .filter_map(|s| match s {
+                Submessage::DataFrag(d) => Some((
+                    d.writer_sn.0,
+                    d.fragment_starting_num.0,
+                    d.fragments_in_submessage,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resent, [(2, 3, 2), (3, 1, 2)]);
+        let got = deliver(&mut r, &out, &[], t);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].payload, big(2, 4000));
+        assert_eq!(got[1].payload, big(3, 4000));
+        acknacks(&mut w, &r.poll(t), t);
+        assert!(w.is_all_acked());
+    }
+
+    #[test]
+    fn a_change_lost_whole_is_nacked_whole() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, frag_config());
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_change(None, big(1, 2000));
+        let out = w.poll(t);
+        // All 3 DATA_FRAGs are lost.
+        assert!(deliver(&mut r, &out, &[0, 1, 2], t).is_empty());
+        let acks = r.poll(t);
+        let s = subs(&acks);
+        assert_eq!(s.len(), 1);
+        let Submessage::AckNack(a) = &s[0] else {
+            panic!()
+        };
+        assert_eq!(
+            a.reader_sn_state.iter().collect::<Vec<_>>(),
+            [SequenceNumber(1)]
+        );
+        acknacks(&mut w, &acks, t);
+        let got = deliver(&mut r, &w.poll(t), &[], t);
+        assert_eq!(got[0].payload, big(1, 2000));
+    }
+
+    #[test]
+    fn heartbeat_frag_asks_for_what_the_writer_has() {
+        let t = Instant::now();
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        r.poll(t);
+        let hb = |count, last| HeartbeatFrag {
+            reader_id: rguid(2).entity_id,
+            writer_id: wguid().entity_id,
+            writer_sn: SequenceNumber(1),
+            last_fragment_num: FragmentNumber(last),
+            count: Count(count),
+        };
+        r.handle_heartbeat_frag(wguid(), &hb(1, 3), t);
+        // A duplicate is ignored.
+        r.handle_heartbeat_frag(wguid(), &hb(1, 9), t);
+        let s = subs(&r.poll(t));
+        let Submessage::NackFrag(n) = &s[1] else {
+            panic!("{s:?}")
+        };
+        assert_eq!(
+            n.fragment_number_state
+                .iter()
+                .map(|f| f.0)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(r.next_deadline(), None);
     }
 }
