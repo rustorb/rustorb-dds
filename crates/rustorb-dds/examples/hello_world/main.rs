@@ -3,50 +3,77 @@
 //! In one terminal: `cargo run --example hello_world -- sub`
 //! In another:      `cargo run --example hello_world -- pub`
 //!
-//! Both join domain 0 (or the domain given as the second argument) and
-//! use the topic `hello_world` of type `HelloWorld::Greeting`.
+//! Both join domain 0 and use the topic `hello_world` of type
+//! `HelloWorld::Greeting`. The full form, used by `interop/run.sh`:
+//!
+//! ```text
+//! hello_world pub <domain> <count> <interval_ms>
+//! hello_world sub <domain> <count> <timeout_s>
+//! ```
+//!
+//! The publisher waits for a subscriber, then writes `count` samples. The
+//! subscriber exits after `count` samples, or with an error after
+//! `timeout_s` seconds.
 
 mod greeting;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use greeting::Greeting;
-use rustorb_dds::DomainParticipant;
+use rustorb_dds::{DataReaderQos, DomainParticipant, History};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).map(String::as_str).unwrap_or("pub");
-    let domain: u32 = match args.get(2) {
-        Some(d) => d.parse()?,
-        None => 0,
+    let num = |i: usize, default: u64| -> Result<u64, Box<dyn std::error::Error>> {
+        Ok(match args.get(i) {
+            Some(v) => v.parse()?,
+            None => default,
+        })
     };
+    let domain = num(2, 0)? as u32;
+    let count = num(3, 10)? as u32;
     let participant = DomainParticipant::new(domain)?;
     let topic = participant.create_topic::<Greeting>("hello_world")?;
     match role {
         "pub" => {
+            let interval = Duration::from_millis(num(4, 1000)?);
             let writer = participant.create_publisher()?.create_datawriter(&topic)?;
-            println!("waiting for a subscriber...");
+            println!("rustorb-dds: waiting for a subscriber...");
             while !writer.wait_for_subscriptions(1, Duration::from_secs(1)) {}
-            for index in 1..=10 {
+            // Give the subscriber time to match this writer too.
+            std::thread::sleep(Duration::from_millis(500));
+            for index in 1..=count {
                 let g = Greeting {
                     index,
                     message: "Hello, world!".into(),
                 };
                 writer.write(&g)?;
-                println!("sent {index}: {}", g.message);
-                std::thread::sleep(Duration::from_secs(1));
+                println!("rustorb-dds: sent {index}");
+                std::thread::sleep(interval);
             }
         }
         "sub" => {
-            let reader = participant.create_subscriber()?.create_datareader(&topic)?;
-            println!("waiting for greetings...");
-            loop {
-                if reader.wait_for_data(Duration::from_secs(1)) {
+            let deadline = Instant::now() + Duration::from_secs(num(4, 3600)?);
+            let qos = DataReaderQos {
+                history: History::KeepAll,
+            };
+            let reader = participant
+                .create_subscriber()?
+                .create_datareader_with_qos(&topic, qos)?;
+            println!("rustorb-dds: waiting for greetings...");
+            let mut got = 0;
+            while got < count {
+                if Instant::now() >= deadline {
+                    return Err(format!("rustorb-dds: got {got} of {count} samples").into());
+                }
+                if reader.wait_for_data(Duration::from_millis(200)) {
                     for s in reader.take() {
-                        println!("received {}: {}", s.data.index, s.data.message);
-                        if s.data.index == 10 {
-                            return Ok(());
+                        if s.data.message != "Hello, world!" {
+                            return Err(format!("bad message {:?}", s.data.message).into());
                         }
+                        println!("rustorb-dds: received {}", s.data.index);
+                        got += 1;
                     }
                 }
             }

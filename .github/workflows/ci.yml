@@ -66,3 +66,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --locked
+
+  # Hello world with Cyclone DDS and Fast DDS, both ways (interop/run.sh).
+  # The peers come from the Ubuntu 24.04 packages; see interop/README.md.
+  interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the peers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ tcpdump \
+            cyclonedds-dev cyclonedds-tools libfastrtps-dev fastddsgen
+      - run: interop/run.sh
+      - name: Keep the logs, versions and captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop
+          path: |
+            target/interop
+            !target/interop/build
+          if-no-files-found: ignore

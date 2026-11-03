@@ -657,7 +657,9 @@ impl AckNack {
             final_flag: flag(flags, 0x02),
             reader_id: EntityId::read(r)?,
             writer_id: EntityId::read(r)?,
-            reader_sn_state: SequenceNumberSet::read(r, id::ACKNACK)?,
+            // Base 0 with no bits is taken as "nothing yet" for interop;
+            // see `read_allowing_empty_zero`.
+            reader_sn_state: SequenceNumberSet::read_allowing_empty_zero(r, id::ACKNACK)?,
             count: Count(r.i32()?),
         })
     }

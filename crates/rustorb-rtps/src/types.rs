@@ -439,6 +439,33 @@ impl SequenceNumberSet {
         Ok(SequenceNumberSet { base, bitmap })
     }
 
+    /// Like `read`, but also takes an empty set with base 0 and returns
+    /// it as an empty set with base 1. Base 0 is invalid (8.3.5.5), but
+    /// some implementations send it in an ACKNACK to say that nothing was
+    /// received yet; "everything before 0" and "everything before 1"
+    /// acknowledge the same nothing.
+    pub(crate) fn read_allowing_empty_zero(
+        r: &mut Reader<'_>,
+        id: u8,
+    ) -> Result<Self, DecodeError> {
+        let invalid = DecodeError::InvalidSubmessage {
+            id,
+            reason: "invalid SequenceNumberSet",
+        };
+        let base = SequenceNumber::read(r)?;
+        let bitmap = Bitmap::read(r, invalid.clone())?;
+        if base.0 >= 1 {
+            Ok(SequenceNumberSet { base, bitmap })
+        } else if base.0 == 0 && bitmap.num_bits == 0 {
+            Ok(SequenceNumberSet {
+                base: SequenceNumber(1),
+                bitmap,
+            })
+        } else {
+            Err(invalid)
+        }
+    }
+
     pub(crate) fn write(&self, w: &mut Writer<'_>) {
         self.base.write(w);
         self.bitmap.write(w);

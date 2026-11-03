@@ -4,8 +4,8 @@ A DDS (Data Distribution Service) implementation in Rust, from the
 [rustorb](https://github.com/rustorb/rustorb) project ([日本語](README.ja.md)).
 
 **Status: early.** Participants discover each other (SPDP/SEDP) and
-exchange samples with best-effort writers and readers over UDPv4. Interop
-with other DDS implementations is not checked yet. The plan is
+exchange samples with best-effort writers and readers over UDPv4. Hello
+world works both ways with Cyclone DDS and Fast DDS ([interop](interop/)). The plan is
 [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111).
 
 Try the hello world in two terminals:
