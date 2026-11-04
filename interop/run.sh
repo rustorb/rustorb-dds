@@ -77,13 +77,14 @@ cat "$OUT/versions.txt"
 
 # --- build -----------------------------------------------------------------
 
-log "building rustorb-dds hello_world, keyed, liveliness and evolve"
+log "building rustorb-dds hello_world, keyed, liveliness, evolve and dynamic"
 cargo build --quiet --example hello_world --example keyed --example liveliness \
-  --example evolve || exit 1
+  --example evolve --example dynamic || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
 RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
 RUST_EVOLVE="$ROOT/target/debug/examples/evolve"
+RUST_DYNAMIC="$ROOT/target/debug/examples/dynamic"
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -231,6 +232,16 @@ for peer in "${PEERS[@]}"; do
         run_case "rustorb-$1-to-$peer-$2-$kind" \
           env RUSTORB_EXPECT_TYPE_LOOKUP=1 "$RUST_EVOLVE" "$1" pub @D@ "$COUNT" "$kind" -- \
           timeout $((TIMEOUT + 5)) "${E}_$2" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
+      done
+      # DynamicData: rustorb is not built with the type, and gets it
+      # from the peer's endpoint by TypeLookup.
+      for v in v1 v2; do
+        run_case "$peer-$v-to-rustorb-dynamic-$kind" \
+          "${E}_$v" pub @D@ "$COUNT" "$kind" -- \
+          timeout $((TIMEOUT + 5)) "$RUST_DYNAMIC" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
+        run_case "rustorb-dynamic-to-$peer-$v-$kind" \
+          "$RUST_DYNAMIC" pub @D@ "$COUNT" "$kind" -- \
+          timeout $((TIMEOUT + 5)) "${E}_$v" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
       done
     done
   fi

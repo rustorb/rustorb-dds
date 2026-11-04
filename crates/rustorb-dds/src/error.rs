@@ -10,6 +10,9 @@ pub enum Error {
     Io(std::io::Error),
     /// A sample could not be serialized.
     Serialize(rustorb_typesupport::Error),
+    /// A DynamicData sample could not be serialized, or a DynamicType
+    /// cannot be used for a topic.
+    Dynamic(rustorb_xtypes::Error),
     /// The participant was deleted.
     AlreadyDeleted,
     /// No more entity ids are left in the participant.
@@ -31,6 +34,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "network error: {e}"),
             Error::Serialize(e) => write!(f, "cannot serialize the sample: {e}"),
+            Error::Dynamic(e) => write!(f, "dynamic type or data: {e}"),
             Error::AlreadyDeleted => f.write_str("the participant was deleted"),
             Error::OutOfResources => f.write_str("no more entity ids"),
             Error::Timeout => f.write_str("timed out"),
@@ -45,6 +49,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Serialize(e) => Some(e),
+            Error::Dynamic(e) => Some(e),
             _ => None,
         }
     }
@@ -59,6 +64,12 @@ impl From<std::io::Error> for Error {
 impl From<rustorb_typesupport::Error> for Error {
     fn from(e: rustorb_typesupport::Error) -> Self {
         Error::Serialize(e)
+    }
+}
+
+impl From<rustorb_xtypes::Error> for Error {
+    fn from(e: rustorb_xtypes::Error) -> Self {
+        Error::Dynamic(e)
     }
 }
 

@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 use greeting::Greeting;
 use rustorb_dds::{
-    DATA_REPRESENTATION_QOS_POLICY_ID, DataReaderQos, DataWriterQos, DomainParticipant, History,
-    ParticipantConfig, Reliability, TypeConsistency, data_representation,
+    DATA_REPRESENTATION_QOS_POLICY_ID, DataReaderQos, DataWriterQos, DomainParticipant,
+    DynamicData, DynamicDataFactory, DynamicType, History, ParticipantConfig, Reliability,
+    TypeConsistency, data_representation,
 };
 use shape::Shape;
 
@@ -325,4 +326,131 @@ fn types_that_come_by_type_lookup_can_be_inconsistent() {
     });
     assert!(writer.matched_subscriptions().is_empty());
     assert!(a.learnt_types() >= 1 && b.learnt_types() >= 1);
+}
+
+/// A reader in a program without the type: it gets the type of the
+/// writer's topic by TypeLookup and reads DynamicData, instances
+/// included.
+#[test]
+fn dynamic_data_readers_read_types_they_discover() {
+    let (a, b) = (participant(158), participant(158));
+    a.register_type::<Shape>().unwrap();
+    let writer = a
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &a.create_topic::<Shape>("dyn").unwrap(),
+            DataWriterQos {
+                data_representation: vec![data_representation::XCDR2],
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let ty = b
+        .discover_topic_type("dyn", WAIT)
+        .unwrap()
+        .expect("the type of the topic");
+    assert_eq!(ty.get_name(), "Keyed::Shape");
+    assert!(ty.is_keyed());
+    let topic = b.create_dynamic_topic("dyn", &ty).unwrap();
+    assert_eq!(topic.type_name(), "Keyed::Shape");
+    let reader = b
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&topic, reliable_reader())
+        .unwrap();
+    assert!(writer.wait_for_subscriptions(1, WAIT));
+    assert!(reader.wait_for_publications(1, WAIT));
+    let shape = |id| Shape {
+        id,
+        index: 10 + id,
+        message: format!("shape {id}"),
+    };
+    writer.write(&shape(1)).unwrap();
+    writer.write(&shape(2)).unwrap();
+    writer.dispose(&shape(1)).unwrap();
+    let mut got = Vec::new();
+    wait_until("the samples", || {
+        got.extend(reader.take());
+        got.len() == 3
+    });
+    let data: Vec<&DynamicData> = got.iter().filter_map(|s| s.data.as_ref()).collect();
+    assert_eq!(data.len(), 2);
+    let (id, index, message) = (
+        data[0].get_member_id_by_name("id"),
+        data[0].get_member_id_by_name("index"),
+        data[0].get_member_id_by_name("message"),
+    );
+    assert_eq!(data[1].get_uint32_value(id).unwrap(), 2);
+    assert_eq!(data[1].get_uint32_value(index).unwrap(), 12);
+    assert_eq!(data[1].get_string_value(message).unwrap(), "shape 2");
+    // The dispose is of the instance of the first sample.
+    assert!(got[2].data.is_none());
+    assert_eq!(got[2].info.instance_handle, got[0].info.instance_handle);
+    assert_ne!(got[1].info.instance_handle, got[0].info.instance_handle);
+    assert_eq!(
+        reader.lookup_instance(data[0]),
+        Some(got[0].info.instance_handle)
+    );
+}
+
+/// A DynamicData writer of a type made at run time, read by a program
+/// built with an assignable type.
+#[test]
+fn dynamic_data_writers_write_to_typed_readers() {
+    use rustorb_dds::DescribeType;
+    let (a, b) = (participant(159), participant(159));
+    // Version 1 written dynamically, version 2 read.
+    let ty = DynamicType::from(<v1::evolve::Appendable as DescribeType>::describe_type());
+    let topic = a.create_dynamic_topic("dyn", &ty).unwrap();
+    let writer = a
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &topic,
+            DataWriterQos {
+                data_representation: vec![data_representation::XCDR2],
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    b.register_type::<v2::evolve::Appendable>().unwrap();
+    let reader = b
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(
+            &b.create_topic::<v2::evolve::Appendable>("dyn").unwrap(),
+            reliable_reader(),
+        )
+        .unwrap();
+    assert!(writer.wait_for_subscriptions(1, WAIT));
+    assert!(reader.wait_for_publications(1, WAIT));
+    let mut sample = DynamicDataFactory::create_data(&ty);
+    sample
+        .set_int32_value(sample.get_member_id_by_name("number"), 5)
+        .unwrap();
+    sample
+        .set_string_value(sample.get_member_id_by_name("text"), "five")
+        .unwrap();
+    writer.write(&sample).unwrap();
+    // A sample of another type is refused.
+    let other = DynamicType::from(<v2::evolve::Appendable as DescribeType>::describe_type());
+    assert!(
+        writer
+            .write(&DynamicDataFactory::create_data(&other))
+            .is_err()
+    );
+    let mut got = Vec::new();
+    wait_until("the sample", || {
+        got.extend(reader.take().into_iter().filter_map(|s| s.data));
+        !got.is_empty()
+    });
+    assert_eq!(
+        got[0],
+        v2::evolve::Appendable {
+            number: 5,
+            text: "five".into(),
+            extra: 0,
+        }
+    );
 }

@@ -27,6 +27,13 @@ impl DynamicData {
         write(self, enc, false)
     }
 
+    /// Writes the key holder of the value (see
+    /// [`key_holder`](DynamicData::key_holder)) to `enc`, in its encoding
+    /// and byte order.
+    pub fn serialize_key(&self, enc: &mut Encoder) -> Result<()> {
+        write(self, enc, true)
+    }
+
     /// Reads a value of `ty` from `dec`, in the encoding of `dec`.
     pub fn deserialize(ty: &DynamicType, dec: &mut Decoder<'_>) -> Result<DynamicData> {
         read(ty.as_type(), dec)
