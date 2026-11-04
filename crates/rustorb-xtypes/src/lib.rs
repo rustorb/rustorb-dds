@@ -14,10 +14,15 @@
 //! - [`typelookup`]: the requests and replies of the TypeLookup service
 //!   (7.6.3.3), with which participants ask each other for TypeObjects.
 //!
+//! - [`dynamic`]: the Dynamic Language Binding (7.5.2): DynamicType and
+//!   DynamicData, for types known only at run time, and their XCDR1 and
+//!   XCDR2 serialization.
+//!
 //! The XCDR1/XCDR2 encodings themselves are in rustorb-cdr, shared with
-//! rustorb. Still to come (rustorb/rustorb-dds#29): DynamicData.
+//! rustorb.
 
 pub mod assignability;
+pub mod dynamic;
 pub mod registry;
 pub mod type_object;
 pub mod typelookup;
@@ -38,6 +43,9 @@ pub enum Error {
     InvalidType(String),
     /// Something this version does not do yet.
     Unsupported(&'static str),
+    /// A bad argument to an operation of the Dynamic Language Binding
+    /// (`RETCODE_BAD_PARAMETER`), with the reason.
+    BadParameter(String),
 }
 
 impl fmt::Display for Error {
@@ -47,6 +55,7 @@ impl fmt::Display for Error {
             Error::Invalid(what) => write!(f, "invalid data: {what}"),
             Error::InvalidType(what) => write!(f, "invalid type: {what}"),
             Error::Unsupported(what) => write!(f, "not supported: {what}"),
+            Error::BadParameter(what) => write!(f, "bad parameter: {what}"),
         }
     }
 }
