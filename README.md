@@ -19,6 +19,13 @@ cargo run --example hello_world -- sub
 cargo run --example hello_world -- pub
 ```
 
+or from Python (`pip install ./python`, see [python/](python/README.md)):
+
+```sh
+python python/examples/hello_world.py sub
+python python/examples/hello_world.py pub
+```
+
 ## Crates
 
 | Crate | Role | License |
@@ -26,6 +33,7 @@ cargo run --example hello_world -- pub
 | `rustorb-dds` | The DCPS API (DDS 1.4) | MIT OR Apache-2.0 |
 | `rustorb-rtps` | The wire protocol (DDSI-RTPS 2.5): messages, discovery, writers and readers | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | The type system (DDS-XTypes 1.3): TypeObject, assignability, DynamicData | MIT OR Apache-2.0 |
+| `rustorb-dds-python` | The native module of the Python package `rustorb_dds` ([python/](python/)), with PyO3; not published to crates.io | MIT OR Apache-2.0 |
 
 The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
 traits in `rustorb-typesupport`, both in the rustorb repository and shared
