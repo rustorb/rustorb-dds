@@ -1,10 +1,11 @@
 //! The TypeObjects a participant knows, by TypeIdentifier.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::Result;
 use crate::type_object::{
-    MinimalTypeObject, TypeIdentifier, TypeIdentifierTypeObjectPair, TypeInformation, TypeObject,
+    MinimalTypeObject, TypeIdentifier, TypeIdentifierTypeObjectPair, TypeIdentifierWithSize,
+    TypeInformation, TypeObject,
 };
 use crate::types::TypeObjects;
 
@@ -74,6 +75,37 @@ impl TypeRegistry {
             .collect()
     }
 
+    /// The direct hash TypeIdentifiers that the type `id` depends on,
+    /// directly or not, in the order they are first used; `None` when the
+    /// TypeObject of `id` is not here. Types whose TypeObjects are not here
+    /// are listed, but not what they depend on.
+    pub fn dependencies(&self, id: &TypeIdentifier) -> Option<Vec<TypeIdentifier>> {
+        let root = self.objects.get(id)?;
+        let mut seen = HashSet::from([id]);
+        let mut out = Vec::new();
+        let mut stack: Vec<&TypeIdentifier> = root.referenced_types().into_iter().rev().collect();
+        while let Some(t) = stack.pop() {
+            if !seen.insert(t) {
+                continue;
+            }
+            out.push(t.clone());
+            if let Some(object) = self.objects.get(t) {
+                stack.extend(object.referenced_types().into_iter().rev());
+            }
+        }
+        Some(out)
+    }
+
+    /// The [`TypeIdentifierWithSize`] of `id`, when its TypeObject is
+    /// here.
+    pub fn with_size(&self, id: &TypeIdentifier) -> Option<TypeIdentifierWithSize> {
+        let size = self.objects.get(id)?.to_bytes().ok()?.len();
+        Some(TypeIdentifierWithSize {
+            type_id: id.clone(),
+            typeobject_serialized_size: u32::try_from(size).ok()?,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn objects_mut(&mut self) -> &mut HashMap<TypeIdentifier, TypeObject> {
         &mut self.objects
@@ -87,5 +119,63 @@ impl TypeRegistry {
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::*;
+
+    fn st(name: &str, members: Vec<StructMember>) -> Type {
+        StructType {
+            name: name.into(),
+            extensibility: Extensibility::Appendable,
+            members,
+            ..Default::default()
+        }
+        .into()
+    }
+
+    #[test]
+    fn dependencies_are_those_of_the_type_information() {
+        let inner = st(
+            "M::Inner",
+            vec![StructMember::new("x", 0, Type::Primitive(Primitive::Int32))],
+        );
+        let middle = st(
+            "M::Middle",
+            vec![StructMember::new("i", 0, Type::sequence(inner.clone()))],
+        );
+        let outer = st(
+            "M::Outer",
+            vec![
+                StructMember::new("m", 0, middle),
+                StructMember::new("i", 1, inner),
+            ],
+        );
+        let objects = TypeObjects::new(&outer).unwrap();
+        let mut registry = TypeRegistry::new();
+        registry.add_type(&objects);
+        for info in [&objects.information.minimal, &objects.information.complete] {
+            let root = &info.typeid_with_size.type_id;
+            let expected: Vec<_> = info
+                .dependent_typeids
+                .iter()
+                .map(|t| t.type_id.clone())
+                .collect();
+            assert_eq!(expected.len(), 2);
+            assert_eq!(registry.dependencies(root).unwrap(), expected);
+            assert_eq!(
+                registry.with_size(root).as_ref(),
+                Some(&info.typeid_with_size)
+            );
+            // The innermost type depends on nothing.
+            assert_eq!(registry.dependencies(&expected[1]).unwrap(), vec![]);
+        }
+        assert_eq!(
+            registry.dependencies(&TypeIdentifier::Minimal([0; 14])),
+            None
+        );
     }
 }

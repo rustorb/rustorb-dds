@@ -5,6 +5,12 @@
 mod greeting;
 #[path = "../examples/keyed/shape.rs"]
 mod shape;
+#[allow(dead_code)]
+#[path = "../examples/evolve/v1.rs"]
+mod v1;
+#[allow(dead_code)]
+#[path = "../examples/evolve/v2.rs"]
+mod v2;
 
 use std::time::{Duration, Instant};
 
@@ -239,4 +245,84 @@ fn xcdr2_writers() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn other_versions_of_a_type_come_by_type_lookup() {
+    let (a, b) = (participant(156), participant(156));
+    a.register_type::<v1::evolve::Mutable>().unwrap();
+    b.register_type::<v2::evolve::Mutable>().unwrap();
+    let writer = a
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &a.create_topic::<v1::evolve::Mutable>("xt").unwrap(),
+            DataWriterQos {
+                data_representation: vec![data_representation::XCDR2],
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let reader = b
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(
+            &b.create_topic::<v2::evolve::Mutable>("xt").unwrap(),
+            reliable_reader(),
+        )
+        .unwrap();
+    assert!(writer.wait_for_subscriptions(1, WAIT));
+    assert!(reader.wait_for_publications(1, WAIT));
+    // Each side asked the other for its TypeObject to check it.
+    assert!(a.learnt_types() >= 1);
+    assert!(b.learnt_types() >= 1);
+    writer
+        .write(&v1::evolve::Mutable {
+            number: 7,
+            text: "seven".into(),
+        })
+        .unwrap();
+    let mut got = Vec::new();
+    wait_until("the sample", || {
+        got.extend(reader.take().into_iter().filter_map(|s| s.data));
+        !got.is_empty()
+    });
+    // The member version 1 does not have takes its default.
+    assert_eq!(
+        got[0],
+        v2::evolve::Mutable {
+            extra: 0,
+            number: 7,
+            text: "seven".into(),
+        }
+    );
+}
+
+#[test]
+fn types_that_come_by_type_lookup_can_be_inconsistent() {
+    // An APPENDABLE writer and a MUTABLE reader: not assignable, which
+    // each side finds once it has the other's TypeObject.
+    let (a, b) = (participant(157), participant(157));
+    a.register_type::<v1::evolve::Appendable>().unwrap();
+    b.register_type::<v1::evolve::Mutable>().unwrap();
+    let topic_a = a.create_topic::<v1::evolve::Appendable>("xt").unwrap();
+    let topic_b = b.create_topic::<v1::evolve::Mutable>("xt").unwrap();
+    let writer = a
+        .create_publisher()
+        .unwrap()
+        .create_datawriter(&topic_a)
+        .unwrap();
+    let _reader = b
+        .create_subscriber()
+        .unwrap()
+        .create_datareader(&topic_b)
+        .unwrap();
+    wait_until("INCONSISTENT_TOPIC", || {
+        topic_b.inconsistent_topic_status().total_count == 1
+    });
+    wait_until("INCONSISTENT_TOPIC of the writer", || {
+        topic_a.inconsistent_topic_status().total_count == 1
+    });
+    assert!(writer.matched_subscriptions().is_empty());
+    assert!(a.learnt_types() >= 1 && b.learnt_types() >= 1);
 }

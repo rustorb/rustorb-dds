@@ -52,6 +52,17 @@ once, before there is a subscriber, then waits for one and for its
 acknowledgments. The subscriber creates its reader two seconds late and
 must still get all of them, in order.
 
+The `-v<N>-to-<peer>-v<M>-<kind>` cases (Cyclone DDS only: Fast DDS
+2.11.2 has no TypeLookup service) use the `evolve` programs (the `evolve`
+example on the rustorb-dds side): the publisher has version N of the type
+and the subscriber version M, from `idl/EvolveV1.idl` and
+`idl/EvolveV2.idl`, where version 2 has one more member. `kind` is
+`appendable` or `mutable`. Both sides write and take XCDR2, RELIABLE and
+KEEP_ALL; the publisher writes `COUNT` samples and the subscriber checks
+the members both versions have. The rustorb-dds side must have got the
+peer's TypeObject with TypeLookup (`RUSTORB_EXPECT_TYPE_LOOKUP`), and the
+peer gets rustorb-dds's from it.
+
 The `-liveliness-<kind>` cases use the `liveliness` programs (the
 `liveliness` example on the rustorb-dds side) with the LIVELINESS kind
 `automatic`, `participant` (MANUAL_BY_PARTICIPANT) or `topic`
@@ -104,6 +115,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#19 (part 2) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 | 2026-11-03 | rustorb-dds#20 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 | 2026-11-03 | rustorb-dds#32 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 42 cases pass |
+| 2026-11-04 | rustorb-dds#33 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 50 cases pass |
 
 Found on the way:
 
@@ -190,6 +202,23 @@ Found on the way:
   Table 10.3), and writes `0x0007` (`CDR2_LE`, Table 60) itself.
   rustorb-cdr 0.2 writes the Table 39 values, so rustorb-dds rewrites
   them to those of Table 60 when it writes; it reads both.
+- TypeLookup (rustorb-dds#33): Cyclone DDS 0.10.4 announces the four
+  TypeLookup endpoints (bits 12 to 15 of `availableBuiltinEndpoints`);
+  Fast DDS 2.11.2 does not, and has no TypeLookup service. Cyclone asks
+  for the TypeObject of a remote type whose TypeIdentifier it does not
+  know with getTypes, sent to all the request readers it matched, with the
+  `instanceName` `dds.builtin.TOS.<GUID of the participant asked>` (the
+  32 hexadecimal digits of the whole GUID). The payload is XCDR2 with the
+  encapsulation identifier `0x0007` (Table 60); the request and reply
+  structs and their headers have no DHEADER and the unions have one; the
+  sequences in the MUTABLE `_In` and `_Out` structs have an EMHEADER with
+  length code 5. It writes the writer GUID of a SampleIdentity as four
+  32-bit integers, so its octets come byte-swapped in a little-endian
+  payload, and in a reply it does not put the identity of the request it
+  answers, so rustorb-dds takes a reply that matches none of its requests
+  for its oldest request of the same operation to the participant that
+  answers. It answers rustorb-dds's requests, and takes rustorb-dds's
+  replies.
 
 ## ROS 2
 

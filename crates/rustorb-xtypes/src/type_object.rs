@@ -1444,6 +1444,55 @@ type_object_union! {
     }
 }
 
+/// Adds the direct hash TypeIdentifiers that `id` is or holds (the
+/// elements and keys of plain collections) to `out`.
+fn push_hashes<'a>(id: &'a TypeIdentifier, out: &mut Vec<&'a TypeIdentifier>) {
+    match id {
+        TypeIdentifier::SeqSmall(d) => push_hashes(&d.element_identifier, out),
+        TypeIdentifier::SeqLarge(d) => push_hashes(&d.element_identifier, out),
+        TypeIdentifier::ArraySmall(d) => push_hashes(&d.element_identifier, out),
+        TypeIdentifier::ArrayLarge(d) => push_hashes(&d.element_identifier, out),
+        TypeIdentifier::MapSmall(d) => {
+            push_hashes(&d.key_identifier, out);
+            push_hashes(&d.element_identifier, out);
+        }
+        TypeIdentifier::MapLarge(d) => {
+            push_hashes(&d.key_identifier, out);
+            push_hashes(&d.element_identifier, out);
+        }
+        other if other.is_direct_hash() => out.push(other),
+        _ => {}
+    }
+}
+
+macro_rules! referenced_types {
+    ($object:expr, $ty:ident, $out:ident) => {
+        match $object {
+            $ty::Alias(t) => push_hashes(&t.body.common.related_type, $out),
+            $ty::Struct(t) => {
+                push_hashes(&t.header.base_type, $out);
+                for m in &t.member_seq {
+                    push_hashes(&m.common.member_type_id, $out);
+                }
+            }
+            $ty::Union(t) => {
+                push_hashes(&t.discriminator.common.type_id, $out);
+                for m in &t.member_seq {
+                    push_hashes(&m.common.type_id, $out);
+                }
+            }
+            $ty::Sequence(t) => push_hashes(&t.element.common.r#type, $out),
+            $ty::Array(t) => push_hashes(&t.element.common.r#type, $out),
+            $ty::Map(t) => {
+                push_hashes(&t.key.common.r#type, $out);
+                push_hashes(&t.element.common.r#type, $out);
+            }
+            $ty::Annotation(_) | $ty::Bitset(_) | $ty::Enumerated(_) | $ty::Bitmask(_) => {}
+            $ty::Extended(_) => {}
+        }
+    };
+}
+
 /// `TypeObject`: the description of a type, COMPLETE or MINIMAL
 /// (7.3.4.3, 7.3.4.4).
 #[derive(Debug, Clone, PartialEq)]
@@ -1499,6 +1548,19 @@ impl TypeObject {
     /// [`to_bytes`](TypeObject::to_bytes).
     pub fn hash(&self) -> Result<EquivalenceHash> {
         Ok(hash_of(&self.to_bytes()?))
+    }
+
+    /// The direct hash TypeIdentifiers of the types this type uses
+    /// directly: those of members, base types, aliased types and
+    /// collection elements (annotations left out).
+    pub fn referenced_types(&self) -> Vec<&TypeIdentifier> {
+        let mut out = Vec::new();
+        let out_ref = &mut out;
+        match self {
+            TypeObject::Minimal(m) => referenced_types!(m, MinimalTypeObject, out_ref),
+            TypeObject::Complete(c) => referenced_types!(c, CompleteTypeObject, out_ref),
+        }
+        out
     }
 
     /// The TypeIdentifier of this TypeObject: `EK_COMPLETE` or

@@ -1,7 +1,7 @@
 //! `DomainParticipant` and the thread that runs discovery and receives
 //! data for it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -17,6 +17,7 @@ use rustorb_rtps::reliable::{
 };
 use rustorb_rtps::sedp::{EndpointData, Match, Sedp, SedpConfig, SedpEvent, match_endpoints};
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
+use rustorb_rtps::typelookup::{TypeLookup, TypeLookupReplied};
 use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
 use rustorb_rtps::wlp::{self, Wlp};
 use rustorb_rtps::{
@@ -24,6 +25,10 @@ use rustorb_rtps::{
     SerializedPayload, Submessage, Time, VendorId,
 };
 use rustorb_typesupport::TopicType;
+use rustorb_xtypes::type_object::TypeIdentifier;
+use rustorb_xtypes::typelookup::{
+    GetTypeDependenciesIn, GetTypesIn, TypeLookupCall, TypeLookupReturn,
+};
 use rustorb_xtypes::types::{DescribeType, TypeObjects};
 
 use crate::condition::Waker;
@@ -704,6 +709,12 @@ pub(crate) struct Inner {
     spdp: Spdp,
     pub(crate) sedp: Sedp,
     wlp: Wlp,
+    typelookup: TypeLookup,
+    /// The TypeObjects asked for, and the participant asked: each is
+    /// asked for once from each participant.
+    type_requests: HashSet<(TypeIdentifier, GuidPrefix)>,
+    /// How many TypeObjects came by TypeLookup.
+    learnt_types: usize,
     /// When to write the next automatic liveliness message, while there
     /// are AUTOMATIC writers with a finite lease.
     next_automatic: Option<Instant>,
@@ -1472,6 +1483,95 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
             _ => {}
         }
     }
+    request_missing_types(inner);
+}
+
+/// Asks the participants whose endpoints announced types whose TypeObjects
+/// are missing for them (TypeLookup getTypes, DDS-XTypes 1.3, 7.6.3.3.4),
+/// with the other missing types their TypeInformation lists. When the
+/// TypeInformation does not list all the types the type depends on, asks
+/// for those too (getTypeDependencies).
+fn request_missing_types(inner: &mut Inner) {
+    let mut asks: BTreeMap<GuidPrefix, Vec<TypeIdentifier>> = BTreeMap::new();
+    let mut dependencies: BTreeMap<GuidPrefix, Vec<TypeIdentifier>> = BTreeMap::new();
+    for (id, remote) in inner.sedp.unresolved_types() {
+        let registry = inner.sedp.registry();
+        let info = inner
+            .sedp
+            .remote_writer(&remote)
+            .or_else(|| inner.sedp.remote_reader(&remote))
+            .and_then(|d| d.type_information.as_ref());
+        let mut ids = vec![id];
+        if let Some(info) = info {
+            ids.extend(registry.missing(info));
+            let m = &info.minimal;
+            let listed = i32::try_from(m.dependent_typeids.len()).unwrap_or(i32::MAX);
+            let root = &m.typeid_with_size.type_id;
+            if m.dependent_typeid_count > listed
+                && inner.type_requests.insert((root.clone(), remote.prefix))
+            {
+                dependencies
+                    .entry(remote.prefix)
+                    .or_default()
+                    .push(root.clone());
+            }
+        }
+        for id in ids {
+            if !registry.knows(&id) && inner.type_requests.insert((id.clone(), remote.prefix)) {
+                asks.entry(remote.prefix).or_default().push(id);
+            }
+        }
+    }
+    for (server, type_ids) in asks {
+        inner
+            .typelookup
+            .request(server, TypeLookupCall::GetTypes(GetTypesIn { type_ids }));
+    }
+    for (server, type_ids) in dependencies {
+        inner.typelookup.request(
+            server,
+            TypeLookupCall::GetTypeDependencies(GetTypeDependenciesIn {
+                type_ids,
+                continuation_point: None,
+            }),
+        );
+    }
+}
+
+/// Takes in a TypeLookup reply: keeps the TypeObjects it brings and
+/// matches again the endpoints that waited for them, or asks for the
+/// types it says a type depends on.
+fn type_lookup_replied(inner: &mut Inner, r: TypeLookupReplied, now: Instant) {
+    match r.reply.data {
+        TypeLookupReturn::GetTypes(Ok(out)) => {
+            // Each TypeObject is checked against its TypeIdentifier.
+            let added = inner.sedp.registry_mut().add_pairs(&out.types).unwrap_or(0);
+            inner.learnt_types += added;
+            if added > 0 {
+                let events = inner.sedp.rematch_unresolved();
+                apply_sedp_events(inner, events, now);
+            }
+        }
+        TypeLookupReturn::GetTypeDependencies(Ok(out)) if r.call.is_some() => {
+            let registry = inner.sedp.registry();
+            let type_ids: Vec<TypeIdentifier> = out
+                .dependent_typeids
+                .into_iter()
+                .map(|t| t.type_id)
+                .filter(|id| !registry.knows(id))
+                .collect();
+            let type_ids: Vec<TypeIdentifier> = type_ids
+                .into_iter()
+                .filter(|id| inner.type_requests.insert((id.clone(), r.server)))
+                .collect();
+            if !type_ids.is_empty() {
+                inner
+                    .typelookup
+                    .request(r.server, TypeLookupCall::GetTypes(GetTypesIn { type_ids }));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A DDS domain participant (DDS 1.4, 2.2.2.2.1): the entry point that
@@ -1507,7 +1607,8 @@ impl DomainParticipant {
         let prefix = GuidPrefix::generate(VENDOR_ID);
         let mut data = ParticipantData::new(prefix, VENDOR_ID);
         data.domain_id = Some(domain_id);
-        data.available_builtin_endpoints.0 |= Sedp::BUILTIN_ENDPOINTS | Wlp::BUILTIN_ENDPOINTS;
+        data.available_builtin_endpoints.0 |=
+            Sedp::BUILTIN_ENDPOINTS | Wlp::BUILTIN_ENDPOINTS | TypeLookup::BUILTIN_ENDPOINTS;
         data.metatraffic_unicast_locators = transport.discovery_unicast_locators();
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
@@ -1525,6 +1626,14 @@ impl DomainParticipant {
                 SedpConfig::default().writer,
                 SedpConfig::default().reader,
             ),
+            typelookup: TypeLookup::new(
+                prefix,
+                VENDOR_ID,
+                SedpConfig::default().writer,
+                SedpConfig::default().reader,
+            ),
+            type_requests: HashSet::new(),
+            learnt_types: 0,
             next_automatic: None,
             manual_pending: false,
             next_manual: Instant::now(),
@@ -1599,6 +1708,14 @@ impl DomainParticipant {
         }
         self.shared.flush();
         Ok(())
+    }
+
+    /// How many TypeObjects of remote types this participant got from
+    /// other participants with the TypeLookup service (DDS-XTypes 1.3,
+    /// 7.6.3.3). It asks for them when an endpoint announces a type whose
+    /// TypeObject it does not have, to check assignability.
+    pub fn learnt_types(&self) -> usize {
+        self.shared.lock_any().learnt_types
     }
 
     /// Creates a topic of type `T`, named `name`.
@@ -1678,6 +1795,7 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
                 g.spdp.next_deadline(),
                 g.sedp.next_deadline(),
                 g.wlp.next_deadline(),
+                g.typelookup.next_deadline(),
                 g.next_automatic,
                 manual,
             ]
@@ -1724,6 +1842,13 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                     for a in inner.wlp.handle_message(&d.data, now) {
                         inner.remote_participant_asserted(a.participant, a.kind, now);
                     }
+                    let replies =
+                        inner
+                            .typelookup
+                            .handle_message(&d.data, now, inner.sedp.registry());
+                    for r in replies {
+                        type_lookup_replied(inner, r, now);
+                    }
                 }
                 Channel::UserMulticast | Channel::UserUnicast => {
                     if shared.should_drop() {
@@ -1744,6 +1869,9 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
             out.push((o.bytes, o.locators));
         }
         for o in inner.wlp.poll(now) {
+            out.push((o.bytes, o.locators));
+        }
+        for o in inner.typelookup.poll(now) {
             out.push((o.bytes, o.locators));
         }
         for w in inner.writers.values_mut() {
@@ -1778,9 +1906,12 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
             inner.sedp.add_participant(&p, now);
             inner.wlp.add_participant(&p, now);
+            inner.typelookup.add_participant(&p, now);
         }
         ParticipantEvent::Removed(prefix, _) => {
             inner.wlp.remove_participant(&prefix);
+            inner.typelookup.remove_participant(&prefix);
+            inner.type_requests.retain(|(_, p)| *p != prefix);
             let events = inner.sedp.remove_participant(&prefix);
             apply_sedp_events(inner, events, now);
         }

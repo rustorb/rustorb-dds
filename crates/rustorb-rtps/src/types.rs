@@ -147,6 +147,14 @@ impl EntityId {
     pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER: EntityId = EntityId::new([0, 2, 0], 0xc2);
     /// `ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_READER`.
     pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_READER: EntityId = EntityId::new([0, 2, 0], 0xc7);
+    /// `ENTITYID_TL_SVC_REQ_WRITER` (DDS-XTypes 1.3 Table 61).
+    pub const TL_SVC_REQ_WRITER: EntityId = EntityId::new([0, 3, 0], 0xc3);
+    /// `ENTITYID_TL_SVC_REQ_READER`.
+    pub const TL_SVC_REQ_READER: EntityId = EntityId::new([0, 3, 0], 0xc4);
+    /// `ENTITYID_TL_SVC_REPLY_WRITER`.
+    pub const TL_SVC_REPLY_WRITER: EntityId = EntityId::new([0, 3, 1], 0xc3);
+    /// `ENTITYID_TL_SVC_REPLY_READER`.
+    pub const TL_SVC_REPLY_READER: EntityId = EntityId::new([0, 3, 1], 0xc4);
 
     /// Makes a user-defined entity id from a key and a kind.
     pub const fn user(entity_key: [u8; 3], entity_kind: u8) -> Self {
@@ -834,6 +842,14 @@ impl BuiltinEndpointSet {
     pub const PARTICIPANT_MESSAGE_DATA_WRITER: u32 = 1 << 10;
     /// `BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER`.
     pub const PARTICIPANT_MESSAGE_DATA_READER: u32 = 1 << 11;
+    /// TypeLookupServiceRequestDataWriter (DDS-XTypes 1.3 Table 62).
+    pub const TYPE_LOOKUP_REQUEST_WRITER: u32 = 1 << 12;
+    /// TypeLookupServiceRequestDataReader.
+    pub const TYPE_LOOKUP_REQUEST_READER: u32 = 1 << 13;
+    /// TypeLookupServiceReplyDataWriter.
+    pub const TYPE_LOOKUP_REPLY_WRITER: u32 = 1 << 14;
+    /// TypeLookupServiceReplyDataReader.
+    pub const TYPE_LOOKUP_REPLY_READER: u32 = 1 << 15;
     /// `DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER`.
     pub const TOPICS_ANNOUNCER: u32 = 1 << 28;
     /// `DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR`.
