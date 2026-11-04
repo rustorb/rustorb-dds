@@ -1,0 +1,14 @@
+// Two versions of the same types, for the type evolution tests of
+// TypeLookup and assignability (rustorb-dds#33). EvolveV2.idl adds a
+// member to each. crates/rustorb-dds/examples/evolve/v1.rs and v2.rs are
+// what `rustorb-idl -brust -Wbdds_only -Wbxtypes` writes for them.
+module Evolve {
+    @appendable struct Appendable {
+        long number;
+        string text;
+    };
+    @mutable struct Mutable {
+        @id(1) long number;
+        @id(2) string text;
+    };
+};

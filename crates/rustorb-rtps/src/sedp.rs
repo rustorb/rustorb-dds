@@ -17,7 +17,9 @@
 //! [`SedpEvent::IncompatibleQos`], one whose types are not consistent as
 //! [`SedpEvent::InconsistentTopic`]. Assignability is decided on the
 //! TypeObjects in the [`TypeRegistry`] ([`Sedp::registry_mut`]); a pair
-//! whose types are not all there waits, unmatched, until they are.
+//! whose types are not all there waits, unmatched, until they are
+//! ([`Sedp::unresolved_types`]: what to ask for with
+//! [`crate::typelookup`]).
 //!
 //! The caller connects it to SPDP: [`Sedp::add_participant`] when a
 //! participant is discovered or updated, [`Sedp::remove_participant`]

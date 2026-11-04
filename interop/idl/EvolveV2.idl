@@ -1,0 +1,13 @@
+// Version 2 of EvolveV1.idl: one more member in each type.
+module Evolve {
+    @appendable struct Appendable {
+        long number;
+        string text;
+        long extra;
+    };
+    @mutable struct Mutable {
+        @id(3) long extra;
+        @id(1) long number;
+        @id(2) string text;
+    };
+};

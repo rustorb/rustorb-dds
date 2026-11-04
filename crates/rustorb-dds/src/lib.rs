@@ -53,9 +53,11 @@
 //! ([`DataReaderQos::type_consistency`]) instead of by type name. Writers
 //! can write XCDR2 ([`DataWriterQos::data_representation`]). Topics count
 //! the endpoints whose types are not consistent with theirs
-//! ([`Topic::inconsistent_topic_status`]). Not yet: TypeLookup, to fetch
-//! the TypeObjects of a remote type that differs from the local one (until
-//! then such endpoints do not match).
+//! ([`Topic::inconsistent_topic_status`]). When a remote endpoint's type
+//! differs from the local one, the participant gets its TypeObjects from
+//! the remote participant with the TypeLookup service (DDS-XTypes 1.3,
+//! 7.6.3.3) before it decides, and answers such requests for its own
+//! types ([`DomainParticipant::learnt_types`], the `evolve` example).
 
 mod condition;
 mod error;

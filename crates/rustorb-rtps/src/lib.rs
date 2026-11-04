@@ -9,7 +9,8 @@
 //! message receiver of [`receiver`] and the QoS policies of [`qos`].
 //! Changes too large for a datagram are split into DATA_FRAG and put back
 //! together by [`frag`] (8.4.14.1, rustorb-dds#18). The Writer Liveliness
-//! Protocol (8.4.13, rustorb-dds#19) is in [`wlp`].
+//! Protocol (8.4.13, rustorb-dds#19) is in [`wlp`], and the endpoints of
+//! the DDS-XTypes TypeLookup service (rustorb-dds#33) in [`typelookup`].
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -57,6 +58,7 @@ pub mod reliable;
 pub mod sedp;
 pub mod spdp;
 mod submessage;
+pub mod typelookup;
 mod types;
 pub mod udp;
 mod wire;

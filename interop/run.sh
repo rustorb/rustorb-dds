@@ -77,11 +77,13 @@ cat "$OUT/versions.txt"
 
 # --- build -----------------------------------------------------------------
 
-log "building rustorb-dds hello_world, keyed and liveliness"
-cargo build --quiet --example hello_world --example keyed --example liveliness || exit 1
+log "building rustorb-dds hello_world, keyed, liveliness and evolve"
+cargo build --quiet --example hello_world --example keyed --example liveliness \
+  --example evolve || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
 RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
+RUST_EVOLVE="$ROOT/target/debug/examples/evolve"
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -213,6 +215,24 @@ for peer in "${PEERS[@]}"; do
     run_case "rustorb-to-$peer-xcdr2" \
       env RUSTORB_XCDR2=1 "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
       timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  fi
+  # Type evolution through TypeLookup: the two sides have different
+  # versions of the type, and rustorb must get the peer's TypeObject from
+  # it to match. Fast DDS 2.11.2 has no TypeLookup service.
+  if [ "$peer" = cyclonedds ]; then
+    E=$BUILD/$peer/evolve
+    for kind in appendable mutable; do
+      for v in "v1 v2" "v2 v1"; do
+        set -- $v
+        run_case "$peer-$1-to-rustorb-$2-$kind" \
+          "${E}_$1" pub @D@ "$COUNT" "$kind" -- \
+          env RUSTORB_EXPECT_TYPE_LOOKUP=1 \
+          timeout $((TIMEOUT + 5)) "$RUST_EVOLVE" "$2" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
+        run_case "rustorb-$1-to-$peer-$2-$kind" \
+          env RUSTORB_EXPECT_TYPE_LOOKUP=1 "$RUST_EVOLVE" "$1" pub @D@ "$COUNT" "$kind" -- \
+          timeout $((TIMEOUT + 5)) "${E}_$2" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
+      done
+    done
   fi
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
