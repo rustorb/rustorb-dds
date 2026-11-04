@@ -31,6 +31,18 @@ for f in Generated HelloWorld Keyed; do
 done
 ```
 
+`python/tests/generated/` is what rustorb-idl writes for the Python binding
+(`python/tests/test_generated.py` checks the type hashes against these
+fixtures):
+
+```sh
+for f in Generated HelloWorld Keyed; do
+  rustorb-idl -bpython -Wbdds_only -Wbextensibility=final \
+    -C python/tests/generated \
+    crates/rustorb-xtypes/tests/fixtures/cyclonedds/$f.idl
+done
+```
+
 What these fixtures show about Cyclone DDS 0.10.4:
 
 - `int8` and `uint8` get the TypeIdentifiers of `char` and `octet`

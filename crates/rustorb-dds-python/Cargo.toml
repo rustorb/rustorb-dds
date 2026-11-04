@@ -1,0 +1,33 @@
+[package]
+name = "rustorb-dds-python"
+description = "Native module of the rustorb-dds Python package (rustorb_dds._native), built with PyO3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+# The module only works loaded by Python; it is tested from Python
+# (python/tests).
+test = false
+doctest = false
+
+[dependencies]
+rustorb-dds = { path = "../rustorb-dds" }
+rustorb-xtypes.workspace = true
+# The Python binding. MIT OR Apache-2.0. Only this crate depends on it,
+# not the DDS crates.
+pyo3 = { version = "0.30", features = ["abi3-py39"] }
+
+[build-dependencies]
+pyo3-build-config = "0.30"

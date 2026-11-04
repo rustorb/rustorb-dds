@@ -27,6 +27,9 @@
 #              regular expression (default: all)
 #   LEASE      the liveliness lease of the liveliness cases, in ms
 #              (default 1000)
+#   PYTHON     the Python with the rustorb_dds package installed, for
+#              the Python cases (default python3; they are skipped when
+#              it cannot import rustorb_dds)
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -85,6 +88,16 @@ RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
 RUST_EVOLVE="$ROOT/target/debug/examples/evolve"
 RUST_DYNAMIC="$ROOT/target/debug/examples/dynamic"
+PYTHON=${PYTHON:-python3}
+PY="$ROOT/python/examples"
+if "$PYTHON" -c "import rustorb_dds" 2>/dev/null; then
+  HAVE_PYTHON=1
+  echo "rustorb-dds (Python): $("$PYTHON" -c "import rustorb_dds; print(rustorb_dds.__version__)")" \
+    >> "$OUT/versions.txt"
+else
+  HAVE_PYTHON=0
+  log "no rustorb_dds in $PYTHON: skipping the Python cases (pip install ./python)"
+fi
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -244,6 +257,38 @@ for peer in "${PEERS[@]}"; do
           timeout $((TIMEOUT + 5)) "${E}_$v" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
       done
     done
+  fi
+  # The Python binding: hello world (best effort and reliable), keyed
+  # instances, and DynamicData with the type from the peer.
+  if [ "$HAVE_PYTHON" = 1 ]; then
+    run_case "$peer-to-python" \
+      "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "$PYTHON" "$PY/hello_world.py" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "python-to-$peer" \
+      "$PYTHON" "$PY/hello_world.py" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "$peer-to-python-reliable" \
+      "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$PYTHON" "$PY/hello_world.py" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "python-to-$peer-reliable" \
+      "$PYTHON" "$PY/hello_world.py" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "$peer-to-python-keyed" \
+      "$BUILD/$peer/keyed" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "$PYTHON" "$PY/keyed.py" sub @D@ "$KEYED" "$TIMEOUT"
+    run_case "python-to-$peer-keyed" \
+      "$PYTHON" "$PY/keyed.py" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+    if [ "$peer" = cyclonedds ]; then
+      for v in v1 v2; do
+        run_case "$peer-$v-to-python-dynamic-mutable" \
+          "$BUILD/$peer/evolve_$v" pub @D@ "$COUNT" mutable -- \
+          timeout $((TIMEOUT + 5)) "$PYTHON" "$PY/dynamic.py" sub @D@ "$COUNT" "$TIMEOUT" mutable
+        run_case "python-dynamic-to-$peer-$v-mutable" \
+          "$PYTHON" "$PY/dynamic.py" pub @D@ "$COUNT" mutable -- \
+          timeout $((TIMEOUT + 5)) "$BUILD/$peer/evolve_$v" sub @D@ "$COUNT" "$TIMEOUT" mutable
+      done
+    fi
   fi
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
