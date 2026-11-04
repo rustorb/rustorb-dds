@@ -132,6 +132,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#32 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 42 cases pass |
 | 2026-11-04 | rustorb-dds#33 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 50 cases pass |
 | 2026-11-04 | rustorb-dds#34 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 58 cases pass |
+| 2026-11-04 | rustorb-dds#35 (Python binding) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 74 cases pass (16 Python) |
 
 Found on the way:
 
