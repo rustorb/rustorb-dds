@@ -24,6 +24,7 @@ use rustorb_rtps::{
     SerializedPayload, Submessage, Time, VendorId,
 };
 use rustorb_typesupport::TopicType;
+use rustorb_xtypes::types::{DescribeType, TypeObjects};
 
 use crate::condition::Waker;
 use crate::error::{Error, Result};
@@ -31,8 +32,9 @@ use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
 use crate::status::{
-    DeadlineMissedStatus, Deadlines, IncompatibleQosStatus, LivelinessChangedStatus,
-    LivelinessLostStatus, MatchedStatus, SampleLostStatus, SampleRejectedStatus, StatusMask,
+    DeadlineMissedStatus, Deadlines, IncompatibleQosStatus, InconsistentTopicStatus,
+    LivelinessChangedStatus, LivelinessLostStatus, MatchedStatus, SampleLostStatus,
+    SampleRejectedStatus, StatusMask,
 };
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
@@ -720,6 +722,10 @@ pub(crate) struct Inner {
     /// [`Shared::flush`] to hand to their listeners, or else to mark as
     /// changed for their StatusConditions.
     pending: Vec<(Guid, StatusMask)>,
+    /// The TypeObjects of the registered types, by type name.
+    types: HashMap<String, TypeObjects>,
+    /// INCONSISTENT_TOPIC, by topic name.
+    pub(crate) inconsistent_topics: HashMap<String, InconsistentTopicStatus>,
 }
 
 /// The shortest interval between two liveliness messages of a kind.
@@ -994,6 +1000,18 @@ impl Shared {
         Ok(Guid::new(self.prefix, EntityId::user(key, kind)))
     }
 
+    /// The TypeInformation of a registered type.
+    pub(crate) fn type_information(
+        &self,
+        type_name: &str,
+    ) -> Result<Option<rustorb_xtypes::type_object::TypeInformation>> {
+        Ok(self
+            .lock()?
+            .types
+            .get(type_name)
+            .map(|o| o.information.clone()))
+    }
+
     /// Adds a local writer: announces it, and matches it with the local
     /// readers.
     pub(crate) fn add_writer(
@@ -1031,7 +1049,7 @@ impl Shared {
             let lease = w.local_lease();
             let mut changes = StatusMask::NONE;
             for (rg, r) in inner.readers.iter_mut() {
-                match match_endpoints(&data, &r.data) {
+                match match_endpoints(&data, &r.data, inner.sedp.registry()) {
                     Match::Matched => {
                         w.add_match(*rg);
                         changes |= StatusMask::PUBLICATION_MATCHED;
@@ -1052,7 +1070,11 @@ impl Shared {
                             .pending
                             .push((*rg, StatusMask::REQUESTED_INCOMPATIBLE_QOS));
                     }
-                    Match::Unrelated => {}
+                    // Local types are all known, and a local pair counts
+                    // only once remote endpoints are found (DDS 1.4,
+                    // 2.2.4.1: INCONSISTENT_TOPIC is about other
+                    // participants).
+                    Match::Inconsistent | Match::Unresolved(_) | Match::Unrelated => {}
                 }
             }
             inner.writers.insert(guid, w);
@@ -1083,7 +1105,7 @@ impl Shared {
             // reader.
             let mut kept = Vec::new();
             for (wg, w) in inner.writers.iter_mut() {
-                match match_endpoints(&w.data, &data) {
+                match match_endpoints(&w.data, &data, inner.sedp.registry()) {
                     Match::Matched => {
                         r.add_match(*wg);
                         changes |= StatusMask::SUBSCRIPTION_MATCHED;
@@ -1105,7 +1127,7 @@ impl Shared {
                             .pending
                             .push((*wg, StatusMask::OFFERED_INCOMPATIBLE_QOS));
                     }
-                    Match::Unrelated => {}
+                    Match::Inconsistent | Match::Unresolved(_) | Match::Unrelated => {}
                 }
             }
             for c in kept {
@@ -1437,6 +1459,16 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                         .push((local, StatusMask::REQUESTED_INCOMPATIBLE_QOS));
                 }
             }
+            SedpEvent::InconsistentTopic { local, .. } => {
+                let topic = if let Some(w) = inner.writers.get(&local) {
+                    Some(w.data.topic_name.clone())
+                } else {
+                    inner.readers.get(&local).map(|r| r.data.topic_name.clone())
+                };
+                if let Some(topic) = topic {
+                    inner.inconsistent_topics.entry(topic).or_default().add();
+                }
+            }
             _ => {}
         }
     }
@@ -1503,6 +1535,8 @@ impl DomainParticipant {
             readers: HashMap::new(),
             deleted: false,
             pending: Vec::new(),
+            types: HashMap::new(),
+            inconsistent_topics: HashMap::new(),
         };
         let shared = Arc::new_cyclic(|this| Shared {
             this: this.clone(),
@@ -1537,6 +1571,34 @@ impl DomainParticipant {
     /// The participant's GUID.
     pub fn guid(&self) -> Guid {
         Guid::new(self.shared.prefix, EntityId::PARTICIPANT)
+    }
+
+    /// Registers the type `T` with its DDS-XTypes description
+    /// (`register_type`, DDS-XTypes 1.3, 7.6.3.2): the writers and readers
+    /// of `T` created afterwards announce its TypeInformation, and are
+    /// matched with remote endpoints by type assignability rather than by
+    /// type name (see [`crate::DataReaderQos::type_consistency`]).
+    /// rustorb-idl writes [`DescribeType`] with `-Wbxtypes`.
+    ///
+    /// Registering a type again does nothing. Fails with
+    /// [`Error::Unsupported`] for a type that has no TypeObjects (one that
+    /// depends on itself).
+    pub fn register_type<T: TopicType + DescribeType>(&self) -> Result<()> {
+        let objects = TypeObjects::of::<T>()
+            .map_err(|_| Error::Unsupported("a type that cannot be described"))?;
+        {
+            let mut g = self.shared.lock()?;
+            let inner = &mut *g;
+            if inner.types.contains_key(T::TYPE_NAME) {
+                return Ok(());
+            }
+            inner.sedp.registry_mut().add_type(&objects);
+            inner.types.insert(T::TYPE_NAME.to_owned(), objects);
+            let events = inner.sedp.rematch_unresolved();
+            apply_sedp_events(inner, events, Instant::now());
+        }
+        self.shared.flush();
+        Ok(())
     }
 
     /// Creates a topic of type `T`, named `name`.

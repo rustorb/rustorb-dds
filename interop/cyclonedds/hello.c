@@ -17,6 +17,8 @@
  * once, before any subscriber is there, then waits for one and for its
  * acknowledgments; the subscriber creates its reader two seconds late.
  *
+ * With HELLO_XCDR2 set in the environment, the publisher writes XCDR2.
+ *
  * The message is "Hello, world!", or with <size>, <size> letters that
  * depend on the index ('a' + (i + index) % 26 for the i-th), so that the
  * sample is too large for a datagram.
@@ -79,6 +81,10 @@ static int publish(dds_entity_t pp, dds_entity_t topic, int count, int interval_
 {
   dds_qos_t *qos = dds_create_qos();
   set_reliability(qos);
+  if (getenv("HELLO_XCDR2")) {
+    dds_data_representation_id_t xcdr2 = DDS_DATA_REPRESENTATION_XCDR2;
+    dds_qset_data_representation(qos, 1, &xcdr2);
+  }
   dds_entity_t writer = dds_create_writer(pp, topic, qos, NULL);
   dds_delete_qos(qos);
   if (writer < 0) {

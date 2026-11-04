@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lease_duration: Some(lease),
     };
     let participant = DomainParticipant::with_config(ParticipantConfig::new(domain))?;
+    participant.register_type::<Greeting>()?;
     let topic = participant.create_topic::<Greeting>("liveliness")?;
     let greeting = |index: u32| Greeting {
         index,

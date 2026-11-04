@@ -13,6 +13,7 @@ publish = false
 
 [dependencies]
 rustorb-cdr.workspace = true
+rustorb-xtypes.workspace = true
 socket2.workspace = true
 
 [lints]

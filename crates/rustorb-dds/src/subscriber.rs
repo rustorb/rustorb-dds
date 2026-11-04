@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
 use crate::listener::DataReaderListener;
 use crate::participant::{ReaderEvent, ReaderListener, ReaderState, Shared};
-use crate::qos::{DataReaderQos, SubscriberQos, duration_to_rtps};
+use crate::qos::{DataReaderQos, SubscriberQos, TypeConsistency, duration_to_rtps};
 use crate::status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, MatchedStatus,
     SampleLostStatus, SampleRejectedStatus, StatusMask,
@@ -70,6 +70,11 @@ impl Subscriber {
         };
         let guid = self.shared.new_guid(kind)?;
         let mut data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
+        data.type_information = self.shared.type_information(T::TYPE_NAME)?;
+        data.data_representation = qos.data_representation.clone();
+        if qos.type_consistency != TypeConsistency::default() {
+            data.type_consistency = Some(qos.type_consistency);
+        }
         data.reliability = qos.reliability.to_rtps();
         data.durability = qos.durability;
         data.deadline = duration_to_rtps(qos.deadline);
