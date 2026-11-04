@@ -106,7 +106,7 @@ def test_round_trip_everything():
         ob=200, obytes=b"\xff\x00",
         table={"a": 1, "b": -2}, note="hi", big=-(1 << 40),
     )
-    s = round_trip(Everything, e, 170)
+    s = round_trip(Everything, e, 20)
     assert s.data == e
     assert isinstance(s.data.color, Color)
     assert s.info.valid_data and s.info.instance_state == "alive"
@@ -114,13 +114,13 @@ def test_round_trip_everything():
 
 def test_round_trip_default_case():
     e = Everything(id=1, u=U(42, 2.5), note=None)
-    s = round_trip(Everything, e, 171)
+    s = round_trip(Everything, e, 21)
     assert s.data.u == U(42, 2.5)
     assert s.data.note is None
 
 
 def test_bad_values():
-    p = dds.DomainParticipant(172, localhost=True)
+    p = dds.DomainParticipant(22, localhost=True)
     w = p.create_publisher().create_datawriter(p.create_topic("Bad", Greeting))
     with pytest.raises((ValueError, TypeError, OverflowError)):
         w.write(Greeting(-1, "x"))
@@ -133,5 +133,5 @@ def test_dynamic_type_samples_are_plain():
         ("a", 0, "int32", True, False, False, False),
         ("b", 1, ("sequence", ("string", 0), 0), False, False, False, False),
     ]))
-    s = round_trip(t, {"a": 3, "b": ["x", "y"]}, 173)
+    s = round_trip(t, {"a": 3, "b": ["x", "y"]}, 23)
     assert s.data == {"a": 3, "b": ["x", "y"]}

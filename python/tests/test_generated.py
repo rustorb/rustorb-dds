@@ -74,7 +74,7 @@ def test_round_trip_of_everything():
         opt=11,
     )
     top = Gen.Top(id=1, all=all_)
-    p = dds.DomainParticipant(175, localhost=True)
+    p = dds.DomainParticipant(25, localhost=True)
     t = p.create_topic("Top", Gen.Top)
     r = p.create_subscriber().create_datareader(t, dds.Qos(reliability="reliable"))
     w = p.create_publisher().create_datawriter(t)

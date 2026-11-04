@@ -1,4 +1,8 @@
-"""Entities, QoS, instances, conditions and listeners."""
+"""Entities, QoS, instances, conditions and listeners.
+
+The Python tests use domains 20 to 36, which the Rust tests do not use.
+Domains above 166 have ports in the range Windows may reserve (49152 and
+up), where binding fails with WSAEACCES."""
 
 import threading
 
@@ -28,7 +32,7 @@ def pair(domain, reader_qos=RELIABLE, writer_qos=RELIABLE, **kw):
 
 
 def test_instances_and_dispose():
-    _, w, r = pair(180)
+    _, w, r = pair(30)
     for i in range(3):
         w.write(Shape(i % 2, i, "m%d" % i))
     w.dispose(Shape(0))
@@ -46,7 +50,7 @@ def test_instances_and_dispose():
 
 
 def test_read_states():
-    _, w, r = pair(181)
+    _, w, r = pair(31)
     w.write(Shape(1, 1, "a"))
     w.wait_for_acknowledgments(5.0)
     assert r.wait_for_data(5.0)
@@ -58,7 +62,7 @@ def test_read_states():
 
 
 def test_waitset_conditions():
-    _, w, r = pair(182)
+    _, w, r = pair(32)
     ws = dds.WaitSet()
     guard = dds.GuardCondition()
     rc = r.create_readcondition(sample_states=["not_read"])
@@ -99,7 +103,7 @@ class WriterListener(dds.DataWriterListener):
 
 
 def test_listeners():
-    p = dds.DomainParticipant(183, localhost=True)
+    p = dds.DomainParticipant(33, localhost=True)
     topic = p.create_topic("Shapes", Shape)
     rl, wl = ReaderListener(), WriterListener()
     r = p.create_subscriber().create_datareader(topic, RELIABLE, listener=rl)
@@ -114,7 +118,7 @@ def test_listeners():
 
 
 def test_partitions_and_incompatible_qos():
-    p = dds.DomainParticipant(184, localhost=True)
+    p = dds.DomainParticipant(34, localhost=True)
     topic = p.create_topic("Shapes", Shape)
     r = p.create_subscriber(partition=["a*"]).create_datareader(topic, RELIABLE)
     w = p.create_publisher(partition=["abc"]).create_datawriter(topic, RELIABLE)
@@ -128,7 +132,7 @@ def test_partitions_and_incompatible_qos():
 
 
 def test_transient_local_late_joiner():
-    p = dds.DomainParticipant(185, localhost=True)
+    p = dds.DomainParticipant(35, localhost=True)
     topic = p.create_topic("Shapes", Shape)
     tl = dds.Qos(reliability="reliable", durability="transient_local", history=10)
     w = p.create_publisher().create_datawriter(topic, tl)
@@ -145,9 +149,9 @@ def test_transient_local_late_joiner():
 
 
 def test_discover_topic_type():
-    p = dds.DomainParticipant(186, localhost=True)
+    p = dds.DomainParticipant(36, localhost=True)
     w = p.create_publisher().create_datawriter(p.create_topic("Shapes", Shape))
-    q = dds.DomainParticipant(186, localhost=True)
+    q = dds.DomainParticipant(36, localhost=True)
     t = q.discover_topic_type("Shapes", 5.0)
     assert t == dds.type_of(Shape)
     r = q.create_subscriber().create_datareader(q.create_topic("Shapes", t), RELIABLE)
