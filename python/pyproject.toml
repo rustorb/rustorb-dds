@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.9.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rustorb-dds"
+version = "0.1.0"
+description = "DDS (Data Distribution Service) with its core in Rust: the Python binding"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/rustorb/rustorb-dds"
+
+[tool.maturin]
+# The native module is the rustorb-dds-python crate; the Python package
+# is rustorb_dds/ next to this file.
+manifest-path = "../crates/rustorb-dds-python/Cargo.toml"
+python-source = "."
+python-packages = ["rustorb_dds"]
+module-name = "rustorb_dds._native"
+exclude = ["rustorb_dds/__pycache__/**", "rustorb_dds/_native*.so", "rustorb_dds/_native*.pyd"]

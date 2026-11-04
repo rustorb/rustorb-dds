@@ -395,3 +395,42 @@ fn the_listener_mask_chooses_the_statuses() {
     });
     assert!(writer.offered_deadline_missed_status().total_count_change > 0);
 }
+
+#[test]
+fn listeners_given_at_creation_see_local_matches() {
+    // The writer and reader match while they are created: only a
+    // listener given then is told.
+    let p = participant(160, None);
+    let topic = p.create_topic::<Greeting>("created").unwrap();
+    let calls = Arc::new(Matches::default());
+    let reliable = DataReaderQos {
+        reliability: Reliability::reliable(),
+        ..DataReaderQos::default()
+    };
+    let _reader = p
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_listener(
+            &topic,
+            reliable,
+            ReaderSide(calls.clone()),
+            StatusMask::ALL,
+        )
+        .unwrap();
+    let _writer = p
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_listener(
+            &topic,
+            DataWriterQos::default(),
+            WriterSide(calls.clone()),
+            StatusMask::ALL,
+        )
+        .unwrap();
+    let w = calls.writer.lock().unwrap();
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].current_count, 1);
+    let r = calls.reader.lock().unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].current_count, 1);
+}

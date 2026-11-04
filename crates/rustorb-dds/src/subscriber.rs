@@ -58,6 +58,30 @@ impl Subscriber {
         topic: &Topic<T>,
         qos: DataReaderQos,
     ) -> Result<DataReader<T>> {
+        self.create(topic, qos, None)
+    }
+
+    /// Creates a reader for `topic` with a listener for the statuses in
+    /// `mask`, set before the reader is matched, so that it is told of
+    /// the writers already there and of the samples they kept
+    /// (DDS 1.4, 2.2.2.5.2.5).
+    pub fn create_datareader_with_listener<T: 'static>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataReaderQos,
+        listener: impl DataReaderListener<T> + 'static,
+        mask: StatusMask,
+    ) -> Result<DataReader<T>> {
+        let l = reader_listener(topic.samples.clone(), listener);
+        self.create(topic, qos, Some((l, mask)))
+    }
+
+    fn create<T>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataReaderQos,
+        listener: Option<(ReaderListener, StatusMask)>,
+    ) -> Result<DataReader<T>> {
         let kind = if topic.samples.keyed() {
             entity_kind::USER_READER_WITH_KEY
         } else {
@@ -77,7 +101,8 @@ impl Subscriber {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
-        self.shared.add_reader(data, qos, topic.samples.key_ops())?;
+        self.shared
+            .add_reader(data, qos, topic.samples.key_ops(), listener)?;
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,
@@ -294,28 +319,7 @@ impl<T> DataReader<T> {
     where
         T: 'static,
     {
-        let samples = self.samples.clone();
-        let l: ReaderListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
-            let reader = DataReader::<T> {
-                shared: shared.clone(),
-                guid,
-                owned: false,
-                samples: samples.clone(),
-            };
-            match event {
-                ReaderEvent::DataAvailable => listener.on_data_available(&reader),
-                ReaderEvent::SubscriptionMatched(s) => listener.on_subscription_matched(&reader, s),
-                ReaderEvent::LivelinessChanged(s) => listener.on_liveliness_changed(&reader, s),
-                ReaderEvent::RequestedDeadlineMissed(s) => {
-                    listener.on_requested_deadline_missed(&reader, s)
-                }
-                ReaderEvent::RequestedIncompatibleQos(s) => {
-                    listener.on_requested_incompatible_qos(&reader, s)
-                }
-                ReaderEvent::SampleRejected(s) => listener.on_sample_rejected(&reader, s),
-                ReaderEvent::SampleLost(s) => listener.on_sample_lost(&reader, s),
-            }
-        });
+        let l = reader_listener(self.samples.clone(), listener);
         let mut g = self.shared.lock_any();
         if let Some(r) = g.readers.get_mut(&self.guid) {
             r.listener = Some((l, mask));
@@ -485,4 +489,33 @@ impl<T> Drop for DataReader<T> {
             self.shared.remove_reader(&self.guid);
         }
     }
+}
+
+/// The listener of a reader, as kept by the participant: `listener`
+/// called with a handle to the reader.
+fn reader_listener<T: 'static>(
+    samples: Arc<dyn SampleType<T>>,
+    listener: impl DataReaderListener<T> + 'static,
+) -> ReaderListener {
+    Arc::new(move |shared: &Arc<Shared>, guid, event| {
+        let reader = DataReader::<T> {
+            shared: shared.clone(),
+            guid,
+            owned: false,
+            samples: samples.clone(),
+        };
+        match event {
+            ReaderEvent::DataAvailable => listener.on_data_available(&reader),
+            ReaderEvent::SubscriptionMatched(s) => listener.on_subscription_matched(&reader, s),
+            ReaderEvent::LivelinessChanged(s) => listener.on_liveliness_changed(&reader, s),
+            ReaderEvent::RequestedDeadlineMissed(s) => {
+                listener.on_requested_deadline_missed(&reader, s)
+            }
+            ReaderEvent::RequestedIncompatibleQos(s) => {
+                listener.on_requested_incompatible_qos(&reader, s)
+            }
+            ReaderEvent::SampleRejected(s) => listener.on_sample_rejected(&reader, s),
+            ReaderEvent::SampleLost(s) => listener.on_sample_lost(&reader, s),
+        }
+    })
 }

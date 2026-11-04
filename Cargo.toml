@@ -4,6 +4,7 @@ members = [
     "crates/rustorb-xtypes",
     "crates/rustorb-rtps",
     "crates/rustorb-dds",
+    "crates/rustorb-dds-python",
 ]
 exclude = ["fuzz"]
 

@@ -1033,6 +1033,7 @@ impl Shared {
         data: EndpointData,
         qos: DataWriterQos,
         keyed: bool,
+        listener: Option<(WriterListener, StatusMask)>,
     ) -> Result<()> {
         {
             let mut g = self.lock()?;
@@ -1058,7 +1059,7 @@ impl Shared {
                 matched_status: MatchedStatus::default(),
                 changes: StatusMask::NONE,
                 enabled: StatusMask::ALL,
-                listener: None,
+                listener,
             };
             let lease = w.local_lease();
             let mut changes = StatusMask::NONE;
@@ -1107,6 +1108,7 @@ impl Shared {
         data: EndpointData,
         qos: DataReaderQos,
         keys: Arc<dyn KeyOps>,
+        listener: Option<(ReaderListener, StatusMask)>,
     ) -> Result<()> {
         {
             let mut g = self.lock()?;
@@ -1114,6 +1116,7 @@ impl Shared {
             let guid = data.guid;
             let now = Instant::now();
             let mut r = ReaderState::new(data.clone(), &qos, keys, &inner.reader_config);
+            r.listener = listener;
             let mut changes = StatusMask::NONE;
             // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL
             // reader.

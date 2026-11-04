@@ -67,6 +67,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --locked
 
+  # The Python binding (python/): built with maturin, tested with pytest.
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ./python pytest
+      - run: pytest python/tests
+
   # Hello world with Cyclone DDS and Fast DDS, both ways (interop/run.sh).
   # The peers come from the Ubuntu 24.04 packages; see interop/README.md.
   interop:
@@ -75,12 +96,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Install the peers
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cmake g++ tcpdump \
             cyclonedds-dev cyclonedds-tools libfastrtps-dev fastddsgen
+      - name: Install the Python binding
+        run: pip install ./python
       - run: interop/run.sh
+        env:
+          PYTHON: python
       - name: Keep the logs, versions and captures
         if: always()
         uses: actions/upload-artifact@v4

@@ -63,6 +63,30 @@ impl Publisher {
         topic: &Topic<T>,
         qos: DataWriterQos,
     ) -> Result<DataWriter<T>> {
+        self.create(topic, qos, None)
+    }
+
+    /// Creates a writer for `topic` with a listener for the statuses in
+    /// `mask`, set before the writer is matched, so that it is told of
+    /// the readers already there (DDS 1.4, 2.2.2.4.1.5).
+    pub fn create_datawriter_with_listener<T: 'static>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataWriterQos,
+        listener: impl DataWriterListener<T> + 'static,
+        mask: StatusMask,
+    ) -> Result<DataWriter<T>> {
+        let encoding = encoding_of(&qos)?;
+        let l = writer_listener(encoding, topic.samples.clone(), listener);
+        self.create(topic, qos, Some((l, mask)))
+    }
+
+    fn create<T>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataWriterQos,
+        listener: Option<(WriterListener, StatusMask)>,
+    ) -> Result<DataWriter<T>> {
         let keyed = topic.samples.keyed();
         let kind = if keyed {
             entity_kind::USER_WRITER_WITH_KEY
@@ -72,15 +96,7 @@ impl Publisher {
         if qos.durability > DurabilityKind::TransientLocal {
             return Err(Error::Unsupported("TRANSIENT and PERSISTENT durability"));
         }
-        let encoding = match qos.data_representation.first() {
-            None | Some(&data_representation::XCDR) => Encoding::Xcdr1,
-            Some(&data_representation::XCDR2) => Encoding::Xcdr2,
-            Some(_) => {
-                return Err(Error::Unsupported(
-                    "a data representation other than XCDR and XCDR2",
-                ));
-            }
-        };
+        let encoding = encoding_of(&qos)?;
         let guid = self.shared.new_guid(kind)?;
         let type_name = topic.type_name();
         let mut data = EndpointData::writer(guid, topic.name(), type_name);
@@ -92,7 +108,7 @@ impl Publisher {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
-        self.shared.add_writer(data, qos, keyed)?;
+        self.shared.add_writer(data, qos, keyed, listener)?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
@@ -281,27 +297,7 @@ impl<T> DataWriter<T> {
     where
         T: 'static,
     {
-        let encoding = self.encoding;
-        let samples = self.samples.clone();
-        let l: WriterListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
-            let writer = DataWriter::<T> {
-                shared: shared.clone(),
-                guid,
-                encoding,
-                owned: false,
-                samples: samples.clone(),
-            };
-            match event {
-                WriterEvent::PublicationMatched(s) => listener.on_publication_matched(&writer, s),
-                WriterEvent::LivelinessLost(s) => listener.on_liveliness_lost(&writer, s),
-                WriterEvent::OfferedDeadlineMissed(s) => {
-                    listener.on_offered_deadline_missed(&writer, s)
-                }
-                WriterEvent::OfferedIncompatibleQos(s) => {
-                    listener.on_offered_incompatible_qos(&writer, s)
-                }
-            }
-        });
+        let l = writer_listener(self.encoding, self.samples.clone(), listener);
         let mut g = self.shared.lock_any();
         if let Some(w) = g.writers.get_mut(&self.guid) {
             w.listener = Some((l, mask));
@@ -392,6 +388,46 @@ fn table_60_identifier(payload: &mut [u8]) {
             0x12 => 0x0a,
             _ => return,
         } | order;
+    }
+}
+
+/// The listener of a writer, as kept by the participant: `listener`
+/// called with a handle to the writer.
+fn writer_listener<T: 'static>(
+    encoding: Encoding,
+    samples: Arc<dyn SampleType<T>>,
+    listener: impl DataWriterListener<T> + 'static,
+) -> WriterListener {
+    Arc::new(move |shared: &Arc<Shared>, guid, event| {
+        let writer = DataWriter::<T> {
+            shared: shared.clone(),
+            guid,
+            encoding,
+            owned: false,
+            samples: samples.clone(),
+        };
+        match event {
+            WriterEvent::PublicationMatched(s) => listener.on_publication_matched(&writer, s),
+            WriterEvent::LivelinessLost(s) => listener.on_liveliness_lost(&writer, s),
+            WriterEvent::OfferedDeadlineMissed(s) => {
+                listener.on_offered_deadline_missed(&writer, s)
+            }
+            WriterEvent::OfferedIncompatibleQos(s) => {
+                listener.on_offered_incompatible_qos(&writer, s)
+            }
+        }
+    })
+}
+
+/// How a writer with `qos` serializes samples: its first data
+/// representation.
+fn encoding_of(qos: &DataWriterQos) -> Result<Encoding> {
+    match qos.data_representation.first() {
+        None | Some(&data_representation::XCDR) => Ok(Encoding::Xcdr1),
+        Some(&data_representation::XCDR2) => Ok(Encoding::Xcdr2),
+        Some(_) => Err(Error::Unsupported(
+            "a data representation other than XCDR and XCDR2",
+        )),
     }
 }
 

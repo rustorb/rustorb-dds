@@ -70,6 +70,14 @@ type of the peer's writer or reader with TypeLookup (its COMPLETE
 TypeObjects) and reads or writes DynamicData of it, with the members of
 the evolve programs looked up by name.
 
+The `python-` cases (rustorb-dds#35) run the Python binding's examples
+in `python/examples` on the rustorb-dds side, with the same command
+lines as the Rust examples: `hello_world.py` (best effort and reliable),
+`keyed.py`, and, with Cyclone DDS, `dynamic.py` (mutable), which takes
+the type from the peer like the `dynamic` example. They need the
+`rustorb_dds` package installed in `PYTHON` (default `python3`): `pip
+install ./python`. Without it they are skipped.
+
 The `-liveliness-<kind>` cases use the `liveliness` programs (the
 `liveliness` example on the rustorb-dds side) with the LIVELINESS kind
 `automatic`, `participant` (MANUAL_BY_PARTICIPANT) or `topic`
