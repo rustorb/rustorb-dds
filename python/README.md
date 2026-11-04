@@ -38,7 +38,9 @@ A topic's type is either:
       note: dds.optional(str)
   ```
 
-  Member types are `bool`, `int` (int32), `float` (float64), `str`, `bytes`, the primitives `dds.int8` ... `dds.float128`, `dds.char8`, `dds.string(bound)`, `dds.wstring(bound)`, `dds.sequence(t, bound)`, `dds.array(t, *dims)`, `dds.map(k, v, bound)`, or another declared type. `dds.key`, `dds.optional` and `dds.member(t, id=, key=, optional=, must_understand=, external=)` give annotations. Member IDs are sequential from 0 unless given.
+  Member types are `bool`, `int` (int32), `float` (float64), `str`, `bytes`, the primitives `dds.int8` ... `dds.float128`, `dds.char8`, `dds.string(bound)`, `dds.wstring(bound)`, `dds.sequence(t, bound)`, `dds.array(t, *dims)`, `dds.map(k, v, bound)`, or another declared type. `dds.key`, `dds.optional` and `dds.member(t, id=, key=, optional=, must_understand=, external=, hash_id=)` give annotations; `dds.typedef(name, t)` is an IDL typedef. Member IDs are sequential from 0 unless given (or hashed with `autoid="hash"`).
+
+  [rustorb-idl](https://github.com/rustorb/rustorb-idl) writes these declarations from IDL: `rustorb-idl -bpython -Wbdds_only Foo.idl` writes `Foo_dds.py` (`from Foo_dds import MyModule`). Their TypeObjects are those other implementations make from the same IDL (checked against Cyclone DDS's idlc in `tests/test_generated.py`).
 
 - or a `dds.DynamicType` (XTypes DynamicData), whose samples are plain values: dicts for structs, `(discriminator, value)` tuples for unions, lists, bytes, ints. `participant.discover_topic_type(name)` learns the type of a topic from the remote endpoints (with TypeLookup when they announce only its hash), so a program can read a topic without knowing its type beforehand.
 

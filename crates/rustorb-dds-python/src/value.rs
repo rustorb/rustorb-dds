@@ -51,7 +51,12 @@ pub(crate) fn to_py<'py>(py: Python<'py>, d: &DynamicData) -> PyResult<Bound<'py
             .into_pyobject(py)?
             .to_owned()
             .into_any(),
-        TK_BYTE | TK_UINT8 => d
+        TK_BYTE => d
+            .get_byte_value(ME)
+            .map_err(err)?
+            .into_pyobject(py)?
+            .into_any(),
+        TK_UINT8 => d
             .get_uint8_value(ME)
             .map_err(err)?
             .into_pyobject(py)?
@@ -127,8 +132,18 @@ pub(crate) fn to_py<'py>(py: Python<'py>, d: &DynamicData) -> PyResult<Bound<'py
             };
             let n = d.get_item_count();
             if octets(element) {
+                let byte = matches!(
+                    resolve(element),
+                    Type::Primitive(rustorb_xtypes::types::Primitive::Byte)
+                );
                 let bytes = (0..n)
-                    .map(|i| d.get_uint8_value(i))
+                    .map(|i| {
+                        if byte {
+                            d.get_byte_value(i)
+                        } else {
+                            d.get_uint8_value(i)
+                        }
+                    })
                     .collect::<Result<Vec<u8>, _>>()
                     .map_err(err)?;
                 PyBytes::new(py, &bytes).into_any()
@@ -217,7 +232,8 @@ fn fill(d: &mut DynamicData, v: &Bound<'_, PyAny>) -> PyResult<()> {
     let ty = d.get_type();
     match d.get_kind() {
         TK_BOOLEAN => d.set_boolean_value(ME, v.is_truthy()?),
-        TK_BYTE | TK_UINT8 => d.set_uint8_value(ME, int(v)?),
+        TK_BYTE => d.set_byte_value(ME, int(v)?),
+        TK_UINT8 => d.set_uint8_value(ME, int(v)?),
         TK_INT8 => d.set_int8_value(ME, int(v)?),
         TK_INT16 => d.set_int16_value(ME, int(v)?),
         TK_UINT16 => d.set_uint16_value(ME, int(v)?),

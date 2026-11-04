@@ -31,8 +31,12 @@ type. A member's type is one of:
 - :func:`key`, :func:`optional` or :func:`member` of one of those, for
   the member's annotations.
 
-Member IDs are 0, 1, 2... in order (``@autoid(SEQUENTIAL)``), unless
-:func:`member` gives one.
+Member IDs are 0, 1, 2... in order (``@autoid(SEQUENTIAL)``), or the
+hashes of the names with ``autoid="hash"``, unless :func:`member` gives
+one. :func:`typedef` is an IDL typedef.
+
+rustorb-idl writes these declarations from IDL (``-bpython
+-Wbdds_only``).
 
 In samples, enums are :class:`enum.IntEnum` members (an unknown value
 stays an int), bitmasks :class:`enum.IntFlag`, unions instances of their
@@ -51,7 +55,7 @@ __all__ = [
     "uint32", "int64", "uint64", "float32", "float64", "float128",
     "char8", "char16", "string", "wstring", "sequence", "array", "map",
     "key", "optional", "member", "case", "default_case", "struct", "union",
-    "enum", "bitmask", "type_of", "DynamicType",
+    "enum", "bitmask", "typedef", "type_of", "DynamicType",
 ]
 
 DynamicType = _native.DynamicType
@@ -228,9 +232,11 @@ class Member:
 
     def __init__(self, type, id=None, key=False, optional=False,
                  must_understand=False, external=False, labels=None,
-                 default=False):
+                 default=False, hash_id=None, name=None):
         self.type = type
         self.id = id
+        self.hash_id = hash_id
+        self.name = name
         self.key = key
         self.optional = optional
         self.must_understand = must_understand
@@ -240,11 +246,15 @@ class Member:
 
 
 def member(type, id=None, key=False, optional=False, must_understand=False,
-           external=False):
+           external=False, hash_id=None, name=None):
     """A struct member of ``type`` with its annotations: ``@id``,
-    ``@key``, ``@optional``, ``@must_understand``, ``@external``."""
+    ``@key``, ``@optional``, ``@must_understand``, ``@external``, and
+    ``@hashid(hash_id)`` (``""`` for ``@hashid`` of the member's name).
+    ``name`` is its name in the type when not that of the attribute
+    (``from`` for the attribute ``_from``)."""
     return Member(type, id=id, key=key, optional=optional,
-                  must_understand=must_understand, external=external)
+                  must_understand=must_understand, external=external,
+                  hash_id=hash_id, name=name)
 
 
 def key(type):
@@ -257,15 +267,16 @@ def optional(type):
     return Member(type, optional=True)
 
 
-def case(type, *labels, id=None):
+def case(type, *labels, id=None, hash_id=None, name=None):
     """A union member of ``type`` selected by the discriminator values
     ``labels``."""
-    return Member(type, id=id, labels=list(labels))
+    return Member(type, id=id, labels=list(labels), hash_id=hash_id, name=name)
 
 
-def default_case(type, *labels, id=None):
+def default_case(type, *labels, id=None, hash_id=None, name=None):
     """The ``default`` union member of ``type`` (and of ``labels``)."""
-    return Member(type, id=id, labels=list(labels), default=True)
+    return Member(type, id=id, labels=list(labels), default=True, hash_id=hash_id,
+                  name=name)
 
 
 _BUILTINS = {
@@ -306,6 +317,34 @@ def type_of(t):
     return dt
 
 
+class _Alias(Spec):
+    def __init__(self, name, t):
+        self.name = name
+        self.t = spec_of(t)
+
+    def desc(self):
+        return ("alias", self.name, self.t.desc())
+
+    def zero(self):
+        return self.t.zero()
+
+    def decode(self, v):
+        return self.t.decode(v)
+
+    def encode(self, v):
+        return self.t.encode(v)
+
+    def __repr__(self):
+        return "rustorb_dds.typedef(%r, %r)" % (self.name, self.t)
+
+
+def typedef(name, t):
+    """The alias (IDL ``typedef``) ``name`` of the type ``t``: the same
+    values, and a type of its own in the TypeObjects, so that the type
+    matches one declared with the typedef in IDL."""
+    return _Alias(name, t)
+
+
 class _Dynamic(Spec):
     """A type known only as a DynamicType: samples are plain values."""
 
@@ -325,6 +364,42 @@ def _extensibility(e):
     return e
 
 
+def hashed_id(name):
+    """The member ID of a name (DDS-XTypes 7.3.1.2.1.1): the first 4
+    octets of the MD5 of its UTF-8, as a little endian integer, with the
+    top 4 bits cleared."""
+    import hashlib
+
+    d = hashlib.md5(name.encode("utf-8")).digest()
+    return int.from_bytes(d[:4], "little") & 0x0FFFFFFF
+
+
+def _autoid(a):
+    if a not in ("sequential", "hash"):
+        raise ValueError("autoid is sequential or hash")
+    return a
+
+
+def _member_ids(members, autoid):
+    """(name, id, Member) of the members: their ``@id``, ``@hashid``, else
+    by ``autoid``."""
+    out = []
+    prev = None
+    for name, m in members:
+        name = m.name or name
+        if m.id is not None:
+            mid = m.id
+        elif m.hash_id is not None:
+            mid = hashed_id(m.hash_id or name)
+        elif autoid == "hash":
+            mid = hashed_id(name)
+        else:
+            mid = 0 if prev is None else prev + 1
+        out.append((mid, m))
+        prev = mid
+    return out
+
+
 def _members(cls):
     """The (name, Member) of the annotations of ``cls``, in order."""
     out = []
@@ -336,22 +411,20 @@ def _members(cls):
 
 
 class _Struct(Spec):
-    def __init__(self, cls, name, extensibility, nested):
+    def __init__(self, cls, name, extensibility, nested, autoid):
         self.cls = cls
         self.name = name
         self.extensibility = _extensibility(extensibility)
         self.nested = nested
+        self.autoid = _autoid(autoid)
         self.base = None
         for b in cls.__mro__[1:]:
             if isinstance(getattr(b, "__dds_spec__", None), _Struct):
                 self.base = b.__dds_spec__
                 break
-        self.members = []
-        next_id = 0
-        for name_, m in _members(cls):
-            mid = next_id if m.id is None else m.id
-            next_id = mid + 1
-            self.members.append((name_, mid, m, spec_of(m.type)))
+        ms = _members(cls)
+        self.members = [(n, mid, m, spec_of(m.type))
+                        for (n, _), (mid, m) in zip(ms, _member_ids(ms, self.autoid))]
 
     def all_members(self):
         base = self.base.all_members() if self.base else []
@@ -361,8 +434,10 @@ class _Struct(Spec):
         return (
             "struct", self.name, self.extensibility, self.nested,
             self.base.desc() if self.base else None,
-            [(n, i, s.desc(), m.key, m.optional, m.must_understand and not m.key,
-              m.external) for n, i, m, s in self.members],
+            [(m.name or n, i, s.desc(), m.key, m.optional,
+              m.must_understand and not m.key, m.external, m.hash_id)
+             for n, i, m, s in self.members],
+            self.autoid == "hash",
         )
 
     def zero(self):
@@ -371,31 +446,32 @@ class _Struct(Spec):
     def decode(self, v):
         kw = {}
         for n, _, m, s in self.all_members():
-            x = v.get(n)
+            x = v.get(m.name or n)
             kw[n] = None if x is None and m.optional else s.decode(x)
         return self.cls(**kw)
 
     def encode(self, v):
-        if isinstance(v, dict):
-            get = v.get
-        else:
-            def get(n):
-                return getattr(v, n, None)
+        """The dict the native module takes, from an instance of the class
+        or a dict (by attribute or member name)."""
         out = {}
         for n, _, m, s in self.all_members():
-            x = get(n)
-            out[n] = None if x is None else s.encode(x)
+            if isinstance(v, dict):
+                x = v.get(n, v.get(m.name)) if m.name else v.get(n)
+            else:
+                x = getattr(v, n, None)
+            out[m.name or n] = None if x is None else s.encode(x)
         return out
 
 
-def struct(name=None, extensibility="final", nested=False):
+def struct(name=None, extensibility="final", nested=False, autoid="sequential"):
     """Makes the decorated class a struct type named ``name`` (its
-    qualified name by default), ``@final`` by default. A base class that
-    is a struct is its base type."""
+    qualified name by default), ``@final`` by default, with member IDs by
+    ``autoid`` (``"sequential"`` or ``"hash"``) where not given. A base
+    class that is a struct is its base type."""
 
     def wrap(cls):
         spec = _Struct(cls, name or cls.__qualname__.replace(".", "::"),
-                       extensibility, nested)
+                       extensibility, nested, autoid)
         for n, _, m, s in spec.members:
             if n not in cls.__dict__:
                 if m.optional:
@@ -410,33 +486,39 @@ def struct(name=None, extensibility="final", nested=False):
     return wrap
 
 
+def _label(x):
+    """A union label as an integer: a char is its code."""
+    return ord(x) if isinstance(x, str) else int(x)
+
+
 class _Union(Spec):
-    def __init__(self, cls, name, discriminator, extensibility, nested):
+    def __init__(self, cls, name, discriminator, extensibility, nested, autoid):
         self.cls = cls
         self.name = name
         self.discriminator = spec_of(discriminator)
         self.extensibility = _extensibility(extensibility)
         self.nested = nested
+        self.autoid = _autoid(autoid)
         self.members = []
-        next_id = 0
-        for name_, m in _members(cls):
+        ms = _members(cls)
+        for (name_, _), (mid, m) in zip(ms, _member_ids(ms, self.autoid)):
             if m.labels is None:
                 raise TypeError("union member %s needs case() or default_case()" % name_)
-            mid = next_id if m.id is None else m.id
-            next_id = mid + 1
             self.members.append((name_, mid, m, spec_of(m.type)))
 
     def desc(self):
         return (
             "union", self.name, self.extensibility, self.nested,
             self.discriminator.desc(),
-            [(n, i, s.desc(), [int(x) for x in m.labels], m.default)
+            [(m.name or n, i, s.desc(), [_label(x) for x in m.labels], m.default)
              for n, i, m, s in self.members],
+            self.autoid == "hash",
         )
 
     def _selected(self, d):
+        d = _label(d)
         for n, _, m, s in self.members:
-            if d in m.labels:
+            if d in [_label(x) for x in m.labels]:
                 return s
         for n, _, m, s in self.members:
             if m.default:
@@ -448,10 +530,22 @@ class _Union(Spec):
         d = m.labels[0] if m.labels else 0
         return self.cls(self.discriminator.decode(d), s.zero())
 
+    def _disc(self, d):
+        """The discriminator as the native module gives it (an integer)
+        as a value of its type."""
+        t = self.discriminator
+        while isinstance(t, _Alias):
+            t = t.t
+        if isinstance(t, Primitive) and t.name in ("char8", "char16"):
+            return chr(d)
+        if isinstance(t, Primitive) and t.name == "boolean":
+            return bool(d)
+        return t.decode(d)
+
     def decode(self, v):
         d, x = v
         s = self._selected(d)
-        return self.cls(self.discriminator.decode(d),
+        return self.cls(self._disc(d),
                         None if s is None or x is None else s.decode(x))
 
     def encode(self, v):
@@ -459,11 +553,12 @@ class _Union(Spec):
             d, x = v
         else:
             d, x = v.discriminator, v.value
-        s = self._selected(int(d))
-        return (int(d), None if s is None or x is None else s.encode(x))
+        s = self._selected(d)
+        return (_label(d), None if s is None or x is None else s.encode(x))
 
 
-def union(discriminator, name=None, extensibility="final", nested=False):
+def union(discriminator, name=None, extensibility="final", nested=False,
+          autoid="sequential"):
     """Makes the decorated class a union type with a discriminator of
     type ``discriminator``; its annotations are its members, each a
     :func:`case` or :func:`default_case`. Its values have
@@ -471,7 +566,7 @@ def union(discriminator, name=None, extensibility="final", nested=False):
 
     def wrap(cls):
         spec = _Union(cls, name or cls.__qualname__.replace(".", "::"),
-                      discriminator, extensibility, nested)
+                      discriminator, extensibility, nested, autoid)
         names = [n for n, _, _, _ in spec.members]
 
         def __init__(self, discriminator, value=None):
@@ -498,19 +593,22 @@ def union(discriminator, name=None, extensibility="final", nested=False):
 
 
 class _Enum(Spec):
-    def __init__(self, cls, name, bit_bound, extensibility):
+    def __init__(self, cls, name, bit_bound, extensibility, default_literal, names):
         self.cls = cls
+        self.names = names or {}
         self.name = name
         self.bit_bound = bit_bound
         self.extensibility = _extensibility(extensibility)
+        self.explicit = cls[default_literal] if default_literal else None
+        self.default = self.explicit or list(cls)[0]
 
     def desc(self):
-        literals = list(self.cls)
         return ("enum", self.name, self.bit_bound, self.extensibility,
-                [(m.name, int(m.value), False) for m in literals])
+                [(self.names.get(n, n), int(m.value), m is self.explicit)
+                 for n, m in self.cls.__members__.items()])
 
     def zero(self):
-        return list(self.cls)[0]
+        return self.default
 
     def decode(self, v):
         try:
@@ -522,33 +620,39 @@ class _Enum(Spec):
         return int(v)
 
 
-def enum(name=None, bit_bound=32, extensibility="final"):
-    """Makes the decorated :class:`enum.IntEnum` an enum type."""
+def enum(name=None, bit_bound=32, extensibility="final", default_literal=None,
+         names=None):
+    """Makes the decorated :class:`enum.IntEnum` an enum type; its default
+    is its first literal, or the one named ``default_literal``
+    (``@default_literal``). ``names`` maps the Python names of literals
+    to their names in the type where they differ."""
 
     def wrap(cls):
         if not issubclass(cls, _enum.IntEnum):
             raise TypeError("an enum type is an enum.IntEnum")
         cls.__dds_spec__ = _Enum(cls, name or cls.__qualname__.replace(".", "::"),
-                                 bit_bound, extensibility)
+                                 bit_bound, extensibility, default_literal, names)
         return cls
 
     return wrap
 
 
 class _Bitmask(Spec):
-    def __init__(self, cls, name, bit_bound, extensibility):
+    def __init__(self, cls, name, bit_bound, extensibility, names):
         self.cls = cls
+        self.names = names or {}
         self.name = name
         self.bit_bound = bit_bound
         self.extensibility = _extensibility(extensibility)
 
     def desc(self):
         flags = []
-        for m in self.cls:
+        # In the order they are declared.
+        for n, m in self.cls.__members__.items():
             v = int(m.value)
             if v <= 0 or v & (v - 1):
-                raise ValueError("a bitmask flag is one bit: %s" % m.name)
-            flags.append((m.name, v.bit_length() - 1))
+                raise ValueError("a bitmask flag is one bit: %s" % n)
+            flags.append((self.names.get(n, n), v.bit_length() - 1))
         return ("bitmask", self.name, self.bit_bound, self.extensibility, flags)
 
     def zero(self):
@@ -561,7 +665,7 @@ class _Bitmask(Spec):
         return int(v)
 
 
-def bitmask(name=None, bit_bound=32, extensibility="final"):
+def bitmask(name=None, bit_bound=32, extensibility="final", names=None):
     """Makes the decorated :class:`enum.IntFlag` a bitmask type: each
     member is one flag, at the position of its bit."""
 
@@ -569,7 +673,7 @@ def bitmask(name=None, bit_bound=32, extensibility="final"):
         if not issubclass(cls, _enum.IntFlag):
             raise TypeError("a bitmask type is an enum.IntFlag")
         cls.__dds_spec__ = _Bitmask(cls, name or cls.__qualname__.replace(".", "::"),
-                                    bit_bound, extensibility)
+                                    bit_bound, extensibility, names)
         return cls
 
     return wrap

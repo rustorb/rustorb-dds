@@ -53,6 +53,8 @@ class Everything:
     inners: dds.sequence(Inner, 4)
     blob: bytes
     octets: dds.array(dds.uint8, 4)
+    ob: dds.byte
+    obytes: dds.sequence(dds.byte)
     table: dds.map(str, dds.int32)
     note: dds.optional(str)
     big: dds.member(dds.int64, id=100)
@@ -101,6 +103,7 @@ def test_round_trip_everything():
         flags=Flags.A | Flags.C, u=U(3, "three"),
         inner=Inner(5, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
         inners=[Inner(1), Inner(2)], blob=b"\x00\x01", octets=b"abcd",
+        ob=200, obytes=b"\xff\x00",
         table={"a": 1, "b": -2}, note="hi", big=-(1 << 40),
     )
     s = round_trip(Everything, e, 170)

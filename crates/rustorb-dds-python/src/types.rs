@@ -16,9 +16,14 @@
 //!   default)])`;
 //! - `("bitmask", name, bit_bound, extensibility, [(flag, position)])`;
 //! - `("struct", name, extensibility, nested, base or None, [(member, id,
-//!   type, key, optional, must_understand, external)])`;
+//!   type, key, optional, must_understand, external, hash_id)],
+//!   autoid_hash)`;
 //! - `("union", name, extensibility, nested, discriminator, [(member, id,
-//!   type, labels, default)])`;
+//!   type, labels, default)], autoid_hash)`;
+//!
+//! `hash_id` is the string of the member's `@hashid` (`""` for none
+//! given), or None; it and `autoid_hash` (`@autoid(HASH)`) may be left
+//! out.
 //! - a `DynamicType`.
 //!
 //! The extensibility is `"final"`, `"appendable"` or `"mutable"`.
@@ -29,6 +34,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyString, PyTuple};
 use rustorb_dds::DynamicType;
+use rustorb_xtypes::type_object::AppliedBuiltinMemberAnnotations;
 use rustorb_xtypes::types::*;
 
 /// A DDS-XTypes type (`DynamicType`): of a topic, or of a member.
@@ -66,6 +72,21 @@ impl PyDynamicType {
     /// The description of the type (see the module).
     fn describe<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         describe(py, self.ty.as_type())
+    }
+
+    /// The hashes (hex) of the minimal and complete TypeObjects of the
+    /// type, which identify it on the network (DDS-XTypes 7.3.4.9).
+    fn type_hashes(&self) -> PyResult<(String, String)> {
+        let objects = TypeObjects::new(self.ty.as_type())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let hex = |id: &rustorb_xtypes::type_object::TypeIdentifier| match id {
+            rustorb_xtypes::type_object::TypeIdentifier::Minimal(h)
+            | rustorb_xtypes::type_object::TypeIdentifier::Complete(h) => {
+                h.iter().map(|b| format!("{b:02x}")).collect()
+            }
+            other => format!("{other:?}"),
+        };
+        Ok((hex(objects.minimal_id()), hex(objects.complete_id())))
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -118,6 +139,15 @@ const PRIMITIVES: [(&str, Primitive); 15] = [
 
 fn item<'py>(t: &Bound<'py, PyTuple>, i: usize) -> PyResult<Bound<'py, PyAny>> {
     t.get_item(i)
+}
+
+/// Item `i` of `t`, if `t` has it and it is not None.
+fn opt_item<'py>(t: &Bound<'py, PyTuple>, i: usize) -> Option<Bound<'py, PyAny>> {
+    if i < t.len() {
+        t.get_item(i).ok().filter(|v| !v.is_none())
+    } else {
+        None
+    }
 }
 
 /// The type a description describes.
@@ -194,11 +224,16 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
             for m in item(t, 5)?.try_iter()? {
                 let m = m?;
                 let m = m.cast::<PyTuple>()?;
+                let hash_id = opt_item(m, 7).map(|h| h.extract::<String>()).transpose()?;
                 members.push(StructMember {
                     key: item(m, 3)?.extract()?,
                     optional: item(m, 4)?.extract()?,
                     must_understand: item(m, 5)?.extract()?,
                     external: item(m, 6)?.extract()?,
+                    annotations: AppliedBuiltinMemberAnnotations {
+                        hash_id,
+                        ..Default::default()
+                    },
                     ..StructMember::new(
                         item(m, 0)?.extract::<String>()?,
                         item(m, 1)?.extract()?,
@@ -210,7 +245,10 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                 name: item(t, 1)?.extract()?,
                 extensibility: extensibility(&item(t, 2)?.extract::<String>()?)?,
                 nested: item(t, 3)?.extract()?,
-                autoid_hash: false,
+                autoid_hash: opt_item(t, 6)
+                    .map(|v| v.extract())
+                    .transpose()?
+                    .unwrap_or(false),
                 base: if base.is_none() {
                     None
                 } else {
@@ -238,7 +276,10 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                 name: item(t, 1)?.extract()?,
                 extensibility: extensibility(&item(t, 2)?.extract::<String>()?)?,
                 nested: item(t, 3)?.extract()?,
-                autoid_hash: false,
+                autoid_hash: opt_item(t, 6)
+                    .map(|v| v.extract())
+                    .transpose()?
+                    .unwrap_or(false),
                 discriminator: type_of(&item(t, 4)?)?,
                 discriminator_key: false,
                 discriminator_try_construct: TryConstruct::Discard,
@@ -338,6 +379,10 @@ pub(crate) fn describe<'py>(py: Python<'py>, ty: &Type) -> PyResult<Bound<'py, P
                         obj(&m.optional)?,
                         obj(&m.must_understand)?,
                         obj(&m.external)?,
+                        match &m.annotations.hash_id {
+                            Some(h) => obj(&h.as_str())?,
+                            None => py.None().into_bound(py),
+                        },
                     ])
                 })
                 .collect::<PyResult<Vec<_>>>()?;
@@ -351,6 +396,7 @@ pub(crate) fn describe<'py>(py: Python<'py>, ty: &Type) -> PyResult<Bound<'py, P
                     None => py.None().into_bound(py),
                 },
                 PyList::new(py, members)?.into_any(),
+                obj(&s.autoid_hash)?,
             ])
         }
         Type::Union(u) => {
@@ -374,6 +420,7 @@ pub(crate) fn describe<'py>(py: Python<'py>, ty: &Type) -> PyResult<Bound<'py, P
                 obj(&u.nested)?,
                 describe(py, &u.discriminator)?,
                 PyList::new(py, members)?.into_any(),
+                obj(&u.autoid_hash)?,
             ])
         }
     }
