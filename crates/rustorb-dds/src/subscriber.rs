@@ -1,12 +1,10 @@
 //! `Subscriber` and `DataReader`.
 
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, entity_kind};
-use rustorb_typesupport::TopicType;
 
 use crate::condition::{ReadCondition, StatusCondition};
 use crate::error::{Error, Result};
@@ -19,7 +17,7 @@ use crate::status::{
     SampleLostStatus, SampleRejectedStatus, StatusMask,
 };
 use crate::topic::Topic;
-use crate::typed::{Typed, instance_of};
+use crate::typed::SampleType;
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
 pub struct Subscriber {
@@ -45,10 +43,7 @@ impl Subscriber {
 
     /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
     /// KEEP_LAST(1), VOLATILE.
-    pub fn create_datareader<T: TopicType + 'static>(
-        &self,
-        topic: &Topic<T>,
-    ) -> Result<DataReader<T>> {
+    pub fn create_datareader<T>(&self, topic: &Topic<T>) -> Result<DataReader<T>> {
         self.create_datareader_with_qos(topic, DataReaderQos::default())
     }
 
@@ -58,19 +53,20 @@ impl Subscriber {
     /// without gaps, asking for those lost on the way; it matches only
     /// RELIABLE writers. A BEST_EFFORT reader takes what arrives, in
     /// order, and matches any writer.
-    pub fn create_datareader_with_qos<T: TopicType + 'static>(
+    pub fn create_datareader_with_qos<T>(
         &self,
         topic: &Topic<T>,
         qos: DataReaderQos,
     ) -> Result<DataReader<T>> {
-        let kind = if T::KEYED {
+        let kind = if topic.samples.keyed() {
             entity_kind::USER_READER_WITH_KEY
         } else {
             entity_kind::USER_READER_NO_KEY
         };
         let guid = self.shared.new_guid(kind)?;
-        let mut data = EndpointData::reader(guid, topic.name(), T::TYPE_NAME);
-        data.type_information = self.shared.type_information(T::TYPE_NAME)?;
+        let type_name = topic.type_name();
+        let mut data = EndpointData::reader(guid, topic.name(), type_name);
+        data.type_information = self.shared.type_information(type_name)?;
         data.data_representation = qos.data_representation.clone();
         if qos.type_consistency != TypeConsistency::default() {
             data.type_consistency = Some(qos.type_consistency);
@@ -81,13 +77,12 @@ impl Subscriber {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
-        self.shared
-            .add_reader(data, qos, Arc::new(Typed::<T>::new()))?;
+        self.shared.add_reader(data, qos, topic.samples.key_ops())?;
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,
             owned: true,
-            _type: PhantomData,
+            samples: topic.samples.clone(),
         })
     }
 }
@@ -103,47 +98,50 @@ pub struct Sample<T> {
     pub info: SampleInfo,
 }
 
-/// A DDS data reader (DDS 1.4, 2.2.2.5.3) of samples of type `T`.
+/// A DDS data reader (DDS 1.4, 2.2.2.5.3) of samples of type `T`: a
+/// [`TopicType`](crate::TopicType), or [`DynamicData`](crate::DynamicData)
+/// for a topic of a type known at run time (a `DynamicDataReader`,
+/// DDS-XTypes 1.3, 7.5.2.12).
 ///
 /// Samples that cannot be deserialized as `T` are dropped when they are
 /// read or taken. Dropping the reader tells the other participants it is
 /// gone.
-pub struct DataReader<T: TopicType> {
+pub struct DataReader<T> {
     shared: Arc<Shared>,
     guid: Guid,
     /// Whether dropping this handle deletes the reader: not for the
     /// handle given to a listener.
     owned: bool,
-    _type: PhantomData<fn() -> T>,
+    samples: Arc<dyn SampleType<T>>,
 }
 
 /// A [`DataReaderListener`] for DATA_AVAILABLE alone, from a function.
 struct DataAvailable<F>(F);
 
-impl<T: TopicType, F: Fn(&DataReader<T>) + Send + Sync> DataReaderListener<T> for DataAvailable<F> {
+impl<T, F: Fn(&DataReader<T>) + Send + Sync> DataReaderListener<T> for DataAvailable<F> {
     fn on_data_available(&self, reader: &DataReader<T>) {
         (self.0)(reader)
     }
 }
 
-impl<T: TopicType> std::fmt::Debug for DataReader<T> {
+impl<T> std::fmt::Debug for DataReader<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataReader")
             .field("guid", &self.guid)
-            .field("type_name", &T::TYPE_NAME)
+            .field("type_name", &self.samples.type_name())
             .finish()
     }
 }
 
-fn decode<T: TopicType>((payload, info): Selected) -> Option<Sample<T>> {
+fn decode<T>(samples: &dyn SampleType<T>, (payload, info): Selected) -> Option<Sample<T>> {
     let data = match payload {
-        Some(p) => Some(T::from_payload(&p).ok()?),
+        Some(p) => Some(samples.decode(&p)?),
         None => None,
     };
     Some(Sample { data, info })
 }
 
-impl<T: TopicType> DataReader<T> {
+impl<T> DataReader<T> {
     /// The reader's GUID.
     pub fn guid(&self) -> Guid {
         self.guid
@@ -165,7 +163,9 @@ impl<T: TopicType> DataReader<T> {
                 None => Vec::new(),
             }
         };
-        raw.into_iter().filter_map(decode).collect()
+        raw.into_iter()
+            .filter_map(|r| decode(&*self.samples, r))
+            .collect()
     }
 
     /// Removes and returns the samples received, in the order they
@@ -238,13 +238,15 @@ impl<T: TopicType> DataReader<T> {
                 None => Vec::new(),
             }
         };
-        raw.into_iter().filter_map(decode).collect()
+        raw.into_iter()
+            .filter_map(|r| decode(&*self.samples, r))
+            .collect()
     }
 
     /// The handle of the instance of `instance` (`lookup_instance`), if
     /// the reader has it.
     pub fn lookup_instance(&self, instance: &T) -> Option<InstanceHandle> {
-        let h = instance_of(instance).ok()?;
+        let h = self.samples.instance_of(instance).ok()?;
         let g = self.shared.lock_any();
         let r = g.readers.get(&self.guid)?;
         r.samples.has_instance(&h).then_some(h)
@@ -258,7 +260,7 @@ impl<T: TopicType> DataReader<T> {
     pub fn get_key_value(&self, instance: InstanceHandle) -> Option<T> {
         let g = self.shared.lock_any();
         let r = g.readers.get(&self.guid)?;
-        T::from_payload(r.samples.last_value(&instance)?).ok()
+        self.samples.decode(r.samples.last_value(&instance)?)
     }
 
     /// Waits until there is a sample not yet read, or `timeout` passes.
@@ -292,12 +294,13 @@ impl<T: TopicType> DataReader<T> {
     where
         T: 'static,
     {
+        let samples = self.samples.clone();
         let l: ReaderListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
             let reader = DataReader::<T> {
                 shared: shared.clone(),
                 guid,
                 owned: false,
-                _type: PhantomData,
+                samples: samples.clone(),
             };
             match event {
                 ReaderEvent::DataAvailable => listener.on_data_available(&reader),
@@ -476,7 +479,7 @@ impl<T: TopicType> DataReader<T> {
     }
 }
 
-impl<T: TopicType> Drop for DataReader<T> {
+impl<T> Drop for DataReader<T> {
     fn drop(&mut self) {
         if self.owned {
             self.shared.remove_reader(&self.guid);

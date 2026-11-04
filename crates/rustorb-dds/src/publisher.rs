@@ -1,12 +1,11 @@
 //! `Publisher` and `DataWriter`.
 
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustorb_rtps::sedp::EndpointData;
 use rustorb_rtps::{Guid, Time, entity_kind};
-use rustorb_typesupport::{ByteOrder, Encoding, TopicType};
+use rustorb_typesupport::{ByteOrder, Encoding};
 
 use crate::condition::StatusCondition;
 use crate::error::{Error, Result};
@@ -20,7 +19,7 @@ use crate::status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessLostStatus, MatchedStatus, StatusMask,
 };
 use crate::topic::Topic;
-use crate::typed::instance_of;
+use crate::typed::SampleType;
 
 /// A DDS publisher (DDS 1.4, 2.2.2.4.1): creates data writers.
 pub struct Publisher {
@@ -46,7 +45,7 @@ impl Publisher {
 
     /// Creates a writer for `topic` with the default QoS: RELIABLE,
     /// KEEP_LAST(1), VOLATILE.
-    pub fn create_datawriter<T: TopicType>(&self, topic: &Topic<T>) -> Result<DataWriter<T>> {
+    pub fn create_datawriter<T>(&self, topic: &Topic<T>) -> Result<DataWriter<T>> {
         self.create_datawriter_with_qos(topic, DataWriterQos::default())
     }
 
@@ -59,12 +58,13 @@ impl Publisher {
     /// readers acknowledge them, and sends them again when asked; it also
     /// serves BEST_EFFORT readers. A BEST_EFFORT writer sends each sample
     /// once and matches only BEST_EFFORT readers.
-    pub fn create_datawriter_with_qos<T: TopicType>(
+    pub fn create_datawriter_with_qos<T>(
         &self,
         topic: &Topic<T>,
         qos: DataWriterQos,
     ) -> Result<DataWriter<T>> {
-        let kind = if T::KEYED {
+        let keyed = topic.samples.keyed();
+        let kind = if keyed {
             entity_kind::USER_WRITER_WITH_KEY
         } else {
             entity_kind::USER_WRITER_NO_KEY
@@ -82,8 +82,9 @@ impl Publisher {
             }
         };
         let guid = self.shared.new_guid(kind)?;
-        let mut data = EndpointData::writer(guid, topic.name(), T::TYPE_NAME);
-        data.type_information = self.shared.type_information(T::TYPE_NAME)?;
+        let type_name = topic.type_name();
+        let mut data = EndpointData::writer(guid, topic.name(), type_name);
+        data.type_information = self.shared.type_information(type_name)?;
         data.data_representation = qos.data_representation.clone();
         data.reliability = qos.reliability.to_rtps();
         data.durability = qos.durability;
@@ -91,21 +92,24 @@ impl Publisher {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
-        self.shared.add_writer(data, qos, T::KEYED)?;
+        self.shared.add_writer(data, qos, keyed)?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,
             encoding,
             owned: true,
-            _type: PhantomData,
+            samples: topic.samples.clone(),
         })
     }
 }
 
-/// A DDS data writer (DDS 1.4, 2.2.2.4.2) of samples of type `T`.
+/// A DDS data writer (DDS 1.4, 2.2.2.4.2) of samples of type `T`: a
+/// [`TopicType`](crate::TopicType), or [`DynamicData`](crate::DynamicData)
+/// for a topic of a type known at run time (a `DynamicDataWriter`,
+/// DDS-XTypes 1.3, 7.5.2.12).
 ///
 /// Dropping it tells the other participants it is gone.
-pub struct DataWriter<T: TopicType> {
+pub struct DataWriter<T> {
     shared: Arc<Shared>,
     guid: Guid,
     /// How samples are serialized: the writer's data representation.
@@ -113,19 +117,19 @@ pub struct DataWriter<T: TopicType> {
     /// Whether dropping this handle deletes the writer: not for the
     /// handle given to a listener.
     owned: bool,
-    _type: PhantomData<fn(T)>,
+    samples: Arc<dyn SampleType<T>>,
 }
 
-impl<T: TopicType> std::fmt::Debug for DataWriter<T> {
+impl<T> std::fmt::Debug for DataWriter<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataWriter")
             .field("guid", &self.guid)
-            .field("type_name", &T::TYPE_NAME)
+            .field("type_name", &self.samples.type_name())
             .finish()
     }
 }
 
-impl<T: TopicType> DataWriter<T> {
+impl<T> DataWriter<T> {
     /// The writer's GUID.
     pub fn guid(&self) -> Guid {
         self.guid
@@ -148,11 +152,13 @@ impl<T: TopicType> DataWriter<T> {
 
     /// Like [`Self::write`], with the source timestamp given.
     pub fn write_w_timestamp(&self, sample: &T, timestamp: Time) -> Result<()> {
-        let mut payload = sample.to_payload(self.encoding, ByteOrder::NATIVE)?;
+        let mut payload = self
+            .samples
+            .to_payload(sample, self.encoding, ByteOrder::NATIVE)?;
         table_60_identifier(&mut payload);
         self.shared.write(
             self.guid,
-            instance_of(sample)?,
+            self.samples.instance_of(sample)?,
             WriteOp::Value(payload),
             timestamp,
         )
@@ -162,7 +168,7 @@ impl<T: TopicType> DataWriter<T> {
     /// counts) and returns its handle (`register_instance`). This sends
     /// nothing: readers learn of the instance when it is written.
     pub fn register_instance(&self, instance: &T) -> Result<InstanceHandle> {
-        let h = instance_of(instance)?;
+        let h = self.samples.instance_of(instance)?;
         self.shared.register_instance(&self.guid, h)?;
         Ok(h)
     }
@@ -184,7 +190,7 @@ impl<T: TopicType> DataWriter<T> {
         let dispose = self.shared.autodispose_of(&self.guid);
         self.shared.write(
             self.guid,
-            instance_of(instance)?,
+            self.samples.instance_of(instance)?,
             WriteOp::Lifecycle {
                 dispose,
                 unregister: true,
@@ -204,7 +210,7 @@ impl<T: TopicType> DataWriter<T> {
     pub fn dispose_w_timestamp(&self, instance: &T, timestamp: Time) -> Result<()> {
         self.shared.write(
             self.guid,
-            instance_of(instance)?,
+            self.samples.instance_of(instance)?,
             WriteOp::Lifecycle {
                 dispose: true,
                 unregister: false,
@@ -216,7 +222,7 @@ impl<T: TopicType> DataWriter<T> {
     /// The handle of the instance of `instance` if it is registered
     /// (`lookup_instance`).
     pub fn lookup_instance(&self, instance: &T) -> Option<InstanceHandle> {
-        let h = instance_of(instance).ok()?;
+        let h = self.samples.instance_of(instance).ok()?;
         let g = self.shared.lock_any();
         g.writers
             .get(&self.guid)
@@ -276,13 +282,14 @@ impl<T: TopicType> DataWriter<T> {
         T: 'static,
     {
         let encoding = self.encoding;
+        let samples = self.samples.clone();
         let l: WriterListener = Arc::new(move |shared: &Arc<Shared>, guid, event| {
             let writer = DataWriter::<T> {
                 shared: shared.clone(),
                 guid,
                 encoding,
                 owned: false,
-                _type: PhantomData,
+                samples: samples.clone(),
             };
             match event {
                 WriterEvent::PublicationMatched(s) => listener.on_publication_matched(&writer, s),
@@ -363,7 +370,7 @@ impl<T: TopicType> DataWriter<T> {
     }
 }
 
-impl<T: TopicType> Drop for DataWriter<T> {
+impl<T> Drop for DataWriter<T> {
     fn drop(&mut self) {
         if self.owned {
             self.shared.remove_writer(&self.guid);

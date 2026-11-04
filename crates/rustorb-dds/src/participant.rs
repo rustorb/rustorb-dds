@@ -25,7 +25,8 @@ use rustorb_rtps::{
     SerializedPayload, Submessage, Time, VendorId,
 };
 use rustorb_typesupport::TopicType;
-use rustorb_xtypes::type_object::TypeIdentifier;
+use rustorb_xtypes::dynamic::{DynamicData, DynamicType, DynamicTypeBuilderFactory};
+use rustorb_xtypes::type_object::{TypeIdentifier, TypeInformation};
 use rustorb_xtypes::typelookup::{
     GetTypeDependenciesIn, GetTypesIn, TypeLookupCall, TypeLookupReturn,
 };
@@ -43,7 +44,7 @@ use crate::status::{
 };
 use crate::subscriber::Subscriber;
 use crate::topic::Topic;
-use crate::typed::KeyOps;
+use crate::typed::{Dynamic, KeyOps, Typed};
 
 /// The vendor id sent in RTPS headers. rustorb has no vendor id from the
 /// OMG yet, so this is `VENDORID_UNKNOWN` (DDSI-RTPS 2.5, 8.3.3.1.3).
@@ -713,6 +714,8 @@ pub(crate) struct Inner {
     /// The TypeObjects asked for, and the participant asked: each is
     /// asked for once from each participant.
     type_requests: HashSet<(TypeIdentifier, GuidPrefix)>,
+    /// The COMPLETE types whose dependencies were asked for, and of whom.
+    dependency_requests: HashSet<(TypeIdentifier, GuidPrefix)>,
     /// How many TypeObjects came by TypeLookup.
     learnt_types: usize,
     /// When to write the next automatic liveliness message, while there
@@ -1538,6 +1541,41 @@ fn request_missing_types(inner: &mut Inner) {
     }
 }
 
+/// Asks `server` for the COMPLETE TypeObjects of the type of `info` and
+/// of those it depends on that are missing, for
+/// [`DomainParticipant::discover_topic_type`]; and for the types it
+/// depends on when `info` does not list them all.
+fn request_complete_types(inner: &mut Inner, server: GuidPrefix, info: &TypeInformation) {
+    let c = &info.complete;
+    let root = &c.typeid_with_size.type_id;
+    let registry = inner.sedp.registry();
+    let requests = &mut inner.type_requests;
+    let type_ids: Vec<TypeIdentifier> = std::iter::once(&c.typeid_with_size)
+        .chain(&c.dependent_typeids)
+        .map(|t| &t.type_id)
+        .filter(|id| !registry.knows(id))
+        .filter(|id| requests.insert(((*id).clone(), server)))
+        .cloned()
+        .collect();
+    let listed = i32::try_from(c.dependent_typeids.len()).unwrap_or(i32::MAX);
+    let dependencies = c.dependent_typeid_count > listed
+        && inner.dependency_requests.insert((root.clone(), server));
+    if !type_ids.is_empty() {
+        inner
+            .typelookup
+            .request(server, TypeLookupCall::GetTypes(GetTypesIn { type_ids }));
+    }
+    if dependencies {
+        inner.typelookup.request(
+            server,
+            TypeLookupCall::GetTypeDependencies(GetTypeDependenciesIn {
+                type_ids: vec![root.clone()],
+                continuation_point: None,
+            }),
+        );
+    }
+}
+
 /// Takes in a TypeLookup reply: keeps the TypeObjects it brings and
 /// matches again the endpoints that waited for them, or asks for the
 /// types it says a type depends on.
@@ -1633,6 +1671,7 @@ impl DomainParticipant {
                 SedpConfig::default().reader,
             ),
             type_requests: HashSet::new(),
+            dependency_requests: HashSet::new(),
             learnt_types: 0,
             next_automatic: None,
             manual_pending: false,
@@ -1695,19 +1734,102 @@ impl DomainParticipant {
     pub fn register_type<T: TopicType + DescribeType>(&self) -> Result<()> {
         let objects = TypeObjects::of::<T>()
             .map_err(|_| Error::Unsupported("a type that cannot be described"))?;
+        self.add_type(T::TYPE_NAME, objects).map(|_| ())
+    }
+
+    /// Registers a type known at run time (`register_type` with a
+    /// DynamicType, DDS-XTypes 1.3, 7.6.3.2), under its name: as
+    /// [`register_type`](Self::register_type) does for a type the program
+    /// was built with. Registering the same type again does nothing; a
+    /// different type of a name already registered fails with
+    /// [`Error::PreconditionNotMet`].
+    pub fn register_dynamic_type(&self, ty: &DynamicType) -> Result<()> {
+        let objects = TypeObjects::new(ty.as_type())?;
+        if !self.add_type(&ty.get_name(), objects)? {
+            return Err(Error::PreconditionNotMet);
+        }
+        Ok(())
+    }
+
+    /// Registers `objects` under `name`. False when another type has that
+    /// name.
+    fn add_type(&self, name: &str, objects: TypeObjects) -> Result<bool> {
         {
             let mut g = self.shared.lock()?;
             let inner = &mut *g;
-            if inner.types.contains_key(T::TYPE_NAME) {
-                return Ok(());
+            if let Some(known) = inner.types.get(name) {
+                return Ok(known.information == objects.information);
             }
             inner.sedp.registry_mut().add_type(&objects);
-            inner.types.insert(T::TYPE_NAME.to_owned(), objects);
+            inner.types.insert(name.to_owned(), objects);
             let events = inner.sedp.rematch_unresolved();
             apply_sedp_events(inner, events, Instant::now());
         }
         self.shared.flush();
-        Ok(())
+        Ok(true)
+    }
+
+    /// Creates a topic named `name` of a type known at run time, whose
+    /// samples are [`DynamicData`]: its writers and readers are a
+    /// `DynamicDataWriter` and a `DynamicDataReader` (DDS-XTypes 1.3,
+    /// 7.5.2.12). The type is registered as by
+    /// [`register_dynamic_type`](Self::register_dynamic_type), so that
+    /// endpoints match by type assignability.
+    pub fn create_dynamic_topic(&self, name: &str, ty: &DynamicType) -> Result<Topic<DynamicData>> {
+        self.register_dynamic_type(ty)?;
+        Ok(Topic::new(
+            name,
+            self.shared.clone(),
+            Arc::new(Dynamic::new(ty)),
+        ))
+    }
+
+    /// The type of the topic `topic_name` as the other participants know
+    /// it, for a program that was not built with it: the type of a remote
+    /// writer (or else reader) of the topic that announced its
+    /// TypeInformation, made from its COMPLETE TypeObjects, which the
+    /// participant asks the remote participant for with the TypeLookup
+    /// service (DDS-XTypes 1.3, 7.6.3.3). `None` when no such endpoint
+    /// was discovered, or its TypeObjects did not come, within `timeout`.
+    ///
+    /// Then [`create_dynamic_topic`](Self::create_dynamic_topic) makes a
+    /// topic of it, whose readers read the samples of that writer.
+    pub fn discover_topic_type(
+        &self,
+        topic_name: &str,
+        timeout: Duration,
+    ) -> Result<Option<DynamicType>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let mut g = self.shared.lock()?;
+                let inner = &mut *g;
+                let infos: Vec<(GuidPrefix, TypeInformation)> = inner
+                    .sedp
+                    .remote_writers()
+                    .chain(inner.sedp.remote_readers())
+                    .filter(|d| d.topic_name == topic_name)
+                    .filter_map(|d| Some((d.guid.prefix, d.type_information.clone()?)))
+                    .collect();
+                for (_, info) in &infos {
+                    let root = &info.complete.typeid_with_size.type_id;
+                    if let Ok(ty) = DynamicTypeBuilderFactory::create_type_w_type_identifier(
+                        root,
+                        inner.sedp.registry(),
+                    ) {
+                        return Ok(Some(ty));
+                    }
+                }
+                for (server, info) in &infos {
+                    request_complete_types(inner, *server, info);
+                }
+            }
+            self.shared.flush();
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// How many TypeObjects of remote types this participant got from
@@ -1719,8 +1841,12 @@ impl DomainParticipant {
     }
 
     /// Creates a topic of type `T`, named `name`.
-    pub fn create_topic<T: TopicType>(&self, name: &str) -> Result<Topic<T>> {
-        Ok(Topic::new(name, self.shared.clone()))
+    pub fn create_topic<T: TopicType + 'static>(&self, name: &str) -> Result<Topic<T>> {
+        Ok(Topic::new(
+            name,
+            self.shared.clone(),
+            Arc::new(Typed::<T>::new()),
+        ))
     }
 
     /// Creates a publisher in the default partition.

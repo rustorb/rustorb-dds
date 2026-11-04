@@ -105,6 +105,15 @@ impl DynamicType {
         self.members().into_iter().find(|m| m.0.name == name)
     }
 
+    /// Whether the type has key members (a struct with `@key` members,
+    /// its base's included): its samples are of instances.
+    pub fn is_keyed(&self) -> bool {
+        match resolve(&self.0) {
+            Type::Struct(s) => struct_members(s).iter().any(|m| m.key),
+            _ => false,
+        }
+    }
+
     /// `get_all_members`, in order.
     pub fn members(&self) -> Vec<DynamicTypeMember> {
         let ty = resolve(&self.0);

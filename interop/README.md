@@ -63,6 +63,13 @@ the members both versions have. The rustorb-dds side must have got the
 peer's TypeObject with TypeLookup (`RUSTORB_EXPECT_TYPE_LOOKUP`), and the
 peer gets rustorb-dds's from it.
 
+The `-v<N>-to-rustorb-dynamic-<kind>` and `rustorb-dynamic-to-<peer>-v<N>-<kind>`
+cases (Cyclone DDS only, for the same reason) use the `dynamic` example
+on the rustorb-dds side, which is not built with the type: it gets the
+type of the peer's writer or reader with TypeLookup (its COMPLETE
+TypeObjects) and reads or writes DynamicData of it, with the members of
+the evolve programs looked up by name.
+
 The `-liveliness-<kind>` cases use the `liveliness` programs (the
 `liveliness` example on the rustorb-dds side) with the LIVELINESS kind
 `automatic`, `participant` (MANUAL_BY_PARTICIPANT) or `topic`
@@ -116,6 +123,7 @@ as an artifact.
 | 2026-11-03 | rustorb-dds#20 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 36 cases pass |
 | 2026-11-03 | rustorb-dds#32 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 42 cases pass |
 | 2026-11-04 | rustorb-dds#33 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 50 cases pass |
+| 2026-11-04 | rustorb-dds#34 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 58 cases pass |
 
 Found on the way:
 

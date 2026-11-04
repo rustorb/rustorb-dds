@@ -1,7 +1,5 @@
 //! Listeners of data readers and data writers (DDS 1.4, 2.2.4.3).
 
-use rustorb_typesupport::TopicType;
-
 use crate::publisher::DataWriter;
 use crate::status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, LivelinessLostStatus,
@@ -24,7 +22,7 @@ use crate::subscriber::DataReader;
 /// it may read or take through the reader handle it is given, but should
 /// not block for long.
 #[allow(unused_variables)]
-pub trait DataReaderListener<T: TopicType>: Send + Sync {
+pub trait DataReaderListener<T>: Send + Sync {
     /// DATA_AVAILABLE: new samples, or new instance states, to read.
     fn on_data_available(&self, reader: &DataReader<T>) {}
     /// SUBSCRIPTION_MATCHED: a writer was matched or unmatched.
@@ -48,7 +46,7 @@ pub trait DataReaderListener<T: TopicType>: Send + Sync {
 /// 2.2.4.3.8): called when one of its statuses changes, as for
 /// [`DataReaderListener`]. Each method does nothing unless implemented.
 #[allow(unused_variables)]
-pub trait DataWriterListener<T: TopicType>: Send + Sync {
+pub trait DataWriterListener<T>: Send + Sync {
     /// PUBLICATION_MATCHED: a reader was matched or unmatched.
     fn on_publication_matched(&self, writer: &DataWriter<T>, status: MatchedStatus) {}
     /// LIVELINESS_LOST: the writer's lease passed without an assertion.

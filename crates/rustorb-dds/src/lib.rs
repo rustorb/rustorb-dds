@@ -4,7 +4,8 @@
 //!
 //! Sample types implement [`TopicType`] from `rustorb-typesupport`, which
 //! the IDL compiler generates (`rustorb-idl -brust -Wbdds`); a
-//! hand-written implementation works the same way.
+//! hand-written implementation works the same way. Samples of types known
+//! only at run time are [`DynamicData`].
 //!
 //! ```no_run
 //! # fn f<Greeting: rustorb_dds::TopicType + 'static>(hello: Greeting) -> rustorb_dds::Result<()> {
@@ -58,6 +59,13 @@
 //! the remote participant with the TypeLookup service (DDS-XTypes 1.3,
 //! 7.6.3.3) before it decides, and answers such requests for its own
 //! types ([`DomainParticipant::learnt_types`], the `evolve` example).
+//!
+//! A program can also handle topics whose types it was not built with
+//! (DDS-XTypes 1.3, 7.5.2): [`DomainParticipant::discover_topic_type`]
+//! gets the type of a remote endpoint of a topic as a [`DynamicType`],
+//! by TypeLookup, and [`DomainParticipant::create_dynamic_topic`] makes a
+//! topic of it (or of a type built at run time) whose writers and readers
+//! write and read [`DynamicData`] (the `dynamic` example).
 
 mod condition;
 mod error;
@@ -92,6 +100,10 @@ pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
+pub use rustorb_xtypes::dynamic::{
+    DynamicData, DynamicDataFactory, DynamicType, DynamicTypeBuilder, DynamicTypeBuilderFactory,
+    MEMBER_ID_INVALID,
+};
 pub use rustorb_xtypes::types::DescribeType;
 pub use status::{
     DeadlineMissedStatus, IncompatibleQosStatus, InconsistentTopicStatus, LivelinessChangedStatus,
