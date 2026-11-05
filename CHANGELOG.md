@@ -6,6 +6,8 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ## [Unreleased]
 
+## [python-0.1.0] - 2026-11-05
+
 ### Added
 
 - The Python package `rustorb-dds` (`import rustorb_dds`), with its native
