@@ -27,6 +27,8 @@
 #              regular expression (default: all)
 #   LEASE      the liveliness lease of the liveliness cases, in ms
 #              (default 1000)
+#   MVN        Maven, to build the Java examples (default mvn; the Java
+#              cases are skipped without it or java, 22 or newer)
 #   PYTHON     the Python with the rustorb_dds package installed, for
 #              the Python cases (default python3; they are skipped when
 #              it cannot import rustorb_dds)
@@ -98,6 +100,30 @@ if cmake -S "$ROOT/cpp" -B "$CPP_BUILD" -DCMAKE_BUILD_TYPE=Release >"$CPP_BUILD/
 else
   cat "$CPP_BUILD/cmake.log"
   exit 1
+fi
+MVN=${MVN:-mvn}
+if command -v "$MVN" >/dev/null && command -v java >/dev/null; then
+  log "building the Java binding's examples"
+  if (cd "$ROOT/java" && "$MVN" -B -q -DskipTests test-compile) >"$BUILD/java.log" 2>&1; then
+    HAVE_JAVA=1
+    case $(uname -s) in
+      Darwin) FFI_FILE=librustorb_dds_ffi.dylib ;;
+      MINGW* | MSYS* | CYGWIN*) FFI_FILE=rustorb_dds_ffi.dll ;;
+      *) FFI_FILE=librustorb_dds_ffi.so ;;
+    esac
+    JAVA_RUN=(java --enable-native-access=ALL-UNNAMED
+      "-Drustorb.dds.ffi.library=$ROOT/target/release/$FFI_FILE"
+      -cp "$ROOT/java/target/classes:$ROOT/java/target/test-classes")
+    JAVA_HELLO=("${JAVA_RUN[@]}" examples.HelloWorldExample)
+    JAVA_KEYED=("${JAVA_RUN[@]}" examples.KeyedExample)
+    echo "java: $(java -version 2>&1 | head -n 1)" >> "$OUT/versions.txt"
+  else
+    cat "$BUILD/java.log"
+    exit 1
+  fi
+else
+  HAVE_JAVA=0
+  log "no $MVN or java: skipping the Java cases"
 fi
 PYTHON=${PYTHON:-python3}
 PY="$ROOT/python/examples"
@@ -321,6 +347,27 @@ for peer in "${PEERS[@]}"; do
   run_case "cpp-to-$peer-keyed" \
     "$CPP_KEYED" pub @D@ "$KEYED" 20 -- \
     timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+  # The Java binding: the same.
+  if [ "$HAVE_JAVA" = 1 ]; then
+    run_case "$peer-to-java" \
+      "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "${JAVA_HELLO[@]}" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "java-to-$peer" \
+      "${JAVA_HELLO[@]}" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "$peer-to-java-reliable" \
+      "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "${JAVA_HELLO[@]}" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "java-to-$peer-reliable" \
+      "${JAVA_HELLO[@]}" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "$peer-to-java-keyed" \
+      "$BUILD/$peer/keyed" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "${JAVA_KEYED[@]}" sub @D@ "$KEYED" "$TIMEOUT"
+    run_case "java-to-$peer-keyed" \
+      "${JAVA_KEYED[@]}" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+  fi
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
   run_case "$peer-to-rustorb-keyed" \

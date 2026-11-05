@@ -30,6 +30,8 @@ python python/examples/hello_world.py pub
 
 C++ バインディング（[cpp/](cpp/)、[docs/cpp.md](docs/cpp.md)）はヘッダだけで、この C ABI の上に ISO/IEC の C++ PSM（`<dds/dds.hpp>`）を実装します。型は `rustorb-idl -bc++11 -Wbdds_only` が書きます（MIT OR Apache-2.0）。
 
+Java バインディング（[java/](java/)、[docs/java.md](docs/java.md)）は、この C ABI の上に FFM API（Java 22 以降）で Java 5 PSM for DDS（`org.omg.dds`）を実装します。型は `rustorb-idl -bjava -Wbdds_only` が書きます（MIT OR Apache-2.0）。
+
 XCDR1/XCDR2 の符号化は `rustorb-cdr` に、DDS の型サポートの trait は `rustorb-typesupport` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) です。DDS のクレートが依存するのは `rustorb-cdr` と `rustorb-typesupport` だけです。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
 
 ## 段階

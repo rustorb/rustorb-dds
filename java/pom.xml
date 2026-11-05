@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The rustorb-dds Java binding: the DDS Java 5 PSM (org.omg.dds, a subset)
+  on the C ABI of crates/rustorb-dds-ffi, with the FFM API (Java 22+).
+
+    mvn -f java/pom.xml verify
+
+  The build runs cargo for librustorb_dds_ffi (-Dcargo.skip to use one
+  built already, -Drustorb.dds.ffi.library=PATH to use another). The tests
+  use the code rustorb-idl wrote for their IDL, checked in under
+  src/test/generated (docs/java.md).
+
+  Licensed under MIT OR Apache-2.0, like the rest of rustorb-dds.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.rustorb</groupId>
+  <artifactId>rustorb-dds</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>rustorb-dds</name>
+  <description>DDS for Java (the DDS Java 5 PSM) on rustorb-dds</description>
+  <url>https://github.com/rustorb/rustorb-dds</url>
+
+  <licenses>
+    <license>
+      <name>MIT</name>
+      <url>https://opensource.org/licenses/MIT</url>
+    </license>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>22</maven.compiler.release>
+    <rustorb.dds.root>${project.basedir}/..</rustorb.dds.root>
+    <rustorb.dds.ffi.library>${rustorb.dds.root}/target/release/${ffi.file}</rustorb.dds.ffi.library>
+    <cargo.skip>false</cargo.skip>
+    <junit.version>5.11.4</junit.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <profiles>
+    <profile>
+      <id>linux</id>
+      <activation><os><family>unix</family></os></activation>
+      <properties><ffi.file>librustorb_dds_ffi.so</ffi.file></properties>
+    </profile>
+    <profile>
+      <id>mac</id>
+      <activation><os><family>mac</family></os></activation>
+      <properties><ffi.file>librustorb_dds_ffi.dylib</ffi.file></properties>
+    </profile>
+    <profile>
+      <id>windows</id>
+      <activation><os><family>windows</family></os></activation>
+      <properties><ffi.file>rustorb_dds_ffi.dll</ffi.file></properties>
+    </profile>
+  </profiles>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all,-serial</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <!-- librustorb_dds_ffi, for the tests and the examples -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>cargo</id>
+            <phase>generate-test-resources</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <skip>${cargo.skip}</skip>
+              <executable>cargo</executable>
+              <arguments>
+                <argument>build</argument>
+                <argument>--release</argument>
+                <argument>--locked</argument>
+                <argument>-p</argument>
+                <argument>rustorb-dds-ffi</argument>
+                <argument>--manifest-path</argument>
+                <argument>${rustorb.dds.root}/Cargo.toml</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- the classes rustorb-idl wrote for the tests, and the examples -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <id>generated-test-sources</id>
+            <phase>generate-test-sources</phase>
+            <goals><goal>add-test-source</goal></goals>
+            <configuration>
+              <sources>
+                <source>src/test/generated</source>
+                <source>examples</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <argLine>--enable-native-access=ALL-UNNAMED -Drustorb.dds.ffi.library=${rustorb.dds.ffi.library}</argLine>
+          <systemPropertyVariables>
+            <rustorb.dds.fixtures>${rustorb.dds.root}/crates/rustorb-xtypes/tests/fixtures/cyclonedds</rustorb.dds.fixtures>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+              <Automatic-Module-Name>org.rustorb.dds</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

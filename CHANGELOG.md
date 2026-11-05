@@ -8,6 +8,15 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- The Java binding (`java/`, Java 22 or newer): the DDS Java 5 PSM
+  (`org.omg.dds`, a subset) on the C ABI through the FFM API, with no
+  JNI: DomainParticipant, Topic, Publisher, Subscriber, DataWriter,
+  DataReader with their QoS, statuses and listeners, samples, conditions
+  and WaitSets, and the exceptions of the PSM; a Maven project with JUnit
+  tests and the examples `HelloWorldExample` and `KeyedExample`.
+  rustorb-idl writes the types and a `<Name>Codec` per type
+  (`-bjava -Wbdds_only`, or `-Wbdds` beside the CORBA code).
+  `interop/run.sh` runs them with Cyclone DDS and Fast DDS (#46).
 - The C++ binding (`cpp/`, header only, C++17): the ISO/IEC C++ PSM for
   DDS (`<dds/dds.hpp>`) on the C ABI: DomainParticipant, Topic,
   Publisher, Subscriber, DataWriter, DataReader with their QoS, statuses
