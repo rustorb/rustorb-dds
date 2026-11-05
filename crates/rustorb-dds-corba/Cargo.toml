@@ -1,0 +1,25 @@
+[package]
+name = "rustorb-dds-corba"
+description = "TypeCode <-> DDS-XTypes TypeObject and Any <-> DynamicData for rustorb (CORBA) and rustorb-dds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+rustorb-xtypes = { workspace = true }
+rustorb-cdr = { workspace = true }
+# The ORB core of rustorb: TypeCode and Any (MIT OR Apache-2.0).
+rustorb-core = "0.3.0"
+
+[dev-dependencies]
+# The code rustorb-idl wrote for the Cyclone DDS fixtures uses it.
+rustorb-typesupport = { workspace = true }
+
+[lints]
+workspace = true
