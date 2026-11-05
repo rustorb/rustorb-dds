@@ -68,6 +68,15 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
 
   # The Python binding (python/): built with maturin, tested with pytest.
+  # The C ABI from C and C++ (crates/rustorb-dds-ffi/tests/c).
+  c-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: crates/rustorb-dds-ffi/tests/c/run.sh
+
   python:
     strategy:
       fail-fast: false

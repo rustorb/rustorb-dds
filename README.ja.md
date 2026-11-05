@@ -26,6 +26,7 @@ python python/examples/hello_world.py pub
 | `rustorb-rtps` | 通信路（DDSI-RTPS 2.5）: メッセージ、ディスカバリ、writer と reader | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | 型系（DDS-XTypes 1.3）: TypeObject、型の互換判定、DynamicData | MIT OR Apache-2.0 |
 | `rustorb-dds-python` | Python パッケージ `rustorb_dds`（[python/](python/)）のネイティブモジュール。PyO3 を使う。crates.io には公開しない | MIT OR Apache-2.0 |
+| `rustorb-dds-ffi` | C++ と Java のバインディングの土台になる C ABI（[`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)、[docs/c-abi.md](docs/c-abi.md)）。crates.io には公開しない | MIT OR Apache-2.0 |
 
 XCDR1/XCDR2 の符号化は `rustorb-cdr` に、DDS の型サポートの trait は `rustorb-typesupport` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) です。DDS のクレートが依存するのは `rustorb-cdr` と `rustorb-typesupport` だけです。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
 
