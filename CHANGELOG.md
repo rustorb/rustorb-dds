@@ -10,6 +10,14 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- The C++ binding (`cpp/`, header only, C++17): the ISO/IEC C++ PSM for
+  DDS (`<dds/dds.hpp>`) on the C ABI: DomainParticipant, Topic,
+  Publisher, Subscriber, DataWriter, DataReader with their QoS, statuses
+  and listeners, samples, conditions and WaitSets, and the exceptions of
+  the PSM; a CMake project with tests, the examples `hello_world` and
+  `keyed`, and a CMake package (`find_package(rustorb_dds)`). rustorb-idl
+  writes the types (`-bc++11 -Wbdds_only`, or `-Wbdds` beside the CORBA
+  code). `interop/run.sh` runs them with Cyclone DDS and Fast DDS (#45).
 - The C ABI `rustorb-dds-ffi` (`include/rustorb/dds.h`, `rdds_` prefix),
   which the C++ and Java bindings are built on: types built member by
   member as DDS-XTypes `DynamicTypeBuilder` does, samples written and read

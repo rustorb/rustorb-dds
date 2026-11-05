@@ -88,6 +88,17 @@ RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
 RUST_EVOLVE="$ROOT/target/debug/examples/evolve"
 RUST_DYNAMIC="$ROOT/target/debug/examples/dynamic"
+log "building the C++ binding's hello_world and keyed"
+CPP_BUILD=$BUILD/cpp
+mkdir -p "$CPP_BUILD"
+if cmake -S "$ROOT/cpp" -B "$CPP_BUILD" -DCMAKE_BUILD_TYPE=Release >"$CPP_BUILD/cmake.log" 2>&1 &&
+  cmake --build "$CPP_BUILD" --target hello_world keyed >>"$CPP_BUILD/cmake.log" 2>&1; then
+  CPP="$CPP_BUILD/hello_world"
+  CPP_KEYED="$CPP_BUILD/keyed"
+else
+  cat "$CPP_BUILD/cmake.log"
+  exit 1
+fi
 PYTHON=${PYTHON:-python3}
 PY="$ROOT/python/examples"
 if "$PYTHON" -c "import rustorb_dds" 2>/dev/null; then
@@ -290,6 +301,26 @@ for peer in "${PEERS[@]}"; do
       done
     fi
   fi
+  # The C++ binding: hello world (best effort and reliable) and keyed
+  # instances.
+  run_case "$peer-to-cpp" \
+    "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+    timeout $((TIMEOUT + 5)) "$CPP" sub @D@ "$COUNT" "$TIMEOUT"
+  run_case "cpp-to-$peer" \
+    "$CPP" pub @D@ "$SEND" "$INTERVAL" -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+  run_case "$peer-to-cpp-reliable" \
+    "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+    timeout $((TIMEOUT + 5)) "$CPP" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  run_case "cpp-to-$peer-reliable" \
+    "$CPP" pub @D@ "$RELIABLE" 20 reliable -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  run_case "$peer-to-cpp-keyed" \
+    "$BUILD/$peer/keyed" pub @D@ "$KEYED" 20 -- \
+    timeout $((TIMEOUT + 5)) "$CPP_KEYED" sub @D@ "$KEYED" "$TIMEOUT"
+  run_case "cpp-to-$peer-keyed" \
+    "$CPP_KEYED" pub @D@ "$KEYED" 20 -- \
+    timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
   # Keyed instances: writes to three instances, a dispose, an unregister.
   K=$BUILD/$peer/keyed
   run_case "$peer-to-rustorb-keyed" \
