@@ -35,6 +35,7 @@ python python/examples/hello_world.py pub
 | `rustorb-xtypes` | The type system (DDS-XTypes 1.3): TypeObject, assignability, DynamicData | MIT OR Apache-2.0 |
 | `rustorb-dds-python` | The native module of the Python package `rustorb_dds` ([python/](python/)), with PyO3; not published to crates.io | MIT OR Apache-2.0 |
 | `rustorb-dds-ffi` | The C ABI ([`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)) the C++ and Java bindings are built on ([docs/c-abi.md](docs/c-abi.md)); not published to crates.io | MIT OR Apache-2.0 |
+| `rustorb-dds-corba` | CORBA TypeCodes and anys (`rustorb-core`) as DDS-XTypes types and DynamicData, and back ([docs/corba.md](docs/corba.md)); the only crate here that depends on the ORB; not published to crates.io | MIT OR Apache-2.0 |
 
 The C++ binding ([cpp/](cpp/), [docs/cpp.md](docs/cpp.md)) is header only: the ISO/IEC C++ PSM for DDS (`<dds/dds.hpp>`) on that C ABI, with types from `rustorb-idl -bc++11 -Wbdds_only` (MIT OR Apache-2.0).
 
@@ -44,7 +45,8 @@ The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
 traits in `rustorb-typesupport`, both in the rustorb repository and shared
 with the ORB. The IDL generator is
 [rustorb-idl](https://github.com/rustorb/rustorb-idl). The DDS crates
-depend on `rustorb-cdr` and `rustorb-typesupport` only; the generator is
+depend on `rustorb-cdr` and `rustorb-typesupport` only (`rustorb-dds-corba`
+alone adds `rustorb-core`, the ORB); the generator is
 GPL-3.0-or-later, and the code it generates is not covered by that license.
 
 ## Stages

@@ -8,6 +8,11 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- The crate `rustorb-dds-corba`: CORBA TypeCodes as DDS-XTypes types
+  (and so TypeObjects) and back, and anys as DynamicData and back, on
+  `rustorb-core` 0.3. Extensibility and keys, which TypeCodes do not
+  have, come from options; member IDs are sequential. The TypeObjects are
+  those rustorb-idl describes for the same IDL (docs/corba.md, #47).
 - The Java binding (`java/`, Java 22 or newer): the DDS Java 5 PSM
   (`org.omg.dds`, a subset) on the C ABI through the FFM API, with no
   JNI: DomainParticipant, Topic, Publisher, Subscriber, DataWriter,
