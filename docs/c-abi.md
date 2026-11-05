@@ -53,7 +53,7 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 
 - QoS は値の構造体（`rdds_writer_qos`、`rdds_reader_qos`、`rdds_group_qos`、`rdds_participant_qos`）で渡す。`rdds_*_qos_default` で既定値を取り、変えたい所だけ書き換える。長さは DDS と同じく `RDDS_LENGTH_UNLIMITED`（-1）、期間は `Duration_t`（無限は `0x7fffffff` 秒・`0x7fffffff` ナノ秒）
 - 状態は構造体で返す。取得すると変化の数は 0 に戻る（DDS 1.4 どおり）。不整合 QoS の方針の一覧は固定長（32）の配列で、所有の受け渡しを避けた
-- listener は関数表と `self`。どの関数も NULL でよい。ライブラリのスレッドから呼ばれ、呼び出し側の関数の中から呼ばれることはない。`release` は listener が置き換えられたとき、または entity が削除されたときに一度だけ呼ばれる。C++ と Java はここで自分のオブジェクトの参照を手放す
+- listener は関数表と `self`。どの関数も NULL でよい。ライブラリのスレッドから呼ばれる。ただし同じ参加者の writer が書いたときは、その `rdds_writer_*` の呼び出しの中で、呼び出し側のスレッドから呼ばれる。ライブラリのロックは持たないので、listener からどの関数を呼んでもよい。`release` は listener が置き換えられたとき、または entity が削除されたときに一度だけ呼ばれる。C++ と Java はここで自分のオブジェクトの参照を手放す
 - 読み取りは `rdds_reader_select`（状態のマスク、インスタンス指定、次のインスタンス）と `rdds_reader_select_w_condition`。結果の `rdds_samples` からサンプル情報と、サンプルごとの入力ストリームを取る
 
 ### WaitSet と条件

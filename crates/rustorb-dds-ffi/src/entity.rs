@@ -96,7 +96,10 @@ impl RddsTime {
             None => TIME_INVALID,
             Some(t) => RddsTime {
                 sec: t.seconds.min(0x7fff_ffff) as i32,
-                nanosec: ((u64::from(t.fraction) * 1_000_000_000) >> 32) as u32,
+                // Rounded up, so that a time to_rtps made comes back
+                // to the same nanosecond.
+                nanosec: (((u64::from(t.fraction) * 1_000_000_000) + 0xffff_ffff) >> 32)
+                    .min(999_999_999) as u32,
             },
         }
     }

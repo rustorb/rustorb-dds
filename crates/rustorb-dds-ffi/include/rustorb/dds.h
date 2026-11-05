@@ -3,8 +3,8 @@
  *
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * The C++ binding (cpp/include/rustorb/dds) and the Java binding are
- * built on these functions; they can be used from C too.
+ * The C++ binding (cpp/include) and the Java binding are built on these
+ * functions; they can be used from C too.
  *
  * Rules every caller follows:
  *
@@ -25,8 +25,10 @@
  * - Samples. The caller writes the values of a sample in the order of its
  *   type into an rdds_out, and reads them in the same order from an
  *   rdds_in (see "Samples" below). The library encodes them.
- * - Listeners are called on threads of the library, never inside a call
- *   of the caller's. They must not block for long.
+ * - Listeners are called on a thread of the library, or, for a reader of
+ *   the same participant as the writer, inside the rdds_writer_* call that
+ *   wrote, on the caller's thread. No lock of the library is held: they
+ *   may call any function, but must not block for long.
  */
 #ifndef RUSTORB_DDS_H
 #define RUSTORB_DDS_H
