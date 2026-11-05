@@ -1,0 +1,47 @@
+// Types for the C++ binding's tests (cpp/tests/test_types.cc): what
+// Generated.idl of the Cyclone DDS fixtures does not have. cpp/tests/generated
+// is what `rustorb-idl -bc++11 -Wbdds_only` writes for it (cpp/README.md).
+module CppTypes {
+  enum Level { @value(-3) LOW, @value(0) MID, @value(40) HIGH };
+  typedef long Row[3];
+  typedef Row Grid[2];
+  typedef sequence<string> Strings;
+  typedef Strings MoreStrings;
+
+  union ByChar switch (char) {
+    case 'a': long a;
+    case 'b': case 'c': string bc;
+  };
+
+  union ByBool switch (boolean) {
+    case TRUE: double yes;
+  };
+
+  @final union ByLevel switch (Level) {
+    case LOW: short low;
+    case HIGH: Grid high;
+    default: wstring other;
+  };
+
+  @mutable struct Wide {
+    @key int8 i8;
+    wchar wc;
+    wstring ws;
+    wstring<5> bws;
+    long double ld;
+    sequence<boolean> bools;
+    boolean bool_array[2][2];
+    sequence<wchar> wchars;
+    Grid grid;
+    Row rows[2];
+    sequence<Row> row_seq;
+    MoreStrings strings;
+    sequence<sequence<string, 2> > nested;
+    @optional Level level;
+    @optional ByChar maybe;
+    @external ByLevel by_level;
+    ByChar by_char;
+    ByBool by_bool;
+    sequence<ByBool, 3> by_bools;
+  };
+};

@@ -1,0 +1,15 @@
+# The rustorb-dds C++ binding: find_package(rustorb_dds) gives the
+# rustorb_dds::rustorb_dds target (the headers and librustorb_dds_ffi).
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+if(NOT TARGET rustorb_dds::rustorb_dds)
+  add_library(rustorb_dds::rustorb_dds INTERFACE IMPORTED)
+  set_target_properties(rustorb_dds::rustorb_dds PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@"
+    INTERFACE_LINK_LIBRARIES
+      "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@RUSTORB_DDS_FFI_LIBRARY_NAME@;Threads::Threads;@RUSTORB_DDS_SYSTEM_LIBS@"
+    INTERFACE_COMPILE_FEATURES cxx_std_17)
+endif()

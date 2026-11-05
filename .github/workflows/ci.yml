@@ -77,6 +77,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: crates/rustorb-dds-ffi/tests/c/run.sh
 
+  # The C++ binding: its CMake project, tests and examples (cpp/).
+  cpp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cmake -S cpp -B target/cpp -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build target/cpp --config Release
+      - run: ctest --test-dir target/cpp --build-config Release --output-on-failure
+
   python:
     strategy:
       fail-fast: false
