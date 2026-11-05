@@ -1,0 +1,26 @@
+[package]
+name = "rustorb-dds-ffi"
+description = "Stable C ABI of rustorb-dds, used by its C++ and Java bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+rustorb-dds = { path = "../rustorb-dds" }
+rustorb-xtypes.workspace = true
+rustorb-cdr.workspace = true
+
+[dev-dependencies]
+rustorb-typesupport.workspace = true

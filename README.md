@@ -34,6 +34,7 @@ python python/examples/hello_world.py pub
 | `rustorb-rtps` | The wire protocol (DDSI-RTPS 2.5): messages, discovery, writers and readers | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | The type system (DDS-XTypes 1.3): TypeObject, assignability, DynamicData | MIT OR Apache-2.0 |
 | `rustorb-dds-python` | The native module of the Python package `rustorb_dds` ([python/](python/)), with PyO3; not published to crates.io | MIT OR Apache-2.0 |
+| `rustorb-dds-ffi` | The C ABI ([`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)) the C++ and Java bindings are built on ([docs/c-abi.md](docs/c-abi.md)); not published to crates.io | MIT OR Apache-2.0 |
 
 The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
 traits in `rustorb-typesupport`, both in the rustorb repository and shared

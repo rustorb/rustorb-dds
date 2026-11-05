@@ -117,6 +117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustorb-dds-ffi"
+version = "0.0.0"
+dependencies = [
+ "rustorb-cdr",
+ "rustorb-dds",
+ "rustorb-typesupport",
+ "rustorb-xtypes",
+]
+
+[[package]]
 name = "rustorb-dds-python"
 version = "0.0.0"
 dependencies = [
