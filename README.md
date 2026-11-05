@@ -38,6 +38,8 @@ python python/examples/hello_world.py pub
 
 The C++ binding ([cpp/](cpp/), [docs/cpp.md](docs/cpp.md)) is header only: the ISO/IEC C++ PSM for DDS (`<dds/dds.hpp>`) on that C ABI, with types from `rustorb-idl -bc++11 -Wbdds_only` (MIT OR Apache-2.0).
 
+The Java binding ([java/](java/), [docs/java.md](docs/java.md)) is the DDS Java 5 PSM (`org.omg.dds`) on that C ABI through the FFM API (Java 22 or newer), with types from `rustorb-idl -bjava -Wbdds_only` (MIT OR Apache-2.0).
+
 The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
 traits in `rustorb-typesupport`, both in the rustorb repository and shared
 with the ORB. The IDL generator is

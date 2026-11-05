@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 /python/rustorb_dds/_native*.so
 /python/rustorb_dds/_native*.pyd
+/java/target

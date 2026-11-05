@@ -67,7 +67,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --locked
 
-  # The Python binding (python/): built with maturin, tested with pytest.
   # The C ABI from C and C++ (crates/rustorb-dds-ffi/tests/c).
   c-abi:
     runs-on: ubuntu-latest
@@ -92,6 +91,28 @@ jobs:
       - run: cmake --build target/cpp --config Release
       - run: ctest --test-dir target/cpp --build-config Release --output-on-failure
 
+  # The Java binding: its Maven project, tests and examples (java/), and
+  # Ffi.java up to date with rustorb/dds.h.
+  java:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "22"
+          cache: maven
+      - run: python3 java/tools/gen-ffi.py --check
+        if: runner.os == 'Linux'
+      - run: mvn -B -ntp -f java/pom.xml verify
+
+  # The Python binding (python/): built with maturin, tested with pytest.
   python:
     strategy:
       fail-fast: false
@@ -123,6 +144,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "22"
+          cache: maven
       - name: Install the peers
         run: |
           sudo apt-get update -qq
