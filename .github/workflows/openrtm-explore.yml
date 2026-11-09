@@ -60,7 +60,7 @@ jobs:
           sleep 3
           kill $TD; sleep 1
           echo "== out"; tail -30 out.txt; echo "== in"; tail -10 in.txt
-          echo "== logs"; grep -i "fast\|topic\|connect" rtc_in.log rtc_out.log | head -60
+          echo "== logs"; grep -i "fast\|topic\|connect" rtc_in.log rtc_out.log | head -60 || true
       - name: decode
         if: always()
         run: |
@@ -68,7 +68,7 @@ jobs:
           tshark -r cap.pcap -Y rtps -T fields -e frame.number -e ip.src -e udp.dstport -e rtps.sm.id -e rtps.param.topicName -e rtps.param.typeName | head -80
           tshark -r cap.pcap -Y 'rtps.param.topicName' -O rtps -V 2>/dev/null | grep -v "^ *\[\|Frame\|Ethernet\|Linux cooked" | head -600
           echo "== user data"
-          tshark -r cap.pcap -Y 'rtps.sm.id == 0x15 && !rtps.param.topicName && !rtps.pid' -O rtps -V -x 2>/dev/null | head -200
+          tshark -r cap.pcap -Y 'rtps.sm.wrEntityId == 0x00000103' -O rtps -V -x 2>/dev/null | grep -v "Reserved\|hostId\|appId\|instanceId" | head -150 || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
