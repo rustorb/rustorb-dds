@@ -216,7 +216,7 @@ jobs:
       - name: Install tools
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl python3-pip python3-venv pkg-config >/dev/null
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl python3-pip python3-venv pkg-config tcpdump tshark >/dev/null
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -245,7 +245,7 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          RUST=target/debug/examples/openrtm CPP=target/cpp/openrtm PYTHON=/tmp/venv/bin/python \
+          CAPTURE=1 RUST=target/debug/examples/openrtm CPP=target/cpp/openrtm PYTHON=/tmp/venv/bin/python \
             PYTHONPATH="$PWD/target/openrtm-types" interop/openrtm.sh
       - name: Keep the logs and versions
         if: always()

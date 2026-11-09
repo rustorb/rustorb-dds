@@ -19,6 +19,8 @@
 #   OUT         where to write the logs (default target/interop-openrtm)
 #   COUNT       samples each side must get (default 5)
 #   TIMEOUT     seconds a reader waits (default 30)
+#   CAPTURE     if set, capture each case's UDP with tcpdump (cap.pcap) and
+#               show its RTPS with tshark when the case fails
 #   ONLY        run only the cases whose name matches this extended regular
 #               expression (default: all)
 
@@ -68,6 +70,18 @@ CASE=0
 FAILED=()
 RESULTS=()
 
+capture_start() {
+  CAP_PID=
+  if [ -n "${CAPTURE:-}" ] && command -v tcpdump >/dev/null; then
+    tcpdump -i any -U -w "$1/cap.pcap" udp >/dev/null 2>&1 &
+    CAP_PID=$!
+    sleep 1
+  fi
+}
+capture_stop() {
+  if [ -n "$CAP_PID" ]; then kill "$CAP_PID" 2>/dev/null; wait "$CAP_PID" 2>/dev/null; fi
+}
+
 result() {
   local name=$1 ok=$2
   if [ "$ok" = 1 ]; then
@@ -76,7 +90,11 @@ result() {
     RESULTS+=("FAIL $name")
     FAILED+=("$name")
     tail -n 20 "$OUT/$name"/*.log "$OUT/$name"/*.txt 2>/dev/null
-    grep -i -m 20 -E "fast-?rtps|domain|participant" "$OUT/$name/rtc.log" 2>/dev/null
+    if [ -s "$OUT/$name/cap.pcap" ] && command -v tshark >/dev/null; then
+      tshark -r "$OUT/$name/cap.pcap" -Y rtps -T fields -e frame.time_relative \
+        -e ip.src -e ip.dst -e udp.dstport -e rtps.domain_id -e rtps.sm.id \
+        -e rtps.param.topicName -e rtps.param.typeName 2>/dev/null | head -n 120
+    fi
   fi
 }
 
@@ -107,6 +125,7 @@ openrtm_to() {
   log "$name (topic openrtm_$CASE)"
   mkdir -p "$dir"
   rtc_conf "$dir" ConsoleIn out "openrtm_$CASE"
+  capture_start "$dir"
   (cd "$dir" && for i in $(seq 1001 $((1000 + TIMEOUT * 5))); do echo "$i"; sleep 0.2; done |
     timeout -s INT $((TIMEOUT + 10)) "$CONSOLE_IN" -f rtc.conf >console_in.txt 2>&1) &
   local console=$!
@@ -115,6 +134,7 @@ openrtm_to() {
   local rc=$?
   pkill -INT -f "$CONSOLE_IN -f rtc.conf" 2>/dev/null
   wait "$console" 2>/dev/null
+  capture_stop
   local got
   got=$(grep -cE "read 1[0-9]{3} " "$dir/reader.log")
   [ "$rc" -eq 0 ] && [ "$got" -ge "$COUNT" ] && result "$name" 1 || result "$name" 0
@@ -130,6 +150,7 @@ to_openrtm() {
   log "$name (topic openrtm_$CASE)"
   mkdir -p "$dir"
   rtc_conf "$dir" ConsoleOut in "openrtm_$CASE"
+  capture_start "$dir"
   (cd "$dir" && timeout -s INT $((TIMEOUT + 10)) "$CONSOLE_OUT" -f rtc.conf >console_out.txt 2>&1) &
   local console=$!
   # shellcheck disable=SC2086
@@ -138,6 +159,7 @@ to_openrtm() {
   sleep 1
   pkill -INT -f "$CONSOLE_OUT -f rtc.conf" 2>/dev/null
   wait "$console" 2>/dev/null
+  capture_stop
   local got
   got=$(grep -cE "^Received: [0-9]+" "$dir/console_out.txt")
   [ "$rc" -eq 0 ] && [ "$got" -ge "$COUNT" ] && result "$name" 1 || result "$name" 0
