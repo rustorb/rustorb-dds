@@ -316,3 +316,7 @@ must print `COUNT` of the samples a rustorb-dds writer sends. Both sides
 are best effort, so the writer sends four times as many. The CI job
 `openrtm` runs the script and keeps the logs as an artifact. What
 OpenRTM-aist puts on DDS is in [docs/openrtm.md](../docs/openrtm.md).
+
+| Date | rustorb-dds | OpenRTM-aist | Result |
+|---|---|---|---|
+| 2026-11-09 | rustorb-dds#48 | 2.0.2 with FastRTPSTransport (Fast DDS 2.6, ROS 2 Humble), `openrtm/devel-rtm:ubuntu22.04`, CI job `openrtm` | all 6 cases pass (Rust, C++, Python, both ways) |
