@@ -298,7 +298,10 @@ connected with OpenRTM-aist's Fast DDS transport (`FastRTPSTransport.so`,
 `interface_type=fast-rtps`), against the `openrtm` examples of rustorb-dds
 in Rust, C++ and Python, in both directions (rustorb-dds#48). OpenRTM-aist
 is a black box: its programs as distributed, configured by `rtc.conf`; no
-name server is needed.
+name server is needed. OpenRTM-aist 2.0.2's ports join domain 0 and the
+topic `chatter` (`fast-rtps.domain.id` in `rtc.conf` and `fast-rtps.topic`
+in the preconnect are not applied), so the cases run one after the other
+on that topic.
 
 ```sh
 interop/openrtm.sh                                   # the Rust example

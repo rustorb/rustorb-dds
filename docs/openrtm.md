@@ -4,15 +4,15 @@ rustorb/rustorb#111 の D4（#43）の 5 番目、#48 をまとめる。OpenRTM-
 
 ## OpenRTM-aist 側の設定
 
-FastRTPSTransport（`-DFASTRTPS_ENABLE=ON` で build する）を読み込み、コネクタの `interface_type` を `fast-rtps` にする。`fast-rtps.topic` が DDS のトピック名になる（ないときは `chatter`）。
+FastRTPSTransport（`-DFASTRTPS_ENABLE=ON` で build する）を読み込み、コネクタの `interface_type` を `fast-rtps` にする。
 
 ```
 manager.modules.load_path: /usr/local/lib/openrtm-2.0/transport
 manager.preload.modules: FastRTPSTransport.so
-manager.components.preconnect: ConsoleIn0.out?interface_type=fast-rtps&fast-rtps.topic=chatter
+manager.components.preconnect: ConsoleIn0.out?interface_type=fast-rtps
 ```
 
-DDS の domain は 0 になる（rtc.conf の `fast-rtps.domain.id` は効かなかった）。ネームサーバーも RT System Editor も要らない。`preconnect` はポートひとつのコネクタを作り、DDS のトピックに入る。
+2.0.2 では、ポートは DDS の domain 0、トピック `chatter` に入る。rtc.conf の `fast-rtps.domain.id` も、preconnect の `fast-rtps.topic`（`outport.`、`inport.` を付けたものも）も効かなかった（capture で確かめた）。ネームサーバーも RT System Editor も要らない。`preconnect` はポートひとつのコネクタを作り、DDS のトピックに入る。
 
 ## DDS に出るもの（観察）
 
@@ -20,7 +20,7 @@ OpenRTM-aist 2.0.2、Fast DDS 2.6（ROS 2 Humble のもの）、Ubuntu 22.04 の
 
 | | OutPort（writer） | InPort（reader） |
 | --- | --- | --- |
-| トピック | `fast-rtps.topic`（既定 `chatter`） | 同じ |
+| トピック | `chatter` | 同じ |
 | 型の名前 | IDL の名前：`RTC::TimedLong` | 同じ |
 | key | なし（entity kind が no key） | なし |
 | RELIABILITY | BEST_EFFORT | BEST_EFFORT |
@@ -29,16 +29,15 @@ OpenRTM-aist 2.0.2、Fast DDS 2.6（ROS 2 Humble のもの）、Ubuntu 22.04 の
 | TypeInformation | 送らない | 送らない |
 
 - 値は型の CDR（XCDR1、`@final` と同じ）で、型の名前で一致を判定する。rustorb-idl で `-Wbextensibility=final` を付けて生成した型を同じ名前で登録すれば通じる。XCDR2 では書かない
-- QoS は `fast-rtps.publisher.qos.*`、`fast-rtps.subscriber.qos.*`（reliability、durability、history など）で変えられる。既定は上の表
 - OpenRTM のプロセスどうしは同じホストでは Fast DDS の共有メモリでも送るが、rustorb-dds とは UDP で通じる
 
 ## rustorb-dds の例
 
-`openrtm` という例を Rust（`crates/rustorb-dds/examples/openrtm`）、C++（`cpp/examples/openrtm.cc`）、Python（`python/examples/openrtm.py`）で書いた。どれも同じコマンドラインで、`RTC::TimedLong` の OutPort か InPort のようにふるまう。QoS は OpenRTM のポートの既定（BEST_EFFORT、KEEP_LAST 1）。
+`openrtm` という例を Rust（`crates/rustorb-dds/examples/openrtm`）、C++（`cpp/examples/openrtm.cc`）、Python（`python/examples/openrtm.py`）で書いた。どれも同じコマンドラインで、`RTC::TimedLong` の OutPort か InPort のようにふるまう。QoS は OpenRTM のポートの既定（BEST_EFFORT、KEEP_LAST 1）。引数は `out|in [domain [count [interval_ms|timeout_s [topic]]]]` で、domain は 0、トピックは `chatter` が既定。
 
 ```sh
-cargo run --example openrtm -- in 0 10          # ConsoleIn の値を読む
-cargo run --example openrtm -- out 0 10 200     # ConsoleOut に書く
+cargo run --example openrtm -- in 0 10 30       # ConsoleIn の値を読む
+cargo run --example openrtm -- out 0 20 200     # ConsoleOut に書く
 ```
 
 型は rustorb-idl が OpenRTM-aist の BasicDataType.idl から生成する：
