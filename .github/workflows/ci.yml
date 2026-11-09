@@ -199,3 +199,58 @@ jobs:
           name: interop-ros2
           path: target/interop-ros2
           if-no-files-found: ignore
+
+  # OpenRTM-aist 2.0's ConsoleIn and ConsoleOut over its Fast DDS
+  # transport, with the openrtm examples in Rust, C++ and Python, both ways
+  # (interop/openrtm.sh). OpenRTM-aist 2.0.2 is built from its release tag
+  # in OpenRTM's development image for Ubuntu 22.04 (omniORB and ROS 2
+  # Humble's Fast DDS 2.6; 2.0.2 does not build with Fast CDR 2). The
+  # Python cases use the types rustorb-idl generates from OpenRTM-aist's
+  # BasicDataType.idl.
+  openrtm:
+    runs-on: ubuntu-24.04
+    container: openrtm/devel-rtm:ubuntu22.04
+    env:
+      OPENRTM_VERSION: v2.0.2
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl python3-pip python3-venv pkg-config tcpdump tshark >/dev/null
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build OpenRTM-aist with FastRTPSTransport
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "$OPENRTM_VERSION" https://github.com/OpenRTM/OpenRTM-aist.git /tmp/rtm
+          source /opt/ros/humble/setup.bash
+          # RelWithDebInfo: the Release configuration adds -Werror.
+          cmake -DFASTRTPS_ENABLE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -S /tmp/rtm -B /tmp/rtm/build >/tmp/rtm-cmake.log
+          cmake --build /tmp/rtm/build -j "$(nproc)" >/tmp/rtm-build.log 2>&1 || { tail -n 80 /tmp/rtm-build.log; exit 1; }
+          cmake --install /tmp/rtm/build >/dev/null
+          ldconfig
+      - name: Build the examples
+        shell: bash
+        run: |
+          cargo build --locked --example openrtm
+          cmake -S cpp -B target/cpp -DCMAKE_BUILD_TYPE=Debug
+          cmake --build target/cpp --target openrtm -j "$(nproc)"
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q ./python "git+https://github.com/rustorb/rustorb-idl#subdirectory=python"
+          mkdir -p target/openrtm-types
+          /tmp/venv/bin/rustorb-idl -bpython -Wbdds_only -Wbextensibility=final \
+            -C target/openrtm-types /tmp/rtm/src/lib/rtm/idl/BasicDataType.idl
+      - name: interop/openrtm.sh
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          CAPTURE=1 RUST=target/debug/examples/openrtm CPP=target/cpp/openrtm PYTHON=/tmp/venv/bin/python \
+            PYTHONPATH="$PWD/target/openrtm-types" interop/openrtm.sh
+      - name: Keep the logs and versions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-openrtm
+          path: target/interop-openrtm
+          if-no-files-found: ignore

@@ -289,3 +289,34 @@ What a ROS 2 (Jazzy) node puts on DDS, seen from outside (with
 |---|---|---|---|
 | 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.6), `osrf/ros:jazzy-desktop` | both cases pass |
 | 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.7) and rmw_cyclonedds_cpp 2.2.4 (Cyclone DDS 0.10.5), CI job `ros2` | all 4 cases pass |
+
+## OpenRTM-aist 2.0
+
+`openrtm.sh` runs OpenRTM-aist 2.0's example components ConsoleIn (an
+OutPort `out` of `RTC::TimedLong`) and ConsoleOut (an InPort `in`),
+connected with OpenRTM-aist's Fast DDS transport (`FastRTPSTransport.so`,
+`interface_type=fast-rtps`), against the `openrtm` examples of rustorb-dds
+in Rust, C++ and Python, in both directions (rustorb-dds#48). OpenRTM-aist
+is a black box: its programs as distributed, configured by `rtc.conf`; no
+name server is needed. OpenRTM-aist 2.0.2's ports join domain 0 and the
+topic `chatter` (`fast-rtps.domain.id` in `rtc.conf` and `fast-rtps.topic`
+in the preconnect are not applied), so the cases run one after the other
+on that topic.
+
+```sh
+interop/openrtm.sh                                   # the Rust example
+CPP=target/cpp/openrtm PYTHON=python3 interop/openrtm.sh
+```
+
+OpenRTM-aist 2.0.2 is built from its tag with `-DFASTRTPS_ENABLE=ON` in
+the image `openrtm/devel-rtm:ubuntu22.04` (Fast DDS 2.6 of ROS 2 Humble);
+it does not build with Fast CDR 2 (Ubuntu 24.04). A rustorb-dds reader must
+get `COUNT` (default 5) of the numbers typed into ConsoleIn; ConsoleOut
+must print `COUNT` of the samples a rustorb-dds writer sends. Both sides
+are best effort, so the writer sends four times as many. The CI job
+`openrtm` runs the script and keeps the logs as an artifact. What
+OpenRTM-aist puts on DDS is in [docs/openrtm.md](../docs/openrtm.md).
+
+| Date | rustorb-dds | OpenRTM-aist | Result |
+|---|---|---|---|
+| 2026-11-09 | rustorb-dds#48 | 2.0.2 with FastRTPSTransport (Fast DDS 2.6, ROS 2 Humble), `openrtm/devel-rtm:ubuntu22.04`, CI job `openrtm` | all 6 cases pass (Rust, C++, Python, both ways) |

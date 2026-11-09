@@ -1,0 +1,23 @@
+// The data types of OpenRTM-aist that the OpenRTM examples use, as its
+// BasicDataType.idl declares them (module RTC). OpenRTM-aist 2.0 puts
+// them on DDS as they are, with these names (docs/openrtm.md); the
+// examples are generated from this file with -Wbextensibility=final,
+// since OpenRTM writes plain CDR. Generating from OpenRTM's own
+// BasicDataType.idl gives the same types (the CI job openrtm checks it).
+module RTC {
+  struct Time
+  {
+    unsigned long sec;
+    unsigned long nsec;
+  };
+  struct TimedLong
+  {
+    Time tm;
+    long data;
+  };
+  struct TimedString
+  {
+    Time tm;
+    string data;
+  };
+};
