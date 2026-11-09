@@ -100,7 +100,7 @@ if(RUSTORB_DDS_BUILD_TESTS)
   endforeach()
 
   # The examples, also used by interop/run.sh.
-  foreach(e hello_world keyed)
+  foreach(e hello_world keyed openrtm)
     add_executable(${e} examples/${e}.cc)
     target_include_directories(${e} PRIVATE "${GENERATED}")
     target_compile_options(${e} PRIVATE ${WARNINGS})
