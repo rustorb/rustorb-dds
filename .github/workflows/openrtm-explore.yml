@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: openrtm/devel-rtm:ubuntu24.04
     steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark tcpdump >/dev/null
+      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git tshark tcpdump >/dev/null
       - run: git clone --depth 1 --branch v2.0.2 https://github.com/OpenRTM/OpenRTM-aist.git /tmp/rtm
       - name: build OpenRTM-aist 2.0.2 with FastRTPSTransport
         shell: bash
