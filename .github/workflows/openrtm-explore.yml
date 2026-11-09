@@ -16,7 +16,7 @@ jobs:
         shell: bash
         run: |
           . /opt/ros/*/setup.bash
-          cmake -DFASTRTPS_ENABLE=ON -DCMAKE_BUILD_TYPE=Release -S /tmp/rtm -B /tmp/rtm/build >/tmp/cmake.log || { tail -50 /tmp/cmake.log; exit 1; }
+          cmake -DFASTRTPS_ENABLE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -S /tmp/rtm -B /tmp/rtm/build >/tmp/cmake.log || { tail -50 /tmp/cmake.log; exit 1; }
           cmake --build /tmp/rtm/build -j $(nproc) >/tmp/build.log 2>&1 || { tail -80 /tmp/build.log; exit 1; }
           cmake --install /tmp/rtm/build >/tmp/install.log
           ldconfig
