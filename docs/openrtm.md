@@ -9,11 +9,10 @@ FastRTPSTransport（`-DFASTRTPS_ENABLE=ON` で build する）を読み込み、
 ```
 manager.modules.load_path: /usr/local/lib/openrtm-2.0/transport
 manager.preload.modules: FastRTPSTransport.so
-fast-rtps.domain.id: 0
 manager.components.preconnect: ConsoleIn0.out?interface_type=fast-rtps&fast-rtps.topic=chatter
 ```
 
-ネームサーバーも RT System Editor も要らない。`preconnect` はポートひとつのコネクタを作り、DDS のトピックに入る。
+DDS の domain は 0 になる（rtc.conf の `fast-rtps.domain.id` は効かなかった）。ネームサーバーも RT System Editor も要らない。`preconnect` はポートひとつのコネクタを作り、DDS のトピックに入る。
 
 ## DDS に出るもの（観察）
 

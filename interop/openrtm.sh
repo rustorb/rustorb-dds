@@ -61,7 +61,10 @@ declare -A PROGRAMS=([rust]="$RUST")
 [ -n "${CPP:-}" ] && PROGRAMS[cpp]="$CPP"
 [ -n "${PYTHON:-}" ] && PROGRAMS[python]="$PYTHON $ROOT/python/examples/openrtm.py"
 
-DOMAIN=120
+# OpenRTM-aist's ports join domain 0 (fast-rtps.domain.id in rtc.conf is
+# not applied), so every case is on domain 0 and has a topic of its own.
+DOMAIN=0
+CASE=0
 FAILED=()
 RESULTS=()
 
@@ -73,11 +76,12 @@ result() {
     RESULTS+=("FAIL $name")
     FAILED+=("$name")
     tail -n 20 "$OUT/$name"/*.log "$OUT/$name"/*.txt 2>/dev/null
+    grep -i -m 20 -E "fast-?rtps|domain|participant" "$OUT/$name/rtc.log" 2>/dev/null
   fi
 }
 
 # The rtc.conf of a component `comp` (ConsoleIn or ConsoleOut) whose port
-# `port` is connected to the DDS topic `topic` in domain DOMAIN.
+# `port` is connected to the DDS topic `topic`.
 rtc_conf() {
   local dir=$1 comp=$2 port=$3 topic=$4
   cat > "$dir/rtc.conf" <<EOF
@@ -88,7 +92,6 @@ logger.file_name: $dir/rtc.log
 logger.log_level: DEBUG
 manager.modules.load_path: $(dirname "$TRANSPORT")
 manager.preload.modules: FastRTPSTransport.so
-fast-rtps.domain.id: $DOMAIN
 manager.components.precreate: $comp
 manager.components.preconnect: ${comp}0.$port?interface_type=fast-rtps&fast-rtps.topic=$topic
 manager.components.preactivation: ${comp}0
@@ -99,16 +102,16 @@ EOF
 # reader must get COUNT of the numbers typed into ConsoleIn.
 openrtm_to() {
   local impl=$1 name="openrtm-to-$1" dir="$OUT/openrtm-to-$1"
-  DOMAIN=$((DOMAIN + 1))
+  CASE=$((CASE + 1))
   if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then return; fi
-  log "$name (domain $DOMAIN)"
+  log "$name (topic openrtm_$CASE)"
   mkdir -p "$dir"
-  rtc_conf "$dir" ConsoleIn out "openrtm_$DOMAIN"
+  rtc_conf "$dir" ConsoleIn out "openrtm_$CASE"
   (cd "$dir" && for i in $(seq 1001 $((1000 + TIMEOUT * 5))); do echo "$i"; sleep 0.2; done |
     timeout -s INT $((TIMEOUT + 10)) "$CONSOLE_IN" -f rtc.conf >console_in.txt 2>&1) &
   local console=$!
   # shellcheck disable=SC2086
-  timeout $((TIMEOUT + 5)) ${PROGRAMS[$impl]} in "$DOMAIN" "$COUNT" "$TIMEOUT" "openrtm_$DOMAIN" >"$dir/reader.log" 2>&1
+  timeout $((TIMEOUT + 5)) ${PROGRAMS[$impl]} in "$DOMAIN" "$COUNT" "$TIMEOUT" "openrtm_$CASE" >"$dir/reader.log" 2>&1
   local rc=$?
   pkill -INT -f "$CONSOLE_IN -f rtc.conf" 2>/dev/null
   wait "$console" 2>/dev/null
@@ -122,15 +125,15 @@ openrtm_to() {
 # effort, as OpenRTM-aist's ports are by default, so the writer sends more.
 to_openrtm() {
   local impl=$1 name="$1-to-openrtm" dir="$OUT/$1-to-openrtm"
-  DOMAIN=$((DOMAIN + 1))
+  CASE=$((CASE + 1))
   if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then return; fi
-  log "$name (domain $DOMAIN)"
+  log "$name (topic openrtm_$CASE)"
   mkdir -p "$dir"
-  rtc_conf "$dir" ConsoleOut in "openrtm_$DOMAIN"
+  rtc_conf "$dir" ConsoleOut in "openrtm_$CASE"
   (cd "$dir" && timeout -s INT $((TIMEOUT + 10)) "$CONSOLE_OUT" -f rtc.conf >console_out.txt 2>&1) &
   local console=$!
   # shellcheck disable=SC2086
-  timeout $((TIMEOUT + 5)) ${PROGRAMS[$impl]} out "$DOMAIN" $((COUNT * 4)) 200 "openrtm_$DOMAIN" >"$dir/writer.log" 2>&1
+  timeout $((TIMEOUT + 5)) ${PROGRAMS[$impl]} out "$DOMAIN" $((COUNT * 4)) 200 "openrtm_$CASE" >"$dir/writer.log" 2>&1
   local rc=$?
   sleep 1
   pkill -INT -f "$CONSOLE_OUT -f rtc.conf" 2>/dev/null
