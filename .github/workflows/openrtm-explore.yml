@@ -1,4 +1,4 @@
-# Temporary: what OpenRTM-aist 2.0 documents about its Fast DDS transport
+# Temporary: what OpenRTM-aist 2.0's Fast DDS transport puts on the wire
 # (openrtm.org is not reachable from the development container).
 name: openrtm-explore
 on:
@@ -8,12 +8,69 @@ on:
 jobs:
   explore:
     runs-on: ubuntu-24.04
+    container: openrtm/devel-rtm:ubuntu24.04
     steps:
-      - run: git clone --depth 1 https://github.com/OpenRTM/OpenRTM-aist.git rtm
-      - run: git -C rtm ls-remote --tags origin | tail -20
-      - run: find rtm/docs rtm/examples -maxdepth 3 | head -200
-      - run: grep -rIl -i "fast-rtps\|fastrtps\|fast_rtps" rtm --include=*.md --include=*.txt --include=*.conf --include=*.rst --include=*.yml --include=*.yaml --include=*.py --include=*.sh --include=*.xml | head -50
-      - run: grep -rIn -i "fast-rtps\|preconnect\|interface_type" rtm/docs rtm/examples rtm/etc 2>/dev/null | head -150
-      - run: grep -rIn "fast-rtps\|\"topic\"\|marshaling_type\|getProperty\|\[\"" rtm/src/ext/transport/FastRTPS/*.cpp | head -150
-      - run: ls -R rtm/src/ext/transport/FastRTPS rtm/src/ext/transport/ROS2Transport | head -60
-      - run: docker pull openrtm/devel-rtm:ubuntu24.04 && docker run --rm openrtm/devel-rtm:ubuntu24.04 bash -c 'ls /opt /usr/local/lib | head -80; find / -name "fastrtpsConfig.cmake" -o -name "fastddsConfig.cmake" 2>/dev/null | head'
+      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark tcpdump >/dev/null
+      - run: git clone --depth 1 --branch v2.0.2 https://github.com/OpenRTM/OpenRTM-aist.git /tmp/rtm
+      - name: build OpenRTM-aist 2.0.2 with FastRTPSTransport
+        shell: bash
+        run: |
+          . /opt/ros/*/setup.bash
+          cmake -DFASTRTPS_ENABLE=ON -DCMAKE_BUILD_TYPE=Release -S /tmp/rtm -B /tmp/rtm/build >/tmp/cmake.log || { tail -50 /tmp/cmake.log; exit 1; }
+          cmake --build /tmp/rtm/build -j $(nproc) >/tmp/build.log 2>&1 || { tail -80 /tmp/build.log; exit 1; }
+          cmake --install /tmp/rtm/build >/tmp/install.log
+          ldconfig
+          find /usr/local -name "FastRTPSTransport*" -o -name "ConsoleInComp" -o -name "ConsoleOutComp" | head
+      - name: ConsoleIn -> ConsoleOut over fast-rtps, captured
+        shell: bash
+        run: |
+          . /opt/ros/*/setup.bash
+          T=$(dirname $(find /usr/local -name "FastRTPSTransport.so" | head -1))
+          IN=$(find /usr/local -name ConsoleInComp -type f | head -1)
+          OUT=$(find /usr/local -name ConsoleOutComp -type f | head -1)
+          mkdir -p /tmp/run && cd /tmp/run
+          for c in in out; do
+            cat > rtc_$c.conf <<CONF
+          corba.nameservers:
+          naming.enable: NO
+          logger.enable: YES
+          logger.file_name: /tmp/run/rtc_$c.log
+          logger.log_level: PARANOID
+          manager.modules.load_path: $T
+          manager.preload.modules: FastRTPSTransport.so
+          CONF
+          done
+          cat >> rtc_in.conf <<CONF
+          manager.components.precreate: ConsoleIn
+          manager.components.preconnect: ConsoleIn0.out?interface_type=fast-rtps&fast-rtps.topic=chatter
+          manager.components.preactivation: ConsoleIn0
+          CONF
+          cat >> rtc_out.conf <<CONF
+          manager.components.precreate: ConsoleOut
+          manager.components.preconnect: ConsoleOut0.in?interface_type=fast-rtps&fast-rtps.topic=chatter
+          manager.components.preactivation: ConsoleOut0
+          CONF
+          cat rtc_in.conf
+          tcpdump -i any -w /tmp/run/cap.pcap udp &
+          TD=$!
+          sleep 2
+          timeout 20 $OUT -f rtc_out.conf > out.txt 2>&1 &
+          sleep 2
+          (for i in $(seq 1 40); do echo $((i*11)); sleep 0.3; done) | timeout 16 $IN -f rtc_in.conf > in.txt 2>&1 || true
+          sleep 3
+          kill $TD; sleep 1
+          echo "== out"; tail -30 out.txt; echo "== in"; tail -10 in.txt
+          echo "== logs"; grep -i "fast\|topic\|connect" rtc_in.log rtc_out.log | head -60
+      - name: decode
+        if: always()
+        run: |
+          cd /tmp/run
+          tshark -r cap.pcap -Y rtps -T fields -e frame.number -e ip.src -e udp.dstport -e rtps.sm.id -e rtps.param.topicName -e rtps.param.typeName | head -80
+          tshark -r cap.pcap -Y 'rtps.param.topicName' -O rtps -V 2>/dev/null | grep -v "^ *\[\|Frame\|Ethernet\|Linux cooked" | head -600
+          echo "== user data"
+          tshark -r cap.pcap -Y 'rtps.sm.id == 0x15 && !rtps.param.topicName && !rtps.pid' -O rtps -V -x 2>/dev/null | head -200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openrtm-capture
+          path: /tmp/run
