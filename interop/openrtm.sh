@@ -101,7 +101,8 @@ result() {
 # The rtc.conf of a component `comp` (ConsoleIn or ConsoleOut) whose port
 # `port` is connected to the DDS topic `topic`.
 rtc_conf() {
-  local dir=$1 comp=$2 port=$3 topic=$4
+  local dir=$1 comp=$2 port=$3 topic=$4 dir_key=inport
+  [ "$port" = out ] && dir_key=outport
   cat > "$dir/rtc.conf" <<EOF
 corba.nameservers:
 naming.enable: NO
@@ -111,7 +112,7 @@ logger.log_level: DEBUG
 manager.modules.load_path: $(dirname "$TRANSPORT")
 manager.preload.modules: FastRTPSTransport.so
 manager.components.precreate: $comp
-manager.components.preconnect: ${comp}0.$port?interface_type=fast-rtps&fast-rtps.topic=$topic
+manager.components.preconnect: ${comp}0.$port?interface_type=fast-rtps&fast-rtps.topic=$topic&${dir_key}.fast-rtps.topic=$topic
 manager.components.preactivation: ${comp}0
 EOF
 }
