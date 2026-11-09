@@ -33,6 +33,8 @@ C++ バインディング（[cpp/](cpp/)、[docs/cpp.md](docs/cpp.md)）はヘ�
 
 Java バインディング（[java/](java/)、[docs/java.md](docs/java.md)）は、この C ABI の上に FFM API（Java 22 以降）で Java 5 PSM for DDS（`org.omg.dds`）を実装します。型は `rustorb-idl -bjava -Wbdds_only` が書きます（MIT OR Apache-2.0）。
 
+OpenRTM-aist 2.0 のデータポートを Fast DDS の転送でつなぐと、同じ型と QoS の rustorb-dds の writer、reader と通じます（[docs/openrtm.md](docs/openrtm.md)）。
+
 XCDR1/XCDR2 の符号化は `rustorb-cdr` に、DDS の型サポートの trait は `rustorb-typesupport` にあります。どちらも rustorb リポジトリにあり、ORB と共有しています。IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) です。DDS のクレートが依存するのは `rustorb-cdr` と `rustorb-typesupport` だけです（`rustorb-dds-corba` だけが ORB の `rustorb-core` にも依存します）。生成器は GPL-3.0-or-later ですが、生成されたコードはこのライセンスの対象外です。
 
 ## 段階

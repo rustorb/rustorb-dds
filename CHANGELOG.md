@@ -8,6 +8,11 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Interoperation with OpenRTM-aist 2.0's data ports over its Fast DDS
+  transport: the example `openrtm` in Rust, C++ and Python behaves as an
+  OutPort or InPort of `RTC::TimedLong`, and `interop/openrtm.sh` (CI job
+  `openrtm`, OpenRTM-aist 2.0.2 on Ubuntu 22.04) runs it with OpenRTM's
+  ConsoleIn and ConsoleOut in both directions (docs/openrtm.md, #48).
 - The crate `rustorb-dds-corba`: CORBA TypeCodes as DDS-XTypes types
   (and so TypeObjects) and back, and anys as DynamicData and back, on
   `rustorb-core` 0.3. Extensibility and keys, which TypeCodes do not

@@ -41,6 +41,8 @@ The C++ binding ([cpp/](cpp/), [docs/cpp.md](docs/cpp.md)) is header only: the I
 
 The Java binding ([java/](java/), [docs/java.md](docs/java.md)) is the DDS Java 5 PSM (`org.omg.dds`) on that C ABI through the FFM API (Java 22 or newer), with types from `rustorb-idl -bjava -Wbdds_only` (MIT OR Apache-2.0).
 
+OpenRTM-aist 2.0's data ports, connected with its Fast DDS transport, talk with rustorb-dds writers and readers of the same type and QoS ([docs/openrtm.md](docs/openrtm.md)).
+
 The XCDR1/XCDR2 encodings are in `rustorb-cdr` and the DDS type support
 traits in `rustorb-typesupport`, both in the rustorb repository and shared
 with the ORB. The IDL generator is

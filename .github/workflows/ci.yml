@@ -237,7 +237,7 @@ jobs:
           cmake -S cpp -B target/cpp -DCMAKE_BUILD_TYPE=Debug
           cmake --build target/cpp --target openrtm -j "$(nproc)"
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install -q ./python git+https://github.com/rustorb/rustorb-idl
+          /tmp/venv/bin/pip install -q ./python "git+https://github.com/rustorb/rustorb-idl#subdirectory=python"
           mkdir -p target/openrtm-types
           /tmp/venv/bin/rustorb-idl -bpython -Wbdds_only -Wbextensibility=final \
             -C target/openrtm-types /tmp/rtm/src/lib/rtm/idl/BasicDataType.idl
