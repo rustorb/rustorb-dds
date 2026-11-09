@@ -6,6 +6,7 @@ members = [
     "crates/rustorb-dds",
     "crates/rustorb-dds-python",
     "crates/rustorb-dds-ffi",
+    "crates/rustorb-dds-corba",
 ]
 exclude = ["fuzz"]
 
