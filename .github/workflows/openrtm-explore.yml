@@ -1,0 +1,19 @@
+# Temporary: what OpenRTM-aist 2.0 documents about its Fast DDS transport
+# (openrtm.org is not reachable from the development container).
+name: openrtm-explore
+on:
+  push:
+    branches: [claude/project-thread-aqufqj]
+    paths: [.github/workflows/openrtm-explore.yml]
+jobs:
+  explore:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: git clone --depth 1 https://github.com/OpenRTM/OpenRTM-aist.git rtm
+      - run: git -C rtm ls-remote --tags origin | tail -20
+      - run: find rtm/docs rtm/examples -maxdepth 3 | head -200
+      - run: grep -rIl -i "fast-rtps\|fastrtps\|fast_rtps" rtm --include=*.md --include=*.txt --include=*.conf --include=*.rst --include=*.yml --include=*.yaml --include=*.py --include=*.sh --include=*.xml | head -50
+      - run: grep -rIn -i "fast-rtps\|preconnect\|interface_type" rtm/docs rtm/examples rtm/etc 2>/dev/null | head -150
+      - run: grep -rIn "fast-rtps\|\"topic\"\|marshaling_type\|getProperty\|\[\"" rtm/src/ext/transport/FastRTPS/*.cpp | head -150
+      - run: ls -R rtm/src/ext/transport/FastRTPS rtm/src/ext/transport/ROS2Transport | head -60
+      - run: docker pull openrtm/devel-rtm:ubuntu24.04 && docker run --rm openrtm/devel-rtm:ubuntu24.04 bash -c 'ls /opt /usr/local/lib | head -80; find / -name "fastrtpsConfig.cmake" -o -name "fastddsConfig.cmake" 2>/dev/null | head'
