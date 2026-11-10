@@ -100,6 +100,7 @@ pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
 pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
+pub use rustorb_xtypes::dynamic::ContentFilter;
 pub use rustorb_xtypes::dynamic::{
     DynamicData, DynamicDataFactory, DynamicType, DynamicTypeBuilder, DynamicTypeBuilderFactory,
     MEMBER_ID_INVALID,
@@ -111,4 +112,4 @@ pub use status::{
     SampleRejectedStatus, StatusMask,
 };
 pub use subscriber::{DataReader, Sample, Subscriber};
-pub use topic::Topic;
+pub use topic::{ContentFilteredTopic, Topic, TopicDescription};

@@ -105,6 +105,47 @@ pub struct EndpointData {
     pub data_representation: Vec<i16>,
     /// TYPE_CONSISTENCY_ENFORCEMENT (readers only), when announced.
     pub type_consistency: Option<TypeConsistency>,
+    /// The content filter of a reader of a content filtered topic
+    /// (`PID_CONTENT_FILTER_PROPERTY`, 8.7.3.1), for writer side
+    /// filtering.
+    pub content_filter: Option<ContentFilterProperty>,
+}
+
+/// `ContentFilterProperty_t` (DDSI-RTPS 2.5, 8.7.3.1, Table 8.86): the
+/// filter of a reader of a content filtered topic.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContentFilterProperty {
+    /// The name of the content filtered topic.
+    pub content_filtered_topic_name: String,
+    /// The name of its related topic.
+    pub related_topic_name: String,
+    /// The filter class: `DDSSQL` for the filters of DDS 1.4, Annex B.
+    pub filter_class_name: String,
+    /// The filter expression.
+    pub filter_expression: String,
+    /// The expression parameters.
+    pub expression_parameters: Vec<String>,
+}
+
+impl ContentFilterProperty {
+    /// The filter signature (9.6.4.1): the MD5 of the strings, each with
+    /// its NUL.
+    pub fn signature(&self) -> [u8; 16] {
+        let mut bytes = Vec::new();
+        for s in [
+            &self.content_filtered_topic_name,
+            &self.related_topic_name,
+            &self.filter_class_name,
+            &self.filter_expression,
+        ]
+        .into_iter()
+        .chain(&self.expression_parameters)
+        {
+            bytes.extend_from_slice(s.as_bytes());
+            bytes.push(0);
+        }
+        rustorb_typesupport::md5(&bytes)
+    }
 }
 
 impl EndpointData {
@@ -136,6 +177,7 @@ impl EndpointData {
             type_information: None,
             data_representation: Vec::new(),
             type_consistency: None,
+            content_filter: None,
         }
     }
 
@@ -241,6 +283,9 @@ impl EndpointData {
             v.resize(8, 0);
             l.push(Parameter::new(pid::TYPE_CONSISTENCY_ENFORCEMENT, v));
         }
+        if let Some(f) = &self.content_filter {
+            l.push(b.content_filter(pid::CONTENT_FILTER_PROPERTY, f));
+        }
         if let Some(info) = &self.type_information {
             // An XCDR2 stream of its own, as Cyclone DDS 0.10 writes it.
             if let Ok(mut v) = info.to_bytes(order) {
@@ -311,6 +356,9 @@ impl EndpointData {
                 pid::TYPE_INFORMATION => {
                     d.type_information = read_type_information(&p.value, endianness)
                 }
+                // Writer side filtering is optional (8.7.3.4): a filter
+                // that cannot be read is left out.
+                pid::CONTENT_FILTER_PROPERTY => d.content_filter = v.content_filter(p).ok(),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }
@@ -1228,6 +1276,21 @@ mod tests {
     }
 
     #[test]
+    fn content_filter_signature() {
+        let f = ContentFilterProperty {
+            content_filtered_topic_name: "a".into(),
+            related_topic_name: "b".into(),
+            filter_class_name: "DDSSQL".into(),
+            filter_expression: "x > %0".into(),
+            expression_parameters: vec!["1".into()],
+        };
+        assert_eq!(
+            f.signature(),
+            rustorb_typesupport::md5(b"a\0b\0DDSSQL\0x > %0\0\x31\0")
+        );
+    }
+
+    #[test]
     fn endpoint_data_round_trip() {
         let mut d = EndpointData::reader(rguid(1), "Square", "ShapeType");
         d.reliability.kind = ReliabilityKind::Reliable;
@@ -1237,6 +1300,13 @@ mod tests {
         d.unicast_locators = participant(1).default_unicast_locators;
         d.multicast_locators = vec![Locator::udpv4("239.255.0.1:7401".parse().unwrap())];
         d.expects_inline_qos = true;
+        d.content_filter = Some(ContentFilterProperty {
+            content_filtered_topic_name: "BigSquares".into(),
+            related_topic_name: "Square".into(),
+            filter_class_name: "DDSSQL".into(),
+            filter_expression: "x > %0 AND color = %1".into(),
+            expression_parameters: vec!["100".into(), "'BLUE'".into()],
+        });
         for e in [Endianness::Big, Endianness::Little] {
             assert_eq!(
                 EndpointData::from_payload(&d.to_payload(e), false).unwrap(),

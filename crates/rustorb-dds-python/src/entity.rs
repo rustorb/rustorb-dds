@@ -708,9 +708,9 @@ impl PySubscriber {
     ) -> PyResult<PyReader> {
         let qos = reader_qos(qos)?;
         let reader = match listener {
-            None => self.inner.create_datareader_with_qos(&topic.topic, qos),
+            None => self.inner.create_datareader_with_qos(&*topic.topic, qos),
             Some(f) => self.inner.create_datareader_with_listener(
-                &topic.topic,
+                &*topic.topic,
                 qos,
                 ReaderCallback(f),
                 StatusMask(mask),
