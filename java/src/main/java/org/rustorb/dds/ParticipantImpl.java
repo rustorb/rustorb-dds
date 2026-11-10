@@ -44,6 +44,7 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
     final List<PublisherImpl> publishers = new CopyOnWriteArrayList<>();
     final List<SubscriberImpl> subscribers = new CopyOnWriteArrayList<>();
     final List<TopicImpl<?>> topics = new CopyOnWriteArrayList<>();
+    final List<ContentFilteredTopicImpl<?>> filteredTopics = new CopyOnWriteArrayList<>();
     private volatile PublisherQos defaultPublisherQos;
     private volatile SubscriberQos defaultSubscriberQos;
     private volatile TopicQos defaultTopicQos;
@@ -194,7 +195,33 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
                 return (TopicDescription<TYPE>) t;
             }
         }
+        for (ContentFilteredTopicImpl<?> t : filteredTopics) {
+            if (t.getName().equals(name)) {
+                return (TopicDescription<TYPE>) t;
+            }
+        }
         return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public <TYPE> org.omg.dds.topic.ContentFilteredTopic<TYPE> createContentFilteredTopic(String name,
+            Topic<? extends TYPE> relatedTopic, String filterExpression, List<String> expressionParameters) {
+        TopicImpl<TYPE> related = (TopicImpl<TYPE>) TopicImpl.of((TopicDescription<TYPE>) relatedTopic);
+        if (related.participant != this) {
+            throw Errors.precondition(env, "the topic belongs to another participant");
+        }
+        ContentFilteredTopicImpl<TYPE> t = new ContentFilteredTopicImpl<>(related, name, filterExpression,
+                expressionParameters == null ? List.of() : expressionParameters);
+        filteredTopics.add(t);
+        return t;
+    }
+
+    @Override
+    public <TYPE> org.omg.dds.topic.ContentFilteredTopic<TYPE> createContentFilteredTopic(String name,
+            Topic<? extends TYPE> relatedTopic, String filterExpression, String... expressionParameters) {
+        return createContentFilteredTopic(name, relatedTopic, filterExpression,
+                java.util.Arrays.asList(expressionParameters));
     }
 
     @Override

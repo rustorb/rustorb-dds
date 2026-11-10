@@ -44,24 +44,28 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
 
     final SubscriberImpl subscriber;
     final TopicImpl<T> topic;
+    /** The content filtered topic it reads, if any. */
+    final ContentFilteredTopicImpl<T> filtered;
     private final Codec<T> codec;
     private final DataReaderQos qos;
     private volatile DataReaderListener<T> listener;
     private StatusCondition<DataReader<T>> condition;
     private final List<Conditions.Read<T>> conditions = new CopyOnWriteArrayList<>();
 
-    private ReaderImpl(SubscriberImpl subscriber, TopicImpl<T> topic, DataReaderQos qos, long handle,
-            DataReaderListener<T> listener) {
-        super(subscriber.env, "DataReader of " + topic.getName(), handle);
+    private ReaderImpl(SubscriberImpl subscriber, TopicImpl<T> topic, ContentFilteredTopicImpl<T> filtered,
+            DataReaderQos qos, long handle, DataReaderListener<T> listener) {
+        super(subscriber.env, "DataReader of " + (filtered != null ? filtered.getName() : topic.getName()), handle);
         this.subscriber = subscriber;
         this.topic = topic;
+        this.filtered = filtered;
         this.codec = topic.codec();
         this.qos = qos;
         this.listener = listener;
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    static <T> ReaderImpl<T> create(SubscriberImpl subscriber, TopicImpl<T> topic, Qos.ReaderQos qos,
+    static <T> ReaderImpl<T> create(SubscriberImpl subscriber, TopicImpl<T> topic,
+            ContentFilteredTopicImpl<T> filtered, Qos.ReaderQos qos,
             DataReaderListener<T> listener, int mask) {
         Listeners.Slot slot = listener == null ? null : new Listeners.Slot(subscriber.env, listener);
         long id = slot == null ? 0 : Listeners.register(slot);
@@ -70,6 +74,10 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
             h = make(subscriber.env, (arena, out) -> {
                 MemorySegment q = qos.toNative(arena);
                 long table = slot == null ? 0 : Listeners.readerTable(arena, id).address();
+                if (filtered != null) {
+                    return (int) Ffi.rdds_subscriber_create_filtered_reader.invokeExact(subscriber.handle(),
+                            filtered.handle(), q.address(), table, mask, out);
+                }
                 return (int) Ffi.rdds_subscriber_create_reader.invokeExact(subscriber.handle(), topic.handle(),
                         q.address(), table, mask, out);
             });
@@ -79,7 +87,7 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
             }
             throw e;
         }
-        ReaderImpl<T> r = new ReaderImpl<>(subscriber, topic, qos, h, listener);
+        ReaderImpl<T> r = new ReaderImpl<>(subscriber, topic, filtered, qos, h, listener);
         if (slot != null) {
             slot.ready(r);
         }
@@ -187,7 +195,7 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
 
     @Override
     public TopicDescription<T> getTopicDescription() {
-        return topic;
+        return filtered != null ? filtered : topic;
     }
 
     private MemorySegment status(Arena arena, long size, WriterImpl.StatusGetter g) {

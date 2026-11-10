@@ -53,11 +53,14 @@ final class SubscriberImpl extends EntityBase<SubscriberListener, SubscriberQos>
     @Override
     public <TYPE> DataReader<TYPE> createDataReader(TopicDescription<TYPE> topic, DataReaderQos qos,
             DataReaderListener<TYPE> listener, Collection<Class<? extends Status>> statuses) {
-        TopicImpl<TYPE> t = TopicImpl.of(topic);
+        ContentFilteredTopicImpl<TYPE> cft = topic instanceof ContentFilteredTopicImpl<?> c
+                ? (ContentFilteredTopicImpl<TYPE>) c.<TYPE>cast()
+                : null;
+        TopicImpl<TYPE> t = cft != null ? cft.related : TopicImpl.of(topic);
         if (t.participant != participant) {
             throw Errors.precondition(env, "the topic belongs to another participant");
         }
-        ReaderImpl<TYPE> r = ReaderImpl.create(this, t, (Qos.ReaderQos) (qos == null ? defaultReaderQos : qos),
+        ReaderImpl<TYPE> r = ReaderImpl.create(this, t, cft, (Qos.ReaderQos) (qos == null ? defaultReaderQos : qos),
                 listener, StatusKinds.mask(statuses));
         readers.add(r);
         return r;
