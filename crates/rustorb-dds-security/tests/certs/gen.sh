@@ -15,3 +15,7 @@ openssl x509 -req -in p2.csr -CA identity_ca.pem -CAkey ca_key.pem -CAcreateseri
 openssl genrsa -out perm_ca_key.pem 2048
 openssl req -x509 -new -key perm_ca_key.pem -sha256 -days $days -subj "/C=JP/O=rustorb/CN=rustorb test permissions CA" -out permissions_ca.pem
 rm -f *.csr *.srl
+# The governance and permissions documents, signed by the permissions CA.
+for f in governance permissions_p1 permissions_p2; do
+  openssl smime -sign -in $f.xml -text -out $f.p7s -signer permissions_ca.pem -inkey perm_ca_key.pem
+done

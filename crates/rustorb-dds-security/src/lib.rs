@@ -10,6 +10,7 @@ pub mod auth;
 pub mod cdr;
 pub mod crypto;
 pub mod pki;
+pub mod smime;
 pub mod token;
 
 /// A failure of a security operation (a SecurityException).

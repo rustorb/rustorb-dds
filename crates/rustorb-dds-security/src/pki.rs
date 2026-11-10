@@ -292,6 +292,15 @@ impl Cert {
         self.cert.tbs_certificate.subject.to_string()
     }
 
+    /// The DER of its issuer name and its serial number, which name it
+    /// in a CMS signer.
+    pub fn issuer_and_serial(&self) -> (Vec<u8>, Vec<u8>) {
+        (
+            self.issuer_der(),
+            self.cert.tbs_certificate.serial_number.as_bytes().to_vec(),
+        )
+    }
+
     /// The DER of its issuer name.
     fn issuer_der(&self) -> Vec<u8> {
         self.cert
