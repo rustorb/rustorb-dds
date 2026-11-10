@@ -25,7 +25,7 @@ use rustorb_rtps::{
     SerializedPayload, Submessage, Time, VendorId,
 };
 use rustorb_typesupport::TopicType;
-use rustorb_xtypes::dynamic::{DynamicData, DynamicType, DynamicTypeBuilderFactory};
+use rustorb_xtypes::dynamic::{ContentFilter, DynamicData, DynamicType, DynamicTypeBuilderFactory};
 use rustorb_xtypes::type_object::{TypeIdentifier, TypeInformation};
 use rustorb_xtypes::typelookup::{
     GetTypeDependenciesIn, GetTypesIn, TypeLookupCall, TypeLookupReturn,
@@ -43,7 +43,7 @@ use crate::status::{
     SampleRejectedStatus, StatusMask,
 };
 use crate::subscriber::Subscriber;
-use crate::topic::Topic;
+use crate::topic::{ContentFilteredTopic, Topic};
 use crate::typed::{Dynamic, KeyOps, Typed};
 
 /// The vendor id sent in RTPS headers. rustorb has no vendor id from the
@@ -172,6 +172,9 @@ pub(crate) struct ReaderState {
     pub(crate) enabled: StatusMask,
     /// The listener and the statuses it is called for.
     pub(crate) listener: Option<(ReaderListener, StatusMask)>,
+    /// The filter of a reader of a content filtered topic: the samples
+    /// that do not pass it are dropped as they come.
+    pub(crate) filter: Option<ContentFilter>,
 }
 
 /// What a reader knows of the liveliness of a matched writer.
@@ -210,6 +213,7 @@ impl ReaderState {
             changes: StatusMask::NONE,
             enabled: StatusMask::ALL,
             listener: None,
+            filter: None,
         }
     }
 
@@ -219,6 +223,14 @@ impl ReaderState {
     fn accept(&mut self, c: Incoming) -> StatusMask {
         if !self.matched.contains(&c.writer) {
             return StatusMask::NONE;
+        }
+        if let (Some(f), instance::Change::Write(bytes)) = (&self.filter, &c.change) {
+            // A sample that cannot be read cannot pass the filter.
+            let passes =
+                DynamicData::from_payload(f.get_type(), bytes).is_ok_and(|d| f.evaluate(&d));
+            if !passes {
+                return StatusMask::NONE;
+            }
         }
         let h = c.instance;
         let value = matches!(c.change, instance::Change::Write(_));
@@ -738,6 +750,8 @@ pub(crate) struct Inner {
     pending: Vec<(Guid, StatusMask)>,
     /// The TypeObjects of the registered types, by type name.
     types: HashMap<String, TypeObjects>,
+    /// The registered types, by type name, for content filters.
+    dynamic_types: HashMap<String, DynamicType>,
     /// INCONSISTENT_TOPIC, by topic name.
     pub(crate) inconsistent_topics: HashMap<String, InconsistentTopicStatus>,
 }
@@ -1109,6 +1123,7 @@ impl Shared {
         qos: DataReaderQos,
         keys: Arc<dyn KeyOps>,
         listener: Option<(ReaderListener, StatusMask)>,
+        filter: Option<ContentFilter>,
     ) -> Result<()> {
         {
             let mut g = self.lock()?;
@@ -1117,6 +1132,7 @@ impl Shared {
             let now = Instant::now();
             let mut r = ReaderState::new(data.clone(), &qos, keys, &inner.reader_config);
             r.listener = listener;
+            r.filter = filter;
             let mut changes = StatusMask::NONE;
             // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL
             // reader.
@@ -1156,6 +1172,42 @@ impl Shared {
             inner.changed(guid, changes);
             let events = inner.sedp.add_reader(data);
             apply_sedp_events(inner, events, now);
+        }
+        self.flush();
+        Ok(())
+    }
+
+    /// The registered type named `type_name`.
+    pub(crate) fn dynamic_type(&self, type_name: &str) -> Result<Option<DynamicType>> {
+        Ok(self.lock()?.dynamic_types.get(type_name).cloned())
+    }
+
+    /// Changes the expression parameters of the filters of the readers
+    /// `readers`, and announces them (DDSI-RTPS 2.5, 8.7.3.1: as for a
+    /// change of QoS). Readers that are gone are skipped.
+    pub(crate) fn set_filter_parameters(
+        &self,
+        readers: &[Guid],
+        parameters: &[String],
+    ) -> Result<()> {
+        {
+            let mut g = self.lock()?;
+            let inner = &mut *g;
+            let now = Instant::now();
+            for guid in readers {
+                let Some(r) = inner.readers.get_mut(guid) else {
+                    continue;
+                };
+                if let Some(f) = &mut r.filter {
+                    f.set_parameters(parameters)?;
+                }
+                if let Some(cf) = &mut r.data.content_filter {
+                    cf.expression_parameters = parameters.to_vec();
+                }
+                let data = r.data.clone();
+                let events = inner.sedp.add_reader(data);
+                apply_sedp_events(inner, events, now);
+            }
         }
         self.flush();
         Ok(())
@@ -1687,6 +1739,7 @@ impl DomainParticipant {
             deleted: false,
             pending: Vec::new(),
             types: HashMap::new(),
+            dynamic_types: HashMap::new(),
             inconsistent_topics: HashMap::new(),
         };
         let shared = Arc::new_cyclic(|this| Shared {
@@ -1737,7 +1790,8 @@ impl DomainParticipant {
     pub fn register_type<T: TopicType + DescribeType>(&self) -> Result<()> {
         let objects = TypeObjects::of::<T>()
             .map_err(|_| Error::Unsupported("a type that cannot be described"))?;
-        self.add_type(T::TYPE_NAME, objects).map(|_| ())
+        let ty = DynamicType::new(T::describe_type());
+        self.add_type(T::TYPE_NAME, objects, ty).map(|_| ())
     }
 
     /// Registers a type known at run time (`register_type` with a
@@ -1748,7 +1802,7 @@ impl DomainParticipant {
     /// [`Error::PreconditionNotMet`].
     pub fn register_dynamic_type(&self, ty: &DynamicType) -> Result<()> {
         let objects = TypeObjects::new(ty.as_type())?;
-        if !self.add_type(&ty.get_name(), objects)? {
+        if !self.add_type(&ty.get_name(), objects, ty.clone())? {
             return Err(Error::PreconditionNotMet);
         }
         Ok(())
@@ -1756,7 +1810,7 @@ impl DomainParticipant {
 
     /// Registers `objects` under `name`. False when another type has that
     /// name.
-    fn add_type(&self, name: &str, objects: TypeObjects) -> Result<bool> {
+    fn add_type(&self, name: &str, objects: TypeObjects, ty: DynamicType) -> Result<bool> {
         {
             let mut g = self.shared.lock()?;
             let inner = &mut *g;
@@ -1765,6 +1819,7 @@ impl DomainParticipant {
             }
             inner.sedp.registry_mut().add_type(&objects);
             inner.types.insert(name.to_owned(), objects);
+            inner.dynamic_types.insert(name.to_owned(), ty);
             let events = inner.sedp.rematch_unresolved();
             apply_sedp_events(inner, events, Instant::now());
         }
@@ -1850,6 +1905,32 @@ impl DomainParticipant {
             self.shared.clone(),
             Arc::new(Typed::<T>::new()),
         ))
+    }
+
+    /// Creates a content filtered topic named `name` (DDS 1.4,
+    /// 2.2.2.2.1.7): its readers get the samples of `related` that pass
+    /// the filter `filter_expression` (DDS 1.4, Annex B; see
+    /// [`ContentFilter`]) with `expression_parameters` for its `%n`.
+    ///
+    /// The filter reads the fields of the samples by their names in the
+    /// type's description, so the type must be registered: a dynamic
+    /// topic's is, and a [`TopicType`] needs
+    /// [`register_type`](Self::register_type) first, or this fails with
+    /// [`Error::PreconditionNotMet`]. A filter expression that is not
+    /// valid for the type fails with [`Error::Dynamic`].
+    pub fn create_contentfilteredtopic<T>(
+        &self,
+        name: &str,
+        related: &Topic<T>,
+        filter_expression: &str,
+        expression_parameters: &[String],
+    ) -> Result<ContentFilteredTopic<T>> {
+        let ty = self
+            .shared
+            .dynamic_type(related.type_name())?
+            .ok_or(Error::PreconditionNotMet)?;
+        let filter = ContentFilter::new(&ty, filter_expression, expression_parameters)?;
+        Ok(ContentFilteredTopic::new(name, related, filter))
     }
 
     /// Creates a publisher in the default partition.

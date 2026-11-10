@@ -16,7 +16,7 @@ use crate::status::{
     DeadlineMissedStatus, IncompatibleQosStatus, LivelinessChangedStatus, MatchedStatus,
     SampleLostStatus, SampleRejectedStatus, StatusMask,
 };
-use crate::topic::Topic;
+use crate::topic::TopicDescription;
 use crate::typed::SampleType;
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
@@ -42,8 +42,9 @@ impl Subscriber {
     }
 
     /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
-    /// KEEP_LAST(1), VOLATILE.
-    pub fn create_datareader<T>(&self, topic: &Topic<T>) -> Result<DataReader<T>> {
+    /// KEEP_LAST(1), VOLATILE. `topic` is a [`Topic`](crate::Topic) or a
+    /// [`ContentFilteredTopic`](crate::ContentFilteredTopic).
+    pub fn create_datareader<T>(&self, topic: &impl TopicDescription<T>) -> Result<DataReader<T>> {
         self.create_datareader_with_qos(topic, DataReaderQos::default())
     }
 
@@ -55,7 +56,7 @@ impl Subscriber {
     /// order, and matches any writer.
     pub fn create_datareader_with_qos<T>(
         &self,
-        topic: &Topic<T>,
+        topic: &impl TopicDescription<T>,
         qos: DataReaderQos,
     ) -> Result<DataReader<T>> {
         self.create(topic, qos, None)
@@ -67,21 +68,23 @@ impl Subscriber {
     /// (DDS 1.4, 2.2.2.5.2.5).
     pub fn create_datareader_with_listener<T: 'static>(
         &self,
-        topic: &Topic<T>,
+        topic: &impl TopicDescription<T>,
         qos: DataReaderQos,
         listener: impl DataReaderListener<T> + 'static,
         mask: StatusMask,
     ) -> Result<DataReader<T>> {
-        let l = reader_listener(topic.samples.clone(), listener);
+        let l = reader_listener(topic.topic().samples.clone(), listener);
         self.create(topic, qos, Some((l, mask)))
     }
 
     fn create<T>(
         &self,
-        topic: &Topic<T>,
+        description: &impl TopicDescription<T>,
         qos: DataReaderQos,
         listener: Option<(ReaderListener, StatusMask)>,
     ) -> Result<DataReader<T>> {
+        let topic = description.topic();
+        let cft = description.content_filter();
         let kind = if topic.samples.keyed() {
             entity_kind::USER_READER_WITH_KEY
         } else {
@@ -101,8 +104,16 @@ impl Subscriber {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.qos.partition.clone();
+        let filter = cft.map(|c| {
+            let (filter, property) = c.reader_filter();
+            data.content_filter = Some(property);
+            filter
+        });
         self.shared
-            .add_reader(data, qos, topic.samples.key_ops(), listener)?;
+            .add_reader(data, qos, topic.samples.key_ops(), listener, filter)?;
+        if let Some(c) = cft {
+            c.add_reader(guid);
+        }
         Ok(DataReader {
             shared: self.shared.clone(),
             guid,

@@ -292,6 +292,7 @@ name = "rustorb-rtps"
 version = "0.0.0"
 dependencies = [
  "rustorb-cdr 0.2.0",
+ "rustorb-typesupport",
  "rustorb-xtypes",
  "socket2",
 ]

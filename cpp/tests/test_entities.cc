@@ -332,4 +332,48 @@ TEST(errors) {
                dds::core::UnsupportedError);
 }
 
+TEST(content_filtered_topic) {
+  auto dp = participant(80);
+  dds::topic::Topic<HelloWorld::Greeting> topic(dp, "filtered_greetings");
+  dds::topic::Filter filter("index > %0 AND message LIKE 'h%'");
+  filter.add_parameter("3");
+  dds::topic::ContentFilteredTopic<HelloWorld::Greeting> cft(topic, "big_greetings", filter);
+  CHECK(cft.name() == "big_greetings");
+  CHECK(cft.type_name() == "HelloWorld::Greeting");
+  CHECK(cft.topic() == topic);
+  CHECK(cft.filter_expression() == "index > %0 AND message LIKE 'h%'");
+  CHECK(cft.filter_parameters().size() == 1);
+  dds::pub::Publisher pub(dp);
+  dds::sub::Subscriber sub(dp);
+  dds::sub::DataReader<HelloWorld::Greeting> reader(sub, cft, reliable_reader(sub));
+  dds::pub::DataWriter<HelloWorld::Greeting> writer(pub, topic, reliable_writer(pub));
+  CHECK(writer.wait_for_subscriptions(1, Duration(5)));
+  for (uint32_t i = 1; i <= 6; i++) writer << HelloWorld::Greeting(i, i == 5 ? "bye" : "hello");
+  writer.wait_for_acknowledgments(Duration(5));
+  std::vector<uint32_t> got;
+  CHECK(eventually([&] {
+    for (const auto& s : reader.take()) got.push_back(s.data().index());
+    return got.size() >= 2;
+  }));
+  CHECK(got == std::vector<uint32_t>({4, 6}));
+  std::vector<std::string> params{"5"};
+  cft.filter_parameters(params.begin(), params.end());
+  CHECK(cft.filter_parameters() == params);
+  for (uint32_t i = 1; i <= 7; i++) writer << HelloWorld::Greeting(i, "hello");
+  writer.wait_for_acknowledgments(Duration(5));
+  got.clear();
+  CHECK(eventually([&] {
+    for (const auto& s : reader.take()) got.push_back(s.data().index());
+    return got.size() >= 2;
+  }));
+  CHECK(got == std::vector<uint32_t>({6, 7}));
+  bool threw = false;
+  try {
+    dds::topic::ContentFilteredTopic<HelloWorld::Greeting> bad(topic, "bad", dds::topic::Filter("nope = 1"));
+  } catch (const dds::core::Exception&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
 int main() { return check::run_all(); }

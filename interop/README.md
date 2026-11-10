@@ -52,6 +52,20 @@ once, before there is a subscriber, then waits for one and for its
 acknowledgments. The subscriber creates its reader two seconds late and
 must still get all of them, in order.
 
+The `-filtered` cases (rustorb-dds#56) are like the reliable ones, but
+the subscriber reads a content filtered topic, `index > %0 AND message
+LIKE 'Hello%'` with half the count for `%0`, and must get exactly the
+samples after the first half, in order. The rustorb-dds reader announces
+its filter (`PID_CONTENT_FILTER_PROPERTY`) and filters what comes. Cyclone
+DDS 0.10.4 has no SQL filters, so only its writer takes part. Fast DDS
+2.11.2 makes a ContentFilteredTopic only of a type whose TypeObject it
+has, so its side is `hello_filtered`, built with the code of `fastddsgen
+-typeobject` (the other programs are built without it). Observed: the
+Fast DDS writer, with the TypeObject, still sends every sample to the
+rustorb-dds reader rather than filtering on its side; the Fast DDS reader
+announces its filter in the layout of DDSI-RTPS 2.5, 9.6.3.1 (a capture
+is in the `fast_dds_content_filter` test of `rustorb-rtps`).
+
 The `-v<N>-to-<peer>-v<M>-<kind>` cases (Cyclone DDS only: Fast DDS
 2.11.2 has no TypeLookup service) use the `evolve` programs (the `evolve`
 example on the rustorb-dds side): the publisher has version N of the type

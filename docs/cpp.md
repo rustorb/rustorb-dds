@@ -63,6 +63,7 @@ done
 - 状態：`StatusMask` と各状態のクラス（PSM のつづり `offered_deadlined_missed_status`、`offered_incompatible_qos_staus` も）
 - `DataWriterListener<T>`、`DataReaderListener<T>` と `NoOp` 版
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`（`wait`、`dispatch` と条件の `handler`）
+- `dds::topic::ContentFilteredTopic<T>`（`topic`、`filter_expression`、`filter_parameters` の取得と変更）と `dds::topic::Filter`。`DataReader` は `ContentFilteredTopic` からも作れる
 - 例外：`ReturnCode_t` ごとの PSM の例外（`dds::core::TimeoutError` など）
 
 entity は PSM どおり参照で、写しは同じ entity を指す。最後の参照がなくなるか `close()` で削除する。子は親を生かしておく。`dds::core::null` から作ったものは何も指さず、`== dds::core::null` が真になる。

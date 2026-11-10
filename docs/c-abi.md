@@ -56,6 +56,10 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 - listener は関数表と `self`。どの関数も NULL でよい。ライブラリのスレッドから呼ばれる。ただし同じ参加者の writer が書いたときは、その `rdds_writer_*` の呼び出しの中で、呼び出し側のスレッドから呼ばれる。ライブラリのロックは持たないので、listener からどの関数を呼んでもよい。`release` は listener が置き換えられたとき、または entity が削除されたときに一度だけ呼ばれる。C++ と Java はここで自分のオブジェクトの参照を手放す
 - 読み取りは `rdds_reader_select`（状態のマスク、インスタンス指定、次のインスタンス）と `rdds_reader_select_w_condition`。結果の `rdds_samples` からサンプル情報と、サンプルごとの入力ストリームを取る
 
+### Content filtered topic
+
+`rdds_participant_create_contentfilteredtopic` は `rdds_topic` からフィルタ式（DDS 1.4 付録 B）とその引数の文字列で `rdds_cftopic` を作る。その reader は `rdds_subscriber_create_filtered_reader` で作り、ほかの reader と同じに読む。引数は `rdds_cftopic_set_expression_parameters` で変えられる。式が型に合わなければ `RDDS_RETCODE_BAD_PARAMETER`。
+
 ### WaitSet と条件
 
 guard・status・read の各条件は一つのハンドル型 `rdds_condition`。`rdds_waitset_wait` は真になった条件を、付けた順の番号で返す。言語側は番号から自分の条件オブジェクトを引く。

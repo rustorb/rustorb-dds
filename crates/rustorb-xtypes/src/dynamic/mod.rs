@@ -12,6 +12,8 @@
 //!   with getters and setters by member ID, and their XCDR1 and XCDR2
 //!   serialization (7.4.3, [`DynamicData::to_payload`],
 //!   [`DynamicData::from_payload`]).
+//! - [`ContentFilter`]: the filter expressions of content filtered
+//!   topics (DDS 1.4, Annex B), evaluated on DynamicData.
 //!
 //! The API follows the names of the specification, in Rust: operations
 //! return [`Result`](crate::Result) instead of a `ReturnCode_t`, the
@@ -24,9 +26,11 @@
 mod cdr;
 mod convert;
 mod data;
+pub mod filter;
 mod ty;
 
 pub use data::{DynamicData, DynamicDataFactory};
+pub use filter::ContentFilter;
 pub use ty::{
     DynamicType, DynamicTypeBuilder, DynamicTypeBuilderFactory, DynamicTypeMember,
     MemberDescriptor, TypeDescriptor,

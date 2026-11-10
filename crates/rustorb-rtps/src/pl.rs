@@ -241,6 +241,42 @@ impl PlValues {
         Ok(out)
     }
 
+    /// `ContentFilterProperty_t` (9.6.2.2.1): four strings and a
+    /// `sequence<string>`, each string aligned to 4 from the start of the
+    /// value.
+    pub fn content_filter(
+        &self,
+        p: &Parameter,
+    ) -> Result<crate::sedp::ContentFilterProperty, DecodeError> {
+        let mut r = self.reader(p);
+        let string = |r: &mut Reader<'_>| -> Result<String, DecodeError> {
+            let pad = (4 - r.position() % 4) % 4;
+            r.skip(pad).map_err(|_| bad(p.id))?;
+            read_string(r).ok_or(bad(p.id))
+        };
+        let content_filtered_topic_name = string(&mut r)?;
+        let related_topic_name = string(&mut r)?;
+        let filter_class_name = string(&mut r)?;
+        let filter_expression = string(&mut r)?;
+        let pad = (4 - r.position() % 4) % 4;
+        r.skip(pad).map_err(|_| bad(p.id))?;
+        let n = r.u32().map_err(|_| bad(p.id))? as usize;
+        if n > r.remaining() / 4 {
+            return Err(bad(p.id));
+        }
+        let mut expression_parameters = Vec::with_capacity(n);
+        for _ in 0..n {
+            expression_parameters.push(string(&mut r)?);
+        }
+        Ok(crate::sedp::ContentFilterProperty {
+            content_filtered_topic_name,
+            related_topic_name,
+            filter_class_name,
+            filter_expression,
+            expression_parameters,
+        })
+    }
+
     /// `sequence<octet>`.
     pub fn octets(&self, p: &Parameter) -> Result<Vec<u8>, DecodeError> {
         let mut r = self.reader(p);
@@ -323,6 +359,31 @@ impl PlBuilder {
         self.build(id, |w| {
             w.u32(v.len() as u32);
             for s in v {
+                w.align4();
+                write_string(w, s);
+            }
+        })
+    }
+
+    /// `ContentFilterProperty_t` (9.6.2.2.1).
+    pub fn content_filter(
+        &self,
+        id: ParameterId,
+        v: &crate::sedp::ContentFilterProperty,
+    ) -> Parameter {
+        self.build(id, |w| {
+            for s in [
+                &v.content_filtered_topic_name,
+                &v.related_topic_name,
+                &v.filter_class_name,
+                &v.filter_expression,
+            ] {
+                w.align4();
+                write_string(w, s);
+            }
+            w.align4();
+            w.u32(v.expression_parameters.len() as u32);
+            for s in &v.expression_parameters {
                 w.align4();
                 write_string(w, s);
             }

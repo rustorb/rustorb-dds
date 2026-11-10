@@ -7,7 +7,7 @@ A DDS (Data Distribution Service) implementation in Rust, from the
 exchange samples with reliable or best-effort writers and readers over
 UDPv4, with keyed instances, large samples (DATA_FRAG), TRANSIENT_LOCAL
 durability, partitions, LIVELINESS and DEADLINE, and WaitSets, conditions
-and listeners for the communication statuses. Hello world works both ways with Cyclone DDS
+and listeners for the communication statuses, and content filtered topics. Hello world works both ways with Cyclone DDS
 and Fast DDS, reliable transient-local and liveliness too, and `std_msgs/msg/String` both ways
 with ROS 2's demo talker and listener ([interop](interop/)). The plan is
 [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111).
@@ -58,7 +58,7 @@ GPL-3.0-or-later, and the code it generates is not covered by that license.
 3. **D2**: reliable delivery, DATA_FRAG, keyed instances, History/Durability/Liveliness/Deadline, WaitSet; ROS 2 talker/listener
 4. **D3**: TypeObject, assignability, TypeLookup, DynamicData, Python binding
 5. **D4**: C++/Java, OpenRTM-aist 2.0, TypeCode ⇄ TypeObject
-6. **Later**: DDS Security, shared memory, content-filtered topics, DDS-RPC
+6. **D5** (in progress, #55): content-filtered topics, DDS-RPC, shared memory, DDS Security
 
 ## Clean room
 

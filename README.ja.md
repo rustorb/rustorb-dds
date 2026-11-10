@@ -2,7 +2,7 @@
 
 Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://github.com/rustorb/rustorb) プロジェクトの一部です（[English](README.md)）。
 
-**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL の durability、パーティション、LIVELINESS と DEADLINE、通信状態の WaitSet・Condition・listener にも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable、transient-local、liveliness でも通ります。ROS 2 のデモの talker・listener とも `std_msgs/msg/String` を両方向にやり取りできます（[interop](interop/)）。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL の durability、パーティション、LIVELINESS と DEADLINE、通信状態の WaitSet・Condition・listener、Content Filtered Topic にも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable、transient-local、liveliness でも通ります。ROS 2 のデモの talker・listener とも `std_msgs/msg/String` を両方向にやり取りできます（[interop](interop/)）。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
 
 hello world は、2 つの端末で次を実行すると試せます。
 
@@ -44,7 +44,7 @@ XCDR1/XCDR2 の符号化は `rustorb-cdr` に、DDS の型サポートの trait 
 3. **D2**: reliable、DATA_FRAG、キー付きインスタンス、History/Durability/Liveliness/Deadline、WaitSet。ROS 2 の talker/listener と接続
 4. **D3**: TypeObject、型の互換判定、TypeLookup、DynamicData、Python バインディング
 5. **D4**: C++/Java、OpenRTM-aist 2.0、TypeCode ⇄ TypeObject の橋渡し
-6. **後回し**: DDS Security、共有メモリ、Content Filtered Topic、DDS-RPC
+6. **D5**（進行中、#55）: Content Filtered Topic、DDS-RPC、共有メモリ、DDS Security
 
 ## clean-room
 

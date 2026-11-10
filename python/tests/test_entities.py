@@ -159,3 +159,34 @@ def test_discover_topic_type():
     w.write(Shape(9, 1, "dyn"))
     assert r.wait_for_data(5.0)
     assert r.take()[0].data == {"id": 9, "index": 1, "message": "dyn"}
+
+
+def test_content_filtered_topic():
+    p = dds.DomainParticipant(28, localhost=True)
+    topic = p.create_topic("FilteredShapes", Shape)
+    cft = p.create_contentfilteredtopic(
+        "BigShapes", topic, "index > %0 AND message LIKE 'm%'", [2])
+    assert cft.name == "BigShapes"
+    assert cft.type_name == "Keyed::Shape"
+    assert cft.related_topic is topic
+    assert cft.expression_parameters == ["2"]
+    reader = p.create_subscriber().create_datareader(cft, RELIABLE)
+    writer = p.create_publisher().create_datawriter(topic, RELIABLE)
+    assert writer.wait_for_subscriptions(1, 5.0)
+    for i in range(6):
+        writer.write(Shape(i, i, "x" if i == 4 else "m"))
+    writer.wait_for_acknowledgments(5.0)
+    assert reader.wait_for_data(5.0)
+    got = []
+    for _ in range(50):
+        got += [s.data.index for s in reader.take() if s.data]
+        if len(got) >= 2:
+            break
+        threading.Event().wait(0.05)
+    assert got == [3, 5]
+    cft.set_expression_parameters(["4"])
+    assert cft.expression_parameters == ["4"]
+    with pytest.raises(ValueError):
+        cft.set_expression_parameters([])
+    with pytest.raises(ValueError):
+        p.create_contentfilteredtopic("Bad", topic, "nope = 1")

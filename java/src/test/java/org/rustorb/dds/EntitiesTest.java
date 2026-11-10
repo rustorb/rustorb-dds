@@ -58,6 +58,7 @@ import org.omg.dds.sub.Sample;
 import org.omg.dds.sub.SampleState;
 import org.omg.dds.sub.Subscriber;
 import org.omg.dds.sub.ViewState;
+import org.omg.dds.topic.ContentFilteredTopic;
 import org.omg.dds.topic.Topic;
 import org.omg.dds.type.TypeSupport;
 
@@ -114,6 +115,42 @@ class EntitiesTest {
         // Only writer and reader listeners.
         assertThrows(UnsupportedOperationException.class,
                 () -> dp.setListener(new DomainParticipantAdapter()));
+    }
+
+    @Test
+    void contentFilteredTopic() throws Exception {
+        Topic<Greeting> topic = dp.createTopic("filtered_greetings", Greeting.class);
+        ContentFilteredTopic<Greeting> cft = dp.createContentFilteredTopic("big_greetings", topic,
+                "index > %0 AND message LIKE 'h%'", "3");
+        assertEquals("big_greetings", cft.getName());
+        assertEquals("HelloWorld::Greeting", cft.getTypeName());
+        assertSame(topic, cft.getRelatedTopic());
+        assertSame(cft, dp.lookupTopicDescription("big_greetings"));
+        assertEquals(List.of("3"), cft.getExpressionParameters());
+        Publisher pub = dp.createPublisher();
+        Subscriber sub = dp.createSubscriber();
+        DataWriter<Greeting> writer = pub.createDataWriter(topic, reliableWriter(pub));
+        DataReader<Greeting> reader = sub.createDataReader(cft, reliableReader(sub));
+        assertSame(cft, reader.getTopicDescription());
+        Rustorb.waitForSubscriptions(writer, 1, tenSeconds);
+        for (int i = 1; i <= 6; i++) {
+            writer.write(new Greeting(i, i == 5 ? "bye" : "hello"));
+        }
+        writer.waitForAcknowledgments(tenSeconds);
+        List<Integer> got = new ArrayList<>();
+        long end = System.nanoTime() + 10_000_000_000L;
+        while (got.size() < 2 && System.nanoTime() < end) {
+            for (Sample<Greeting> s : takeAll(reader)) {
+                got.add(s.getData().index);
+            }
+            Thread.sleep(10);
+        }
+        assertEquals(List.of(4, 6), got);
+        cft.setExpressionParameters("5");
+        assertEquals(List.of("5"), cft.getExpressionParameters());
+        assertThrows(RuntimeException.class, () -> cft.setExpressionParameters(List.of()));
+        assertThrows(RuntimeException.class,
+                () -> dp.createContentFilteredTopic("bad", topic, "nope = 1"));
     }
 
     @Test

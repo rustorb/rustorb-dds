@@ -671,6 +671,134 @@ fn samples_go_from_a_writer_to_a_reader() {
 }
 
 #[test]
+fn content_filtered_topics_filter_samples() {
+    let inner = inner_type();
+    unsafe {
+        let mut p = null_mut();
+        ok(rdds_participant_new(
+            41,
+            null(),
+            PARTICIPANT_LOCALHOST,
+            &mut p,
+        ));
+        let mut topic = null_mut();
+        ok(rdds_participant_create_topic(
+            p,
+            c"inners".as_ptr(),
+            inner.0,
+            &mut topic,
+        ));
+        let mut cft = null_mut();
+        assert_eq!(
+            rdds_participant_create_contentfilteredtopic(
+                p,
+                c"bad".as_ptr(),
+                topic,
+                c"nope > 1".as_ptr(),
+                null(),
+                0,
+                &mut cft,
+            ),
+            BAD_PARAMETER
+        );
+        let params = [c"1".as_ptr()];
+        ok(rdds_participant_create_contentfilteredtopic(
+            p,
+            c"big_ids".as_ptr(),
+            topic,
+            c"id > %0 AND big LIKE 'x%'".as_ptr(),
+            params.as_ptr(),
+            1,
+            &mut cft,
+        ));
+        let mut publisher = null_mut();
+        ok(rdds_participant_create_publisher(p, null(), &mut publisher));
+        let mut subscriber = null_mut();
+        ok(rdds_participant_create_subscriber(
+            p,
+            null(),
+            &mut subscriber,
+        ));
+        let mut wq = std::mem::zeroed();
+        ok(rdds_writer_qos_default(&mut wq));
+        wq.history_kind = 1;
+        let mut rq = std::mem::zeroed();
+        ok(rdds_reader_qos_default(&mut rq));
+        rq.reliability_kind = 1;
+        rq.history_kind = 1;
+        let mut r = null_mut();
+        ok(rdds_subscriber_create_filtered_reader(
+            subscriber,
+            cft,
+            &rq,
+            null(),
+            0,
+            &mut r,
+        ));
+        let mut w = null_mut();
+        ok(rdds_publisher_create_writer(
+            publisher,
+            topic,
+            &wq,
+            null(),
+            0,
+            &mut w,
+        ));
+        ok(rdds_writer_wait_for_subscriptions(w, 1, WAIT));
+        let ids = |r: *mut RddsReader| {
+            let mut samples = null_mut();
+            ok(rdds_reader_select(
+                r,
+                true,
+                3,
+                3,
+                7,
+                SELECT_ANY,
+                null(),
+                &mut samples,
+            ));
+            let mut got = Vec::new();
+            for i in 0..rdds_samples_count(samples) {
+                let mut src = null_mut();
+                ok(rdds_samples_data(samples, i, &mut src));
+                got.push(rdds_in_int32(src));
+                rdds_in_release(src);
+            }
+            rdds_samples_release(samples);
+            got.sort();
+            got
+        };
+        for (id, big) in [(1, "x"), (2, "x"), (3, "y"), (4, "xx")] {
+            write_inner(w, id, big);
+        }
+        ok(rdds_writer_wait_for_acknowledgments(w, WAIT));
+        assert_eq!(ids(r), [2, 4]);
+        let params = [c"3".as_ptr()];
+        ok(rdds_cftopic_set_expression_parameters(
+            cft,
+            params.as_ptr(),
+            1,
+        ));
+        assert_eq!(
+            rdds_cftopic_set_expression_parameters(cft, null(), 0),
+            BAD_PARAMETER
+        );
+        for (id, big) in [(2, "x"), (5, "x")] {
+            write_inner(w, id, big);
+        }
+        ok(rdds_writer_wait_for_acknowledgments(w, WAIT));
+        assert_eq!(ids(r), [5]);
+        rdds_writer_release(w);
+        rdds_reader_release(r);
+        rdds_publisher_release(publisher);
+        rdds_subscriber_release(subscriber);
+        rdds_cftopic_release(cft);
+        rdds_topic_release(topic);
+        rdds_participant_release(p);
+    }
+}
+
+#[test]
 fn bad_arguments_fail_with_a_message() {
     unsafe {
         let mut t = null_mut();

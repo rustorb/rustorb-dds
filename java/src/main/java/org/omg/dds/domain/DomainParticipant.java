@@ -17,6 +17,7 @@ import org.omg.dds.pub.PublisherQos;
 import org.omg.dds.sub.Subscriber;
 import org.omg.dds.sub.SubscriberListener;
 import org.omg.dds.sub.SubscriberQos;
+import org.omg.dds.topic.ContentFilteredTopic;
 import org.omg.dds.topic.Topic;
 import org.omg.dds.topic.TopicDescription;
 import org.omg.dds.topic.TopicListener;
@@ -61,6 +62,18 @@ public interface DomainParticipant extends Entity<DomainParticipantListener, Dom
 
     /** A topic of this participant by name, or null. */
     public <TYPE> TopicDescription<TYPE> lookupTopicDescription(String name);
+
+    public <TYPE> ContentFilteredTopic<TYPE> createContentFilteredTopic(
+            String name,
+            Topic<? extends TYPE> relatedTopic,
+            String filterExpression,
+            java.util.List<String> expressionParameters);
+
+    public <TYPE> ContentFilteredTopic<TYPE> createContentFilteredTopic(
+            String name,
+            Topic<? extends TYPE> relatedTopic,
+            String filterExpression,
+            String... expressionParameters);
 
     public void closeContainedEntities();
 
