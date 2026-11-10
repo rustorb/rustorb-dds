@@ -528,6 +528,7 @@ typedef struct rdds_reader_listener {
 
 typedef struct rdds_participant rdds_participant;
 typedef struct rdds_topic rdds_topic;
+typedef struct rdds_cftopic rdds_cftopic;
 typedef struct rdds_publisher rdds_publisher;
 typedef struct rdds_subscriber rdds_subscriber;
 typedef struct rdds_writer rdds_writer;
@@ -558,6 +559,18 @@ rdds_status rdds_participant_create_topic(const rdds_participant *p,
 void rdds_topic_release(rdds_topic *t);
 rdds_status rdds_topic_inconsistent_topic_status(const rdds_topic *t,
                                                  rdds_count_status *out);
+
+/* A content filtered topic of related (DDS 1.4, 2.2.2.3.3): its readers
+ * get the samples that pass the filter expression (DDS 1.4, Annex B),
+ * with n parameters for its %0 .. %99. RDDS_RETCODE_BAD_PARAMETER for an
+ * expression not valid for the type. */
+rdds_status rdds_participant_create_contentfilteredtopic(
+    const rdds_participant *p, const char *name, const rdds_topic *related,
+    const char *expression, const char *const *parameters, size_t n,
+    rdds_cftopic **out);
+void rdds_cftopic_release(rdds_cftopic *t);
+rdds_status rdds_cftopic_set_expression_parameters(
+    const rdds_cftopic *t, const char *const *parameters, size_t n);
 
 /* qos: NULL for the default. */
 rdds_status rdds_participant_create_publisher(const rdds_participant *p,
@@ -626,6 +639,11 @@ rdds_status rdds_subscriber_create_reader(const rdds_subscriber *s,
                                           const rdds_reader_qos *qos,
                                           const rdds_reader_listener *listener,
                                           uint32_t mask, rdds_reader **out);
+/* A reader of a content filtered topic. */
+rdds_status rdds_subscriber_create_filtered_reader(
+    const rdds_subscriber *s, const rdds_cftopic *topic,
+    const rdds_reader_qos *qos, const rdds_reader_listener *listener,
+    uint32_t mask, rdds_reader **out);
 void rdds_reader_release(rdds_reader *r);
 rdds_status rdds_reader_guid(const rdds_reader *r, rdds_guid *out);
 

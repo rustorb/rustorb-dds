@@ -34,6 +34,9 @@ template <typename T>
 class Topic;
 template <typename T>
 class TopicListener;
+template <typename T>
+class ContentFilteredTopic;
+class Filter;
 }  // namespace topic
 namespace pub {
 class Publisher;
@@ -222,6 +225,19 @@ struct topic_impl {
   }
 };
 
+struct cftopic_impl {
+  handle<rdds_cftopic, rdds_cftopic_release> t;
+  std::shared_ptr<topic_impl> topic;
+  std::string name;
+  std::string expression;
+  std::vector<std::string> parameters;
+
+  rdds_cftopic* get() const {
+    if (!t.h) closed();
+    return t.h;
+  }
+};
+
 struct publisher_impl {
   handle<rdds_publisher, rdds_publisher_release> p;
   std::shared_ptr<participant_impl> participant;
@@ -271,6 +287,8 @@ struct reader_impl {
   handle<rdds_reader, rdds_reader_release> r;
   std::shared_ptr<subscriber_impl> subscriber;
   std::shared_ptr<topic_impl> topic;
+  // The content filtered topic it reads, if any.
+  std::shared_ptr<cftopic_impl> cftopic;
   ::dds::sub::qos::DataReaderQos qos;
   ::dds::sub::DataReaderListener<T>* listener = nullptr;
   ::dds::core::status::StatusMask mask;
@@ -459,6 +477,88 @@ class Topic {
  private:
   rustorb::dds::detail::topic_impl& impl() const { return rustorb::dds::detail::deref(impl_); }
   std::shared_ptr<rustorb::dds::detail::topic_impl> impl_;
+};
+
+// A filter expression (DDS 1.4, Annex B) and its parameters, for a
+// ContentFilteredTopic.
+class Filter {
+ public:
+  using const_iterator = std::vector<std::string>::const_iterator;
+
+  Filter(const std::string& query_expression) : expression_(query_expression) {}
+  template <typename FWIterator>
+  Filter(const std::string& query_expression, const FWIterator& params_begin, const FWIterator& params_end)
+      : expression_(query_expression), parameters_(params_begin, params_end) {}
+  Filter(const std::string& query_expression, const std::vector<std::string>& params)
+      : expression_(query_expression), parameters_(params) {}
+
+  const std::string& expression() const { return expression_; }
+  const_iterator begin() const { return parameters_.begin(); }
+  const_iterator end() const { return parameters_.end(); }
+  template <typename FWIterator>
+  void parameters(const FWIterator& begin, const FWIterator& end) {
+    parameters_.assign(begin, end);
+  }
+  void add_parameter(const std::string& param) { parameters_.push_back(param); }
+  uint32_t parameters_length() const { return static_cast<uint32_t>(parameters_.size()); }
+  // rustorb
+  const std::vector<std::string>& rustorb_parameters() const { return parameters_; }
+
+ private:
+  std::string expression_;
+  std::vector<std::string> parameters_;
+};
+
+// A topic whose readers get only the samples of its related topic that
+// pass a filter (DDS 1.4, 2.2.2.3.3). The type must have been generated
+// with -Wbxtypes, so that its fields can be read by name.
+template <typename T>
+class ContentFilteredTopic {
+ public:
+  using DataType = T;
+
+  ContentFilteredTopic(const ::dds::core::null_type&) {}
+  ContentFilteredTopic(const Topic<T>& topic, const std::string& name, const Filter& filter)
+      : topic_(topic) {
+    auto impl = std::make_shared<rustorb::dds::detail::cftopic_impl>();
+    impl->topic = topic.rustorb_impl();
+    impl->name = name;
+    impl->expression = filter.expression();
+    impl->parameters = filter.rustorb_parameters();
+    auto params = rustorb::dds::detail::c_strings(impl->parameters);
+    rdds_cftopic* t = nullptr;
+    rustorb::dds::detail::check(rdds_participant_create_contentfilteredtopic(
+        rustorb::dds::detail::deref(impl->topic->participant).get(), name.c_str(),
+        rustorb::dds::detail::deref(impl->topic).get(), impl->expression.c_str(), params.data(), params.size(), &t));
+    impl->t.h = t;
+    impl_ = impl;
+  }
+
+  const std::string& name() const { return impl().name; }
+  const std::string& type_name() const { return topic_.type_name(); }
+  const Topic<T>& topic() const { return topic_; }
+  const std::string& filter_expression() const { return impl().expression; }
+  const std::vector<std::string>& filter_parameters() const { return impl().parameters; }
+  Filter filter() const { return Filter(impl().expression, impl().parameters); }
+  template <typename FWIterator>
+  void filter_parameters(const FWIterator& begin, const FWIterator& end) {
+    std::vector<std::string> p(begin, end);
+    auto params = rustorb::dds::detail::c_strings(p);
+    rustorb::dds::detail::check(rdds_cftopic_set_expression_parameters(impl().get(), params.data(), params.size()));
+    impl().parameters = std::move(p);
+  }
+  void close() { impl().t.reset(); }
+
+  friend bool operator==(const ContentFilteredTopic& a, const ContentFilteredTopic& b) { return a.impl_ == b.impl_; }
+  friend bool operator!=(const ContentFilteredTopic& a, const ContentFilteredTopic& b) { return a.impl_ != b.impl_; }
+
+  // rustorb
+  const std::shared_ptr<rustorb::dds::detail::cftopic_impl>& rustorb_impl() const { return impl_; }
+
+ private:
+  rustorb::dds::detail::cftopic_impl& impl() const { return rustorb::dds::detail::deref(impl_); }
+  Topic<T> topic_ = Topic<T>(::dds::core::null);
+  std::shared_ptr<rustorb::dds::detail::cftopic_impl> impl_;
 };
 
 }  // namespace topic
@@ -1096,6 +1196,30 @@ class DataReader {
     rustorb::dds::detail::check(rdds_subscriber_create_reader(rustorb::dds::detail::deref(impl->subscriber).get(),
                                                               rustorb::dds::detail::deref(impl->topic).get(), &c,
                                                               b ? &l : nullptr, mask.c(), &r));
+    impl->r.h = r;
+    impl_ = impl;
+    if (b) b->ready(impl_);
+  }
+  DataReader(const Subscriber& sub, const ::dds::topic::ContentFilteredTopic<T>& topic)
+      : DataReader(sub, topic, sub.default_datareader_qos()) {}
+  DataReader(const Subscriber& sub, const ::dds::topic::ContentFilteredTopic<T>& topic,
+             const qos::DataReaderQos& qos, DataReaderListener<T>* listener = nullptr,
+             const ::dds::core::status::StatusMask& mask = ::dds::core::status::StatusMask::all()) {
+    auto impl = std::make_shared<impl_type>();
+    impl->subscriber = sub.rustorb_impl();
+    impl->topic = topic.topic().rustorb_impl();
+    impl->cftopic = topic.rustorb_impl();
+    impl->qos = qos;
+    impl->listener = listener;
+    impl->mask = mask;
+    rdds_reader_qos c;
+    rustorb::dds::detail::to_c(qos, c);
+    box* b = listener ? new box(listener) : nullptr;
+    rdds_reader_listener l = table(b);
+    rdds_reader* r = nullptr;
+    rustorb::dds::detail::check(rdds_subscriber_create_filtered_reader(
+        rustorb::dds::detail::deref(impl->subscriber).get(), rustorb::dds::detail::deref(impl->cftopic).get(), &c,
+        b ? &l : nullptr, mask.c(), &r));
     impl->r.h = r;
     impl_ = impl;
     if (b) b->ready(impl_);

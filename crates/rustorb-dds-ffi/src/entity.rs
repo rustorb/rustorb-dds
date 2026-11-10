@@ -7,14 +7,15 @@ use std::ffi::{c_char, c_void};
 use std::time::Duration;
 
 use rustorb_dds::{
-    DataReader, DataReaderListener, DataReaderQos, DataWriter, DataWriterListener, DataWriterQos,
-    DeadlineMissedStatus, DomainParticipant, DurabilityKind, DynamicData, DynamicType, Guid,
-    History, IncompatibleQosStatus, InconsistentTopicStatus, InstanceHandle, InstanceState,
-    InstanceStateMask, Liveliness, LivelinessChangedStatus, LivelinessKind, LivelinessLostStatus,
-    MatchedStatus, ParticipantConfig, Publisher, PublisherQos, Reliability, ReliabilityKind,
-    ResourceLimits, Sample, SampleLostStatus, SampleRejectedReason, SampleRejectedStatus,
-    SampleState, SampleStateMask, StateFilter, StatusMask, Subscriber, SubscriberQos, Time, Topic,
-    TypeConsistency, TypeConsistencyKind, ViewState, ViewStateMask, data_representation,
+    ContentFilteredTopic, DataReader, DataReaderListener, DataReaderQos, DataWriter,
+    DataWriterListener, DataWriterQos, DeadlineMissedStatus, DomainParticipant, DurabilityKind,
+    DynamicData, DynamicType, Guid, History, IncompatibleQosStatus, InconsistentTopicStatus,
+    InstanceHandle, InstanceState, InstanceStateMask, Liveliness, LivelinessChangedStatus,
+    LivelinessKind, LivelinessLostStatus, MatchedStatus, ParticipantConfig, Publisher,
+    PublisherQos, Reliability, ReliabilityKind, ResourceLimits, Sample, SampleLostStatus,
+    SampleRejectedReason, SampleRejectedStatus, SampleState, SampleStateMask, StateFilter,
+    StatusMask, Subscriber, SubscriberQos, Time, Topic, TypeConsistency, TypeConsistencyKind,
+    ViewState, ViewStateMask, data_representation,
 };
 
 use crate::condition::RddsCondition;
@@ -937,6 +938,74 @@ pub unsafe extern "C" fn rdds_topic_inconsistent_topic_status(
     })
 }
 
+/// `rdds_cftopic`: a content filtered topic, and its type.
+#[derive(Debug)]
+pub struct RddsCfTopic {
+    topic: ContentFilteredTopic<DynamicData>,
+    ty: DynamicType,
+}
+
+/// `n` C strings at `v`.
+unsafe fn strings(v: *const *const c_char, n: usize, what: &str) -> Res<Vec<String>> {
+    unsafe { slice(v, n) }?
+        .iter()
+        .map(|p| Ok(unsafe { cstr(*p, what) }?.to_owned()))
+        .collect()
+}
+
+/// `rdds_participant_create_contentfilteredtopic`: a content filtered
+/// topic named `name` of `related`, with the filter `expression`
+/// (DDS 1.4, Annex B) and `n` parameters at `parameters`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_participant_create_contentfilteredtopic(
+    p: *const DomainParticipant,
+    name: *const c_char,
+    related: *const RddsTopic,
+    expression: *const c_char,
+    parameters: *const *const c_char,
+    n: usize,
+    out: *mut *mut RddsCfTopic,
+) -> Status {
+    guard(|| {
+        let p = unsafe { obj(p, "the participant") }?;
+        let name = unsafe { cstr(name, "the topic name") }?;
+        let related = unsafe { obj(related, "the related topic") }?;
+        let expression = unsafe { cstr(expression, "the filter expression") }?;
+        let parameters = unsafe { strings(parameters, n, "an expression parameter") }?;
+        let topic = p.create_contentfilteredtopic(name, &related.topic, expression, &parameters)?;
+        unsafe {
+            put(
+                out,
+                RddsCfTopic {
+                    topic,
+                    ty: related.ty.clone(),
+                },
+            )
+        }
+    })
+}
+
+/// `rdds_cftopic_release`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_cftopic_release(t: *mut RddsCfTopic) {
+    unsafe { release(t) }
+}
+
+/// `rdds_cftopic_set_expression_parameters`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_cftopic_set_expression_parameters(
+    t: *const RddsCfTopic,
+    parameters: *const *const c_char,
+    n: usize,
+) -> Status {
+    guard(|| {
+        let t = unsafe { obj(t, "the topic") }?;
+        let parameters = unsafe { strings(parameters, n, "an expression parameter") }?;
+        t.topic.set_expression_parameters(&parameters)?;
+        Ok(())
+    })
+}
+
 /// `rdds_participant_create_publisher`: `qos` NULL for the default.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdds_participant_create_publisher(
@@ -1243,6 +1312,42 @@ pub unsafe extern "C" fn rdds_writer_set_listener(
 pub unsafe extern "C" fn rdds_subscriber_create_reader(
     s: *const Subscriber,
     topic: *const RddsTopic,
+    qos: *const RddsReaderQos,
+    listener: *const RddsReaderListener,
+    mask: u32,
+    out: *mut *mut RddsReader,
+) -> Status {
+    guard(|| {
+        let s = unsafe { obj(s, "the subscriber") }?;
+        let t = unsafe { obj(topic, "the topic") }?;
+        let qos = unsafe { reader_qos(qos) }?;
+        let inner = match unsafe { listener.as_ref() } {
+            None => s.create_datareader_with_qos(&t.topic, qos)?,
+            Some(l) => s.create_datareader_with_listener(
+                &t.topic,
+                qos,
+                ReaderCallbacks(*l),
+                StatusMask(mask),
+            )?,
+        };
+        unsafe {
+            put(
+                out,
+                RddsReader {
+                    inner,
+                    ty: t.ty.clone(),
+                },
+            )
+        }
+    })
+}
+
+/// `rdds_subscriber_create_filtered_reader`: a reader of a content
+/// filtered topic.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_subscriber_create_filtered_reader(
+    s: *const Subscriber,
+    topic: *const RddsCfTopic,
     qos: *const RddsReaderQos,
     listener: *const RddsReaderListener,
     mask: u32,
