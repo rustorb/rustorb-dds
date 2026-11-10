@@ -799,6 +799,103 @@ fn content_filtered_topics_filter_samples() {
 }
 
 #[test]
+fn requesters_get_the_replies_of_repliers() {
+    use rustorb_dds_ffi::rpc::*;
+    let inner = inner_type();
+    let sample = |id: i32, big: &str| unsafe {
+        let mut out = null_mut();
+        ok(rdds_out_new(&mut out));
+        rdds_out_int32(out, id);
+        rdds_out_string(out, big.as_ptr().cast(), big.len());
+        out
+    };
+    unsafe {
+        let mut p = null_mut();
+        ok(rdds_participant_new(
+            42,
+            null(),
+            PARTICIPANT_LOCALHOST,
+            &mut p,
+        ));
+        let (mut rq, mut rp) = (null_mut(), null_mut());
+        ok(rdds_participant_create_topic(
+            p,
+            c"Echo_Request".as_ptr(),
+            inner.0,
+            &mut rq,
+        ));
+        ok(rdds_participant_create_topic(
+            p,
+            c"Echo_Reply".as_ptr(),
+            inner.0,
+            &mut rp,
+        ));
+        let mut replier = null_mut();
+        ok(rdds_replier_new(
+            p,
+            rq,
+            rp,
+            null(),
+            null(),
+            c"echo".as_ptr(),
+            &mut replier,
+        ));
+        let mut requester = null_mut();
+        ok(rdds_requester_new(
+            p,
+            rq,
+            rp,
+            null(),
+            null(),
+            &mut requester,
+        ));
+        ok(rdds_requester_wait_for_service(requester, WAIT));
+        let mut ids = [RddsSampleIdentity::default(); 2];
+        for (i, id) in ids.iter_mut().enumerate() {
+            let s = sample(i as i32 + 1, "ping");
+            ok(rdds_requester_send_request(requester, s, id));
+            rdds_out_release(s);
+        }
+        assert_eq!(ids[1].sequence_number, ids[0].sequence_number + 1);
+        for _ in 0..2 {
+            let (mut src, mut id) = (null_mut(), RddsSampleIdentity::default());
+            ok(rdds_replier_receive_request(
+                replier, WAIT, &mut src, &mut id,
+            ));
+            let n = rdds_in_int32(src);
+            rdds_in_release(src);
+            let s = sample(n * 10, "pong");
+            ok(rdds_replier_send_reply(replier, s, &id));
+            rdds_out_release(s);
+        }
+        for (i, id) in ids.iter().enumerate().rev() {
+            let mut src = null_mut();
+            ok(rdds_requester_receive_reply(requester, id, WAIT, &mut src));
+            assert_eq!(rdds_in_int32(src), (i as i32 + 1) * 10);
+            rdds_in_release(src);
+        }
+        let mut src = null_mut();
+        let short = RddsDuration {
+            sec: 0,
+            nanosec: 100_000_000,
+        };
+        assert_eq!(
+            rdds_requester_receive_reply(requester, &ids[0], short, &mut src),
+            TIMEOUT
+        );
+        assert_eq!(
+            rdds_replier_receive_request(replier, short, &mut src, &mut ids[0]),
+            TIMEOUT
+        );
+        rdds_requester_release(requester);
+        rdds_replier_release(replier);
+        rdds_topic_release(rq);
+        rdds_topic_release(rp);
+        rdds_participant_release(p);
+    }
+}
+
+#[test]
 fn bad_arguments_fail_with_a_message() {
     unsafe {
         let mut t = null_mut();

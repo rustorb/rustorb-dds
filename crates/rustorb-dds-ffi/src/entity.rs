@@ -49,7 +49,7 @@ impl RddsDuration {
         Ok(Some(Duration::new(self.sec as u64, self.nanosec)))
     }
 
-    fn finite(self) -> Res<Duration> {
+    pub(crate) fn finite(self) -> Res<Duration> {
         // An infinite wait is as long as anybody waits.
         Ok(self
             .to_std()?
@@ -121,7 +121,7 @@ pub struct RddsGuid {
 }
 
 impl RddsGuid {
-    fn of(g: Option<Guid>) -> RddsGuid {
+    pub(crate) fn of(g: Option<Guid>) -> RddsGuid {
         RddsGuid {
             value: g.map_or([0; 16], Guid::to_bytes),
         }
@@ -308,7 +308,7 @@ unsafe fn common(
     })
 }
 
-unsafe fn writer_qos(q: *const RddsWriterQos) -> Res<DataWriterQos> {
+pub(crate) unsafe fn writer_qos(q: *const RddsWriterQos) -> Res<DataWriterQos> {
     let Some(q) = (unsafe { q.as_ref() }) else {
         return Ok(DataWriterQos::default());
     };
@@ -343,7 +343,7 @@ unsafe fn writer_qos(q: *const RddsWriterQos) -> Res<DataWriterQos> {
     Ok(qos)
 }
 
-unsafe fn reader_qos(q: *const RddsReaderQos) -> Res<DataReaderQos> {
+pub(crate) unsafe fn reader_qos(q: *const RddsReaderQos) -> Res<DataReaderQos> {
     let Some(q) = (unsafe { q.as_ref() }) else {
         return Ok(DataReaderQos::default());
     };
@@ -817,8 +817,8 @@ impl DataReaderListener<DynamicData> for ReaderCallbacks {
 /// `rdds_topic`.
 #[derive(Debug)]
 pub struct RddsTopic {
-    topic: Topic<DynamicData>,
-    ty: DynamicType,
+    pub(crate) topic: Topic<DynamicData>,
+    pub(crate) ty: DynamicType,
 }
 
 /// `rdds_writer`.
@@ -1419,6 +1419,12 @@ pub struct RddsSampleInfo {
 /// `rdds_samples`: what a read or take returned.
 #[derive(Debug)]
 pub struct RddsSamples(Vec<Sample<DynamicData>>);
+
+impl RddsSamples {
+    pub(crate) fn sample(&self, i: usize) -> Res<&Sample<DynamicData>> {
+        self.0.get(i).ok_or_else(|| bad("no such sample"))
+    }
+}
 
 /// `RDDS_SELECT_ANY`, `RDDS_SELECT_INSTANCE`, `RDDS_SELECT_NEXT_INSTANCE`.
 pub const SELECT_ANY: i32 = 0;

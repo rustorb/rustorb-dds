@@ -1,0 +1,17 @@
+// example_interfaces/srv/AddTwoInts of ROS 2, as ROS 2 puts it on DDS:
+// the service `pkg/srv/Name` is the request struct
+// `pkg::srv::dds_::Name_Request_` and the reply struct
+// `pkg::srv::dds_::Name_Response_` (the rosidl DDS naming).
+module example_interfaces {
+    module srv {
+        module dds_ {
+            struct AddTwoInts_Request_ {
+                int64 a;
+                int64 b;
+            };
+            struct AddTwoInts_Response_ {
+                int64 sum;
+            };
+        };
+    };
+};

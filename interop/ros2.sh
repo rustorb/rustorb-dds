@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs ROS 2's demo talker and listener (demo_nodes_cpp) against the
-# rustorb-dds `ros2` example, in both directions, with each ROS 2
+# rustorb-dds `ros2` example, and its add_two_ints client and server
+# against the `ros2_service` example, in both directions, with each ROS 2
 # middleware given, on this host.
 #
 #   interop/ros2.sh
@@ -14,6 +15,8 @@
 #            (default: rmw_fastrtps_cpp rmw_cyclonedds_cpp)
 #   RUST     the rustorb-dds `ros2` example to run (default: built with
 #            cargo)
+#   RUST_SERVICE  the rustorb-dds `ros2_service` example to run
+#            (default: built with cargo)
 #   OUT      where to write the logs (default target/interop-ros2)
 #   COUNT    messages each listener must hear (default 5)
 #   TIMEOUT  seconds a listener waits (default 30)
@@ -64,6 +67,11 @@ if [ -z "${RUST:-}" ]; then
   log "building the rustorb-dds ros2 example"
   cargo build --quiet --example ros2 || exit 1
   RUST="$ROOT/target/debug/examples/ros2"
+fi
+if [ -z "${RUST_SERVICE:-}" ]; then
+  log "building the rustorb-dds ros2_service example"
+  cargo build --quiet --example ros2_service || exit 1
+  RUST_SERVICE="$ROOT/target/debug/examples/ros2_service"
 fi
 
 DOMAIN=110
@@ -123,9 +131,49 @@ rustorb_to_ros() {
   [ "$rc" -eq 0 ] && [ "$heard" = "$want " ] && result "$name" 1 || result "$name" 0
 }
 
+# A ROS 2 add_two_ints_client, a rustorb-dds server: the client must get
+# the sum of 2 and 3.
+ros_client_to_rustorb() {
+  local rmw=$1 name="$1-client-to-rustorb" dir="$OUT/$1-client-to-rustorb"
+  DOMAIN=$((DOMAIN + 1))
+  if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then return; fi
+  log "$name (domain $DOMAIN)"
+  mkdir -p "$dir"
+  timeout $((TIMEOUT + 5)) "$RUST_SERVICE" server "$DOMAIN" 1 "$TIMEOUT" >"$dir/server.log" 2>&1 &
+  local server=$!
+  RMW_IMPLEMENTATION=$rmw ROS_DOMAIN_ID=$DOMAIN RCUTILS_LOGGING_BUFFERED_STREAM=0 \
+    timeout -s INT "$TIMEOUT" "$DEMO/add_two_ints_client" -a 2 -b 3 >"$dir/client.log" 2>&1
+  wait "$server"
+  local rc=$?
+  grep -q "Result of add_two_ints: 5" "$dir/client.log" && [ "$rc" -eq 0 ] &&
+    result "$name" 1 || result "$name" 0
+}
+
+# A rustorb-dds client, a ROS 2 add_two_ints_server: the client must get
+# COUNT sums right.
+rustorb_client_to_ros() {
+  local rmw=$1 name="rustorb-client-to-$1" dir="$OUT/rustorb-client-to-$1"
+  DOMAIN=$((DOMAIN + 1))
+  if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then return; fi
+  log "$name (domain $DOMAIN)"
+  mkdir -p "$dir"
+  RMW_IMPLEMENTATION=$rmw ROS_DOMAIN_ID=$DOMAIN RCUTILS_LOGGING_BUFFERED_STREAM=0 \
+    timeout -s INT $((TIMEOUT + 10)) "$DEMO/add_two_ints_server" >"$dir/server.log" 2>&1 &
+  local server=$!
+  timeout $((TIMEOUT + 5)) "$RUST_SERVICE" client "$DOMAIN" "$COUNT" "$TIMEOUT" >"$dir/client.log" 2>&1
+  local rc=$?
+  kill -INT "$server" 2>/dev/null
+  wait "$server" 2>/dev/null
+  local got
+  got=$(grep -c "Result of add_two_ints: [0-9]*" "$dir/client.log")
+  [ "$rc" -eq 0 ] && [ "$got" -eq "$COUNT" ] && result "$name" 1 || result "$name" 0
+}
+
 for rmw in "${RMW_LIST[@]}"; do
   ros_to_rustorb "$rmw"
   rustorb_to_ros "$rmw"
+  ros_client_to_rustorb "$rmw"
+  rustorb_client_to_ros "$rmw"
 done
 
 printf '%s\n' "${RESULTS[@]}" | tee "$OUT/results.txt"

@@ -743,6 +743,67 @@ rdds_status rdds_reader_set_listener(const rdds_reader *r,
 /* ------------------------------------------------------------------ */
 /* Conditions and WaitSets                                            */
 
+/* Requests and replies (DDS-RPC 1.0). A request is known by its
+ * identity: the writer and sequence number of the request, which the
+ * replies name. */
+typedef struct rdds_sample_identity {
+    rdds_guid writer;
+    int64_t sequence_number;
+} rdds_sample_identity;
+
+/* The related sample identity of sample i (what a reply names), or
+ * RDDS_RETCODE_NO_DATA. */
+rdds_status rdds_samples_related_sample_identity(const rdds_samples *s,
+                                                 size_t i,
+                                                 rdds_sample_identity *out);
+
+typedef struct rdds_requester rdds_requester;
+typedef struct rdds_replier rdds_replier;
+
+/* A requester sending requests on the topic request and getting the
+ * replies on reply; the QoS NULL for the default (RELIABLE, KEEP_ALL). */
+rdds_status rdds_requester_new(const rdds_participant *p,
+                               const rdds_topic *request,
+                               const rdds_topic *reply,
+                               const rdds_writer_qos *writer_qos,
+                               const rdds_reader_qos *reader_qos,
+                               rdds_requester **out);
+void rdds_requester_release(rdds_requester *r);
+/* Until a replier is matched (both of its endpoints), or
+ * RDDS_RETCODE_TIMEOUT. */
+rdds_status rdds_requester_wait_for_service(const rdds_requester *r,
+                                            rdds_duration timeout);
+/* The request's identity into *out (NULL to ignore it). */
+rdds_status rdds_requester_send_request(const rdds_requester *r,
+                                        const rdds_out *sample,
+                                        rdds_sample_identity *out);
+/* Waits for a reply to request, or RDDS_RETCODE_TIMEOUT. */
+rdds_status rdds_requester_receive_reply(const rdds_requester *r,
+                                         const rdds_sample_identity *request,
+                                         rdds_duration timeout,
+                                         rdds_in **out);
+
+/* A replier taking requests on the topic request and answering on reply;
+ * the QoS NULL for the default (RELIABLE, KEEP_ALL), instance_name NULL
+ * for none. */
+rdds_status rdds_replier_new(const rdds_participant *p,
+                             const rdds_topic *request,
+                             const rdds_topic *reply,
+                             const rdds_writer_qos *writer_qos,
+                             const rdds_reader_qos *reader_qos,
+                             const char *instance_name, rdds_replier **out);
+void rdds_replier_release(rdds_replier *r);
+/* Waits for a request, or RDDS_RETCODE_TIMEOUT: the request into *out,
+ * what its replies name into *id. */
+rdds_status rdds_replier_receive_request(const rdds_replier *r,
+                                         rdds_duration timeout,
+                                         rdds_in **out,
+                                         rdds_sample_identity *id);
+/* Sends sample as a reply to the request id. */
+rdds_status rdds_replier_send_reply(const rdds_replier *r,
+                                    const rdds_out *sample,
+                                    const rdds_sample_identity *id);
+
 rdds_status rdds_guard_condition_new(rdds_condition **out);
 void rdds_condition_release(rdds_condition *c);
 bool rdds_condition_trigger_value(const rdds_condition *c);

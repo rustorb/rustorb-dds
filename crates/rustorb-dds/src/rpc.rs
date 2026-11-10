@@ -9,6 +9,13 @@
 //! no header. The topics are `<service>_Request` and `<service>_Reply`
 //! (7.4.1), or names given in [`RpcConfig`].
 //!
+//! A request also names, as its related sample identity, the requester's
+//! reply reader (with `SEQUENCENUMBER_UNKNOWN`), and a replier answers a
+//! request that names one with that reader and the request's sequence
+//! number: ROS 2's rmw_fastrtps_cpp does both (seen in captures), so its
+//! clients and services work with these. Others ignore the identity of a
+//! request (7.8.2 gives it to replies).
+//!
 //! Each side announces its writer and reader as a pair through discovery,
 //! with `PID_RELATED_ENTITY_GUID` (7.6.2.1), and holds back what would
 //! go astray while the other side's pair is half discovered (7.6.2.2): a
@@ -22,14 +29,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rustorb_rtps::{Guid, SampleIdentity};
+use rustorb_rtps::{Guid, SampleIdentity, SequenceNumber};
 use rustorb_typesupport::TopicType;
 
 use crate::participant::Shared;
 use crate::publisher::{DataWriter, WriteParams};
 use crate::qos::{DataReaderQos, DataWriterQos, History, Reliability};
 use crate::subscriber::DataReader;
-use crate::{DomainParticipant, Error, Result};
+use crate::{DomainParticipant, Error, Result, Topic};
 
 /// How a [`Requester`] or [`Replier`] is made.
 #[derive(Clone, Debug)]
@@ -148,12 +155,26 @@ impl<Req: TopicType + 'static, Rep: TopicType + 'static> Requester<Req, Rep> {
     pub fn with_config(participant: &DomainParticipant, config: &RpcConfig) -> Result<Self> {
         let request = participant.create_topic::<Req>(&config.request_topic)?;
         let reply = participant.create_topic::<Rep>(&config.reply_topic)?;
+        Requester::with_topics(participant, &request, &reply, config)
+    }
+}
+
+impl<Req, Rep> Requester<Req, Rep> {
+    /// A requester on the topics given, of any sample type (such as
+    /// [`DynamicData`](crate::DynamicData)), with the QoS of `config` (its
+    /// topic names are not used).
+    pub fn with_topics(
+        participant: &DomainParticipant,
+        request: &Topic<Req>,
+        reply: &Topic<Rep>,
+        config: &RpcConfig,
+    ) -> Result<Self> {
         let writer = participant
             .create_publisher()?
-            .create_datawriter_with_qos(&request, config.writer_qos.clone())?;
+            .create_datawriter_with_qos(request, config.writer_qos.clone())?;
         let reader = participant
             .create_subscriber()?
-            .create_datareader_with_qos(&reply, config.reader_qos.clone())?;
+            .create_datareader_with_qos(reply, config.reader_qos.clone())?;
         pair(&writer, &reader, None)?;
         Ok(Requester {
             writer,
@@ -161,9 +182,7 @@ impl<Req: TopicType + 'static, Rep: TopicType + 'static> Requester<Req, Rep> {
             replies: Mutex::new(HashMap::new()),
         })
     }
-}
 
-impl<Req, Rep> Requester<Req, Rep> {
     /// The writer of the requests.
     pub fn request_datawriter(&self) -> &DataWriter<Req> {
         &self.writer
@@ -194,7 +213,16 @@ impl<Req, Rep> Requester<Req, Rep> {
 
     /// Sends a request; returns its identity, which its replies name.
     pub fn send_request(&self, request: &Req) -> Result<SampleIdentity> {
-        self.writer.write_w_params(request, &WriteParams::default())
+        self.writer.write_w_params(
+            request,
+            &WriteParams {
+                related_sample_identity: Some(SampleIdentity {
+                    writer_guid: self.reader.guid,
+                    sequence_number: SequenceNumber::UNKNOWN,
+                }),
+                ..WriteParams::default()
+            },
+        )
     }
 
     /// Moves the replies to this requester's requests from the reader to
@@ -202,9 +230,14 @@ impl<Req, Rep> Requester<Req, Rep> {
     fn collect(&self) -> Result<std::sync::MutexGuard<'_, HashMap<SampleIdentity, Vec<Rep>>>> {
         let mut replies = self.replies.lock().map_err(|_| Error::PreconditionNotMet)?;
         for s in self.reader.take() {
-            let (Some(data), Some(id)) = (s.data, s.info.related_sample_identity) else {
+            let (Some(data), Some(mut id)) = (s.data, s.info.related_sample_identity) else {
                 continue;
             };
+            // A reply names the request, or the reply reader with the
+            // request's sequence number.
+            if id.writer_guid == self.reader.guid {
+                id.writer_guid = self.writer.guid;
+            }
             if id.writer_guid == self.writer.guid {
                 replies.entry(id).or_default().push(data);
             }
@@ -258,8 +291,12 @@ impl<Req, Rep> Requester<Req, Rep> {
 pub struct Request<Req> {
     /// The request.
     pub data: Req,
-    /// Its identity, which the reply names.
+    /// What the reply names: the request's writer and sequence number,
+    /// or the reader the request named (as a ROS 2 client names its reply
+    /// reader) with the request's sequence number.
     pub id: SampleIdentity,
+    /// The writer of the request.
+    pub writer: Guid,
 }
 
 /// The service side: takes requests of type `Req` and answers each with
@@ -291,12 +328,26 @@ impl<Req: TopicType + 'static, Rep: TopicType + 'static> Replier<Req, Rep> {
     pub fn with_config(participant: &DomainParticipant, config: &RpcConfig) -> Result<Self> {
         let request = participant.create_topic::<Req>(&config.request_topic)?;
         let reply = participant.create_topic::<Rep>(&config.reply_topic)?;
+        Replier::with_topics(participant, &request, &reply, config)
+    }
+}
+
+impl<Req, Rep> Replier<Req, Rep> {
+    /// A replier on the topics given, of any sample type (such as
+    /// [`DynamicData`](crate::DynamicData)), with the QoS and the service
+    /// instance name of `config` (its topic names are not used).
+    pub fn with_topics(
+        participant: &DomainParticipant,
+        request: &Topic<Req>,
+        reply: &Topic<Rep>,
+        config: &RpcConfig,
+    ) -> Result<Self> {
         let reader = participant
             .create_subscriber()?
-            .create_datareader_with_qos(&request, config.reader_qos.clone())?;
+            .create_datareader_with_qos(request, config.reader_qos.clone())?;
         let writer = participant
             .create_publisher()?
-            .create_datawriter_with_qos(&reply, config.writer_qos.clone())?;
+            .create_datawriter_with_qos(reply, config.writer_qos.clone())?;
         pair(&writer, &reader, config.service_instance_name.as_ref())?;
         Ok(Replier {
             reader,
@@ -304,9 +355,7 @@ impl<Req: TopicType + 'static, Rep: TopicType + 'static> Replier<Req, Rep> {
             held: Mutex::new(Vec::new()),
         })
     }
-}
 
-impl<Req, Rep> Replier<Req, Rep> {
     /// The reader of the requests.
     pub fn request_datareader(&self) -> &DataReader<Req> {
         &self.reader
@@ -333,18 +382,24 @@ impl<Req, Rep> Replier<Req, Rep> {
     pub fn take_requests(&self) -> Result<Vec<Request<Req>>> {
         let mut held = self.held.lock().map_err(|_| Error::PreconditionNotMet)?;
         held.extend(self.reader.take().into_iter().filter_map(|s| {
+            let named = s
+                .info
+                .related_sample_identity
+                .map(|id| id.writer_guid)
+                .filter(|g| *g != Guid::UNKNOWN);
             Some(Request {
                 data: s.data?,
                 id: SampleIdentity {
-                    writer_guid: s.info.writer,
+                    writer_guid: named.unwrap_or(s.info.writer),
                     sequence_number: s.info.sequence_number,
                 },
+                writer: s.info.writer,
             })
         }));
         let mut ready = Vec::new();
         let mut i = 0;
         while i < held.len() {
-            if self.can_answer(&held[i].id.writer_guid) {
+            if self.can_answer(&held[i].writer) {
                 ready.push(held.remove(i));
             } else {
                 i += 1;

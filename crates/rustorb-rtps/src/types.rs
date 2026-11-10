@@ -226,6 +226,16 @@ impl Guid {
         out[12..].copy_from_slice(&self.entity_id.to_bytes());
         out
     }
+
+    /// From the 16 octets of [`to_bytes`](Self::to_bytes).
+    pub fn from_bytes(b: [u8; 16]) -> Self {
+        let mut prefix = [0u8; 12];
+        prefix.copy_from_slice(&b[..12]);
+        Guid::new(
+            GuidPrefix(prefix),
+            EntityId::from_bytes([b[12], b[13], b[14], b[15]]),
+        )
+    }
 }
 
 /// The vendor of an RTPS implementation (DDSI-RTPS 2.5, 8.3.3.1.3).
