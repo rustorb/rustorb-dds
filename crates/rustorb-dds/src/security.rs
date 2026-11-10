@@ -398,6 +398,26 @@ impl Security {
                 | BuiltinEndpointSet::PARTICIPANT_STATELESS_MESSAGE_READER
                 | BuiltinEndpointSet::PARTICIPANT_VOLATILE_MESSAGE_SECURE_WRITER
                 | BuiltinEndpointSet::PARTICIPANT_VOLATILE_MESSAGE_SECURE_READER;
+        if self.discovery_protected() {
+            data.available_builtin_endpoints.0 |=
+                rustorb_rtps::sedp::Sedp::BUILTIN_ENDPOINTS_SECURE;
+        }
+        if self.liveliness_protected() {
+            data.available_builtin_endpoints.0 |= rustorb_rtps::wlp::Wlp::BUILTIN_ENDPOINTS_SECURE;
+        }
+        // The keys of the builtin secure endpoints (9.8.9.3).
+        let mut st = self.state();
+        for (local, _, _, _, kind) in self.builtin_secure() {
+            st.endpoints
+                .entry(Guid::new(self.prefix, local))
+                .or_insert_with(|| LocalEndpoint {
+                    submessage: Some(Encoder::new(KeyMaterial::generate(transform(kind)))),
+                    payload: None,
+                    sent: HashMap::new(),
+                    origin_authentication: kind.origin_authenticated(),
+                });
+        }
+        drop(st);
         let identity = self.identity.identity_token();
         let perm = self.permissions_token.clone();
         let m = self.rule.participant_masks();
@@ -742,6 +762,20 @@ impl Security {
             None => Vec::new(),
         };
         self.volatile_send(st, src, gm::PARTICIPANT_CRYPTO_TOKENS, None, None, tokens);
+        let set = st
+            .peers
+            .get(&src)
+            .map_or(0, |p| p.data.available_builtin_endpoints.0);
+        for (local, remote, writer, bit, _) in self.builtin_secure() {
+            if set & bit != 0 {
+                self.matched_locked(
+                    st,
+                    Guid::new(self.prefix, local),
+                    Guid::new(src, remote),
+                    writer,
+                );
+            }
+        }
         self.check_ready(st, src);
     }
 
@@ -909,6 +943,88 @@ impl Security {
         Ok(payload)
     }
 
+    /// Whether the domain has discovery protection: the secure SEDP
+    /// endpoints are used.
+    pub(crate) fn discovery_protected(&self) -> bool {
+        self.rule.discovery_protection_kind.is_protected()
+    }
+
+    /// Whether the domain has liveliness protection: the secure
+    /// liveliness endpoints are used.
+    pub(crate) fn liveliness_protected(&self) -> bool {
+        self.rule.liveliness_protection_kind.is_protected()
+    }
+
+    /// Whether the endpoints of `topic` are announced on the secure SEDP
+    /// endpoints.
+    pub(crate) fn topic_discovery_protected(&self, topic: &str) -> bool {
+        self.discovery_protected()
+            && self
+                .rule
+                .topic_rule(topic)
+                .is_ok_and(|r| r.enable_discovery_protection)
+    }
+
+    /// The builtin secure endpoints in use (7.5.8), but for the volatile
+    /// ones: (local entity, remote counterpart, local is a writer, the
+    /// counterpart's bit, protection).
+    fn builtin_secure(&self) -> Vec<(EntityId, EntityId, bool, u32, ProtectionKind)> {
+        let mut v = Vec::new();
+        let d = self.rule.discovery_protection_kind;
+        if d.is_protected() {
+            v.extend([
+                (
+                    EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_WRITER,
+                    EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_READER,
+                    true,
+                    BuiltinEndpointSet::PUBLICATIONS_SECURE_READER,
+                    d,
+                ),
+                (
+                    EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_READER,
+                    EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_WRITER,
+                    false,
+                    BuiltinEndpointSet::PUBLICATIONS_SECURE_WRITER,
+                    d,
+                ),
+                (
+                    EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER,
+                    EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER,
+                    true,
+                    BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_READER,
+                    d,
+                ),
+                (
+                    EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER,
+                    EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER,
+                    false,
+                    BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_WRITER,
+                    d,
+                ),
+            ]);
+        }
+        let l = self.rule.liveliness_protection_kind;
+        if l.is_protected() {
+            v.extend([
+                (
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER,
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER,
+                    true,
+                    BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_READER,
+                    l,
+                ),
+                (
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER,
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER,
+                    false,
+                    BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_WRITER,
+                    l,
+                ),
+            ]);
+        }
+        v
+    }
+
     /// Whether the payloads of `topic` are protected.
     pub(crate) fn payload_protected(&self, topic: &str) -> bool {
         self.rule
@@ -962,7 +1078,10 @@ impl Security {
     /// endpoint's key material.
     pub(crate) fn matched(&self, local: Guid, remote: Guid, local_is_writer: bool) {
         let mut g = self.state();
-        let st = &mut *g;
+        self.matched_locked(&mut g, local, remote, local_is_writer);
+    }
+
+    fn matched_locked(&self, st: &mut State, local: Guid, remote: Guid, local_is_writer: bool) {
         let Some(e) = st.endpoints.get_mut(&local) else {
             return;
         };

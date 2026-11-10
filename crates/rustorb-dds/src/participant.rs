@@ -782,6 +782,9 @@ pub(crate) struct Inner {
     spdp: Spdp,
     pub(crate) sedp: Sedp,
     wlp: Wlp,
+    /// The secure liveliness endpoints, under DDS Security liveliness
+    /// protection.
+    wlp_secure: Option<Wlp>,
     typelookup: TypeLookup,
     /// The TypeObjects asked for, and the participant asked: each is
     /// asked for once from each participant.
@@ -819,10 +822,45 @@ pub(crate) struct Inner {
     pub(crate) security: Option<Arc<Security>>,
 }
 
+/// Writes a liveliness message on the plain and the secure endpoints.
+fn assert_wlp(wlp: &mut Wlp, secure: &mut Option<Wlp>, kind: [u8; 4]) {
+    wlp.assert_liveliness(kind);
+    if let Some(w) = secure.as_mut() {
+        w.assert_liveliness(kind);
+    }
+}
+
 /// The shortest interval between two liveliness messages of a kind.
 const MIN_LIVELINESS_PERIOD: Duration = Duration::from_millis(10);
 
 impl Inner {
+    /// Announces a local writer, on the secure SEDP endpoints if its
+    /// topic has discovery protection.
+    fn sedp_add_writer(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        #[cfg(feature = "security")]
+        if self
+            .security
+            .as_ref()
+            .is_some_and(|s| s.topic_discovery_protected(&data.topic_name))
+        {
+            return self.sedp.add_writer_secure(data);
+        }
+        self.sedp.add_writer(data)
+    }
+
+    /// Announces a local reader, like [`Self::sedp_add_writer`].
+    fn sedp_add_reader(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        #[cfg(feature = "security")]
+        if self
+            .security
+            .as_ref()
+            .is_some_and(|s| s.topic_discovery_protected(&data.topic_name))
+        {
+            return self.sedp.add_reader_secure(data);
+        }
+        self.sedp.add_reader(data)
+    }
+
     /// Notes that the statuses `k` of the local writer or reader `g`
     /// changed.
     fn changed(&mut self, g: Guid, k: StatusMask) {
@@ -931,8 +969,11 @@ impl Inner {
             None => self.next_automatic = None,
             Some(lease) => {
                 if self.next_automatic.is_none_or(|t| t <= now) {
-                    self.wlp
-                        .assert_liveliness(wlp::kind::AUTOMATIC_LIVELINESS_UPDATE);
+                    assert_wlp(
+                        &mut self.wlp,
+                        &mut self.wlp_secure,
+                        wlp::kind::AUTOMATIC_LIVELINESS_UPDATE,
+                    );
                     self.next_automatic = Some(now + (lease / 3).max(MIN_LIVELINESS_PERIOD));
                 }
             }
@@ -941,8 +982,11 @@ impl Inner {
         // at most once a third of the shortest lease.
         if self.manual_pending && now >= self.next_manual {
             self.manual_pending = false;
-            self.wlp
-                .assert_liveliness(wlp::kind::MANUAL_LIVELINESS_UPDATE);
+            assert_wlp(
+                &mut self.wlp,
+                &mut self.wlp_secure,
+                wlp::kind::MANUAL_LIVELINESS_UPDATE,
+            );
             let period = min_lease(LivelinessKind::ManualByParticipant)
                 .map_or(Duration::from_secs(1), |l| l / 3);
             self.next_manual = now + period.max(MIN_LIVELINESS_PERIOD);
@@ -1236,7 +1280,7 @@ impl Shared {
             }
             inner.writers.insert(guid, w);
             inner.changed(guid, changes);
-            let events = inner.sedp.add_writer(data);
+            let events = inner.sedp_add_writer(data);
             apply_sedp_events(inner, events, now);
         }
         self.flush();
@@ -1309,7 +1353,7 @@ impl Shared {
             }
             inner.readers.insert(guid, r);
             inner.changed(guid, changes);
-            let events = inner.sedp.add_reader(data);
+            let events = inner.sedp_add_reader(data);
             apply_sedp_events(inner, events, now);
         }
         self.flush();
@@ -1344,7 +1388,7 @@ impl Shared {
                     cf.expression_parameters = parameters.to_vec();
                 }
                 let data = r.data.clone();
-                let events = inner.sedp.add_reader(data);
+                let events = inner.sedp_add_reader(data);
                 apply_sedp_events(inner, events, now);
             }
         }
@@ -1560,11 +1604,11 @@ impl Shared {
             let events = if let Some(w) = inner.writers.get_mut(guid) {
                 f(&mut w.data);
                 let data = w.data.clone();
-                inner.sedp.add_writer(data)
+                inner.sedp_add_writer(data)
             } else if let Some(r) = inner.readers.get_mut(guid) {
                 f(&mut r.data);
                 let data = r.data.clone();
-                inner.sedp.add_reader(data)
+                inner.sedp_add_reader(data)
             } else {
                 return Err(Error::AlreadyDeleted);
             };
@@ -1966,6 +2010,7 @@ impl DomainParticipant {
                 SedpConfig::default().writer,
                 SedpConfig::default().reader,
             ),
+            wlp_secure: None,
             typelookup: TypeLookup::new(
                 prefix,
                 VENDOR_ID,
@@ -1990,6 +2035,24 @@ impl DomainParticipant {
             inconsistent_topics: HashMap::new(),
             #[cfg(feature = "security")]
             security: security.clone(),
+        };
+        #[cfg(feature = "security")]
+        let inner = {
+            let mut inner = inner;
+            if let Some(s) = &inner.security {
+                if s.discovery_protected() {
+                    inner.sedp.enable_secure();
+                }
+                if s.liveliness_protected() {
+                    inner.wlp_secure = Some(Wlp::new_secure(
+                        prefix,
+                        VENDOR_ID,
+                        SedpConfig::default().writer,
+                        SedpConfig::default().reader,
+                    ));
+                }
+            }
+            inner
         };
         let shared = Arc::new_cyclic(|this| Shared {
             this: this.clone(),
@@ -2256,6 +2319,7 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
                 g.spdp.next_deadline(),
                 g.sedp.next_deadline(),
                 g.wlp.next_deadline(),
+                g.wlp_secure.as_ref().and_then(Wlp::next_deadline),
                 g.typelookup.next_deadline(),
                 g.next_automatic,
                 manual,
@@ -2322,6 +2386,11 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                     for a in inner.wlp.handle_message(&d.data, now) {
                         inner.remote_participant_asserted(a.participant, a.kind, now);
                     }
+                    if let Some(w) = inner.wlp_secure.as_mut() {
+                        for a in w.handle_message(&d.data, now) {
+                            inner.remote_participant_asserted(a.participant, a.kind, now);
+                        }
+                    }
                     let replies =
                         inner
                             .typelookup
@@ -2350,6 +2419,11 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         }
         for o in inner.wlp.poll(now) {
             out.push((o.bytes, o.locators));
+        }
+        if let Some(w) = inner.wlp_secure.as_mut() {
+            for o in w.poll(now) {
+                out.push((o.bytes, o.locators));
+            }
         }
         for o in inner.typelookup.poll(now) {
             out.push((o.bytes, o.locators));
@@ -2406,6 +2480,9 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
                 sec.participant_removed(&prefix);
             }
             inner.wlp.remove_participant(&prefix);
+            if let Some(w) = inner.wlp_secure.as_mut() {
+                w.remove_participant(&prefix);
+            }
             inner.typelookup.remove_participant(&prefix);
             inner.type_requests.retain(|(_, p)| *p != prefix);
             let events = inner.sedp.remove_participant(&prefix);
@@ -2419,6 +2496,9 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
 fn participant_ready(inner: &mut Inner, p: &ParticipantData, now: Instant) {
     inner.sedp.add_participant(p, now);
     inner.wlp.add_participant(p, now);
+    if let Some(w) = inner.wlp_secure.as_mut() {
+        w.add_participant(p, now);
+    }
     inner.typelookup.add_participant(p, now);
 }
 
