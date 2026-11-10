@@ -16,7 +16,12 @@ fn signed_documents_verify() {
         let content = verify(&read(&format!("{f}.p7s")), &ca).unwrap();
         let xml = String::from_utf8(content).unwrap();
         assert!(xml.starts_with("<?xml"), "{f}: {xml:.40}");
-        assert_eq!(xml.replace("\r\n", "\n").trim_end(), String::from_utf8(read(&format!("{f}.xml"))).unwrap().trim_end());
+        assert_eq!(
+            xml.replace("\r\n", "\n").trim_end(),
+            String::from_utf8(read(&format!("{f}.xml")))
+                .unwrap()
+                .trim_end()
+        );
     }
 }
 
@@ -24,7 +29,10 @@ fn signed_documents_verify() {
 fn tampered_or_foreign_documents_do_not() {
     let ca = Cert::parse(&read("permissions_ca.pem")).unwrap();
     let doc = String::from_utf8(read("governance.p7s")).unwrap();
-    let tampered = doc.replace("<allow_unauthenticated_participants>false", "<allow_unauthenticated_participants>true");
+    let tampered = doc.replace(
+        "<allow_unauthenticated_participants>false",
+        "<allow_unauthenticated_participants>true",
+    );
     assert!(verify(tampered.as_bytes(), &ca).is_err());
     let other = Cert::parse(&read("identity_ca.pem")).unwrap();
     assert!(verify(doc.as_bytes(), &other).is_err());

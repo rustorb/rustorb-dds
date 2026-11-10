@@ -6,6 +6,7 @@
 //! Written from the OMG specification (DDS Security 1.2, formal/25-03-06)
 //! with RustCrypto.
 
+pub mod access;
 pub mod auth;
 pub mod cdr;
 pub mod crypto;

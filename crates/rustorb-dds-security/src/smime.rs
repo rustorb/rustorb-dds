@@ -117,7 +117,9 @@ fn split(text: &str) -> Result<(&str, Vec<u8>), Error> {
     let delim = format!("--{boundary}");
     let mut parts = text.split(delim.as_str()).skip(1);
     let first = parts.next().ok_or_else(|| Error::new("no signed part"))?;
-    let second = parts.next().ok_or_else(|| Error::new("no signature part"))?;
+    let second = parts
+        .next()
+        .ok_or_else(|| Error::new("no signature part"))?;
     // The part starts after the line break following the delimiter and
     // ends before the line break preceding the next one.
     let first = first
@@ -153,9 +155,9 @@ fn crlf(s: &str) -> String {
 /// The content of a MIME part: after its headers, if it has any.
 fn strip_headers(part: &str) -> &str {
     let first = part.lines().next().unwrap_or("");
-    let has_headers = first
-        .split_once(':')
-        .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    let has_headers = first.split_once(':').is_some_and(|(n, _)| {
+        !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
     if !has_headers {
         return part;
     }
