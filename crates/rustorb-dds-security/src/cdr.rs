@@ -31,6 +31,12 @@ impl CdrWriter {
         self.out.extend_from_slice(&v.to_be_bytes());
     }
 
+    /// A long long.
+    pub fn i64(&mut self, v: i64) {
+        self.align(8);
+        self.out.extend_from_slice(&v.to_be_bytes());
+    }
+
     /// A sequence of octets.
     pub fn sequence(&mut self, b: &[u8]) {
         self.u32(b.len() as u32);
@@ -99,6 +105,17 @@ impl<'a> CdrReader<'a> {
             u32::from_le_bytes(a)
         } else {
             u32::from_be_bytes(a)
+        })
+    }
+
+    /// A long long.
+    pub fn i64(&mut self) -> Result<i64, Error> {
+        self.align(8);
+        let a = self.array()?;
+        Ok(if self.little {
+            i64::from_le_bytes(a)
+        } else {
+            i64::from_be_bytes(a)
         })
     }
 
