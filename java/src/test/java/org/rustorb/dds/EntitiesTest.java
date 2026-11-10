@@ -154,6 +154,37 @@ class EntitiesTest {
     }
 
     @Test
+    void requesterAndReplier() throws Exception {
+        Topic<Greeting> requests = dp.createTopic("Echo_Request", Greeting.class);
+        Topic<Greeting> replies = dp.createTopic("Echo_Reply", Greeting.class);
+        try (Replier<Greeting, Greeting> replier = new Replier<>(requests, replies, null, null, "echo");
+                Requester<Greeting, Greeting> requester = new Requester<>(requests, replies)) {
+            requester.waitForService(tenSeconds);
+            Thread server = new Thread(() -> {
+                try {
+                    for (int i = 0; i < 2; i++) {
+                        Replier.Request<Greeting> r = replier.receiveRequest(tenSeconds);
+                        replier.sendReply(new Greeting(r.data().index * 10, "re: " + r.data().message),
+                                r.identity());
+                    }
+                } catch (TimeoutException e) {
+                    throw new AssertionError(e);
+                }
+            });
+            server.start();
+            SampleIdentity first = requester.sendRequest(new Greeting(1, "one"));
+            Greeting second = requester.request(new Greeting(2, "two"), tenSeconds);
+            assertEquals(20, second.index);
+            assertEquals("re: two", second.message);
+            assertEquals(10, requester.receiveReply(first, tenSeconds).index);
+            assertEquals(16, first.getWriterGuid().length);
+            Duration short_ = Duration.newDuration(100, TimeUnit.MILLISECONDS, env);
+            assertThrows(TimeoutException.class, () -> requester.receiveReply(first, short_));
+            server.join();
+        }
+    }
+
+    @Test
     void writeAndTake() throws Exception {
         Topic<Greeting> topic = dp.createTopic("greetings", Greeting.class);
         assertEquals("greetings", topic.getName());
