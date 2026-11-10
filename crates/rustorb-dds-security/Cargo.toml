@@ -23,6 +23,7 @@ der = { version = "0.7", features = ["pem", "alloc", "oid"] }
 spki = { version = "0.7", features = ["alloc"] }
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+roxmltree = "0.20"
 
 [lints]
 workspace = true

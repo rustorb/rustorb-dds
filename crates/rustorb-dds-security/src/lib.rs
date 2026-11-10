@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod pki;
 pub mod smime;
 pub mod token;
+pub mod xml;
 
 /// A failure of a security operation (a SecurityException).
 #[derive(Clone, Debug, PartialEq, Eq)]
