@@ -13,13 +13,14 @@ use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use rustorb_dds::{
-    Condition, DataReader, DataReaderListener, DataReaderQos, DataWriter, DataWriterListener,
-    DataWriterQos, DeadlineMissedStatus, DomainParticipant, DurabilityKind, DynamicData,
-    GuardCondition, Guid, History, IncompatibleQosStatus, InstanceHandle, InstanceState,
-    InstanceStateMask, LivelinessChangedStatus, LivelinessKind, LivelinessLostStatus,
-    MatchedStatus, ParticipantConfig, Publisher, PublisherQos, Reliability, Sample,
-    SampleLostStatus, SampleRejectedStatus, SampleState, SampleStateMask, StateFilter, StatusMask,
-    Subscriber, SubscriberQos, Time, Topic, ViewState, ViewStateMask, WaitSet, data_representation,
+    Condition, ContentFilteredTopic, DataReader, DataReaderListener, DataReaderQos, DataWriter,
+    DataWriterListener, DataWriterQos, DeadlineMissedStatus, DomainParticipant, DurabilityKind,
+    DynamicData, GuardCondition, Guid, History, IncompatibleQosStatus, InstanceHandle,
+    InstanceState, InstanceStateMask, LivelinessChangedStatus, LivelinessKind,
+    LivelinessLostStatus, MatchedStatus, ParticipantConfig, Publisher, PublisherQos, Reliability,
+    Sample, SampleLostStatus, SampleRejectedStatus, SampleState, SampleStateMask, StateFilter,
+    StatusMask, Subscriber, SubscriberQos, Time, Topic, ViewState, ViewStateMask, WaitSet,
+    data_representation,
 };
 
 use crate::types::PyDynamicType;
@@ -559,6 +560,30 @@ impl PyParticipant {
         })
     }
 
+    /// A content filtered topic of `related`.
+    #[pyo3(signature = (name, related, filter_expression, expression_parameters = Vec::new()))]
+    fn create_contentfilteredtopic(
+        &self,
+        name: &str,
+        related: &PyTopic,
+        filter_expression: &str,
+        expression_parameters: Vec<String>,
+    ) -> PyResult<PyContentFilteredTopic> {
+        let topic = self
+            .inner
+            .create_contentfilteredtopic(
+                name,
+                &related.topic,
+                filter_expression,
+                &expression_parameters,
+            )
+            .map_err(dds_err)?;
+        Ok(PyContentFilteredTopic {
+            topic: Arc::new(topic),
+            ty: related.ty.clone(),
+        })
+    }
+
     /// The type remote endpoints of `topic_name` announce, or None.
     fn discover_topic_type(
         &self,
@@ -650,6 +675,53 @@ impl PyTopic {
     }
 }
 
+/// `ContentFilteredTopic`.
+#[pyclass(name = "ContentFilteredTopic", module = "rustorb_dds._native", frozen)]
+#[derive(Debug)]
+pub struct PyContentFilteredTopic {
+    topic: Arc<ContentFilteredTopic<DynamicData>>,
+    ty: PyDynamicType,
+}
+
+#[pymethods]
+impl PyContentFilteredTopic {
+    #[getter]
+    fn name(&self) -> String {
+        self.topic.name().to_owned()
+    }
+
+    #[getter]
+    fn type_name(&self) -> String {
+        self.topic.type_name().to_owned()
+    }
+
+    #[getter]
+    fn r#type(&self) -> PyDynamicType {
+        self.ty.clone()
+    }
+
+    #[getter]
+    fn related_topic_name(&self) -> String {
+        self.topic.related_topic().name().to_owned()
+    }
+
+    #[getter]
+    fn filter_expression(&self) -> String {
+        self.topic.filter_expression()
+    }
+
+    #[getter]
+    fn expression_parameters(&self) -> Vec<String> {
+        self.topic.expression_parameters()
+    }
+
+    fn set_expression_parameters(&self, parameters: Vec<String>) -> PyResult<()> {
+        self.topic
+            .set_expression_parameters(&parameters)
+            .map_err(dds_err)
+    }
+}
+
 /// `Publisher`.
 #[pyclass(name = "Publisher", module = "rustorb_dds._native", frozen)]
 #[derive(Debug)]
@@ -702,6 +774,33 @@ impl PySubscriber {
     fn create_datareader(
         &self,
         topic: &PyTopic,
+        qos: Option<&Bound<'_, PyDict>>,
+        listener: Option<Py<PyAny>>,
+        mask: u32,
+    ) -> PyResult<PyReader> {
+        let qos = reader_qos(qos)?;
+        let reader = match listener {
+            None => self.inner.create_datareader_with_qos(&*topic.topic, qos),
+            Some(f) => self.inner.create_datareader_with_listener(
+                &*topic.topic,
+                qos,
+                ReaderCallback(f),
+                StatusMask(mask),
+            ),
+        }
+        .map_err(dds_err)?;
+        Ok(PyReader {
+            inner: Arc::new(reader),
+            ty: topic.ty.clone(),
+        })
+    }
+
+    /// A reader of the content filtered topic `topic`, as
+    /// `create_datareader`.
+    #[pyo3(signature = (topic, qos = None, listener = None, mask = u32::MAX))]
+    fn create_filtered_datareader(
+        &self,
+        topic: &PyContentFilteredTopic,
         qos: Option<&Bound<'_, PyDict>>,
         listener: Option<Py<PyAny>>,
         mask: u32,

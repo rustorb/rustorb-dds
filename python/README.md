@@ -48,7 +48,7 @@ The type of a declared class is described to the network as an XTypes TypeObject
 
 ## Entities
 
-`DomainParticipant(domain_id, localhost=False)`, `create_topic`, `create_publisher(partition=[...])`, `create_subscriber`, `create_datawriter(topic, qos, listener, mask)`, `create_datareader(...)`.
+`DomainParticipant(domain_id, localhost=False)`, `create_topic`, `create_contentfilteredtopic(name, topic, expression, parameters)` (readers of it get the samples that pass the filter; `set_expression_parameters` changes the parameters), `create_publisher(partition=[...])`, `create_subscriber`, `create_datawriter(topic, qos, listener, mask)`, `create_datareader(...)`.
 
 `DataWriter`: `write`, `register_instance`, `unregister_instance`, `dispose`, `lookup_instance`, `wait_for_acknowledgments`, `wait_for_subscriptions`, statuses, `status_condition`, `set_listener`.
 

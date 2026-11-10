@@ -37,7 +37,7 @@ from .types import spec_of, type_of
 __version__ = "0.1.0"
 
 __all__ = _types_all + [
-    "DomainParticipant", "Topic", "Publisher", "Subscriber", "DataWriter",
+    "DomainParticipant", "Topic", "ContentFilteredTopic", "Publisher", "Subscriber", "DataWriter",
     "DataReader", "Qos", "Sample", "SampleInfo", "StatusMask",
     "DataWriterListener", "DataReaderListener", "Condition",
     "GuardCondition", "StatusCondition", "ReadCondition", "WaitSet",
@@ -164,6 +164,19 @@ class DomainParticipant:
         spec = spec_of(type)
         return Topic(self._native.create_topic(name, type_of(type)), spec)
 
+    def create_contentfilteredtopic(self, name, related_topic,
+                                    filter_expression,
+                                    expression_parameters=()):
+        """A topic named ``name`` whose readers get the samples of
+        ``related_topic`` that pass ``filter_expression`` (the SQL subset
+        of DDS 1.4, Annex B), with ``expression_parameters`` (strings) for
+        its ``%0``, ``%1``...; :class:`ValueError` for an expression not
+        valid for the type."""
+        native = self._native.create_contentfilteredtopic(
+            name, related_topic._native, filter_expression,
+            [str(p) for p in expression_parameters])
+        return ContentFilteredTopic(native, related_topic)
+
     def discover_topic_type(self, topic_name, timeout=5.0):
         """The type remote endpoints of ``topic_name`` announce, fetched
         with TypeLookup when needed, or None after ``timeout`` seconds."""
@@ -212,6 +225,40 @@ class Topic:
         return _status(self._native.inconsistent_topic_status())
 
 
+class ContentFilteredTopic:
+    """A topic whose readers get only the samples of its related topic
+    that pass a filter."""
+
+    def __init__(self, native, related_topic):
+        self._native = native
+        self._spec = related_topic._spec
+        self.related_topic = related_topic
+
+    @property
+    def name(self):
+        return self._native.name
+
+    @property
+    def type_name(self):
+        return self._native.type_name
+
+    @property
+    def type(self):  # noqa: A003 - the DDS name
+        return self._native.type
+
+    @property
+    def filter_expression(self):
+        return self._native.filter_expression
+
+    @property
+    def expression_parameters(self):
+        return list(self._native.expression_parameters)
+
+    def set_expression_parameters(self, parameters):
+        """New parameters; the readers filter with them from now on."""
+        self._native.set_expression_parameters([str(p) for p in parameters])
+
+
 class Publisher:
     def __init__(self, native, participant):
         self._native = native
@@ -237,7 +284,10 @@ class Subscriber:
                           mask=StatusMask.ALL):
         """A reader of ``topic`` with ``qos`` (a :class:`Qos` or dict)."""
         e = DataReader(None, topic)
-        native = self._native.create_datareader(
+        create = (self._native.create_filtered_datareader
+                  if isinstance(topic, ContentFilteredTopic)
+                  else self._native.create_datareader)
+        native = create(
             topic._native, _qos(qos),
             None if listener is None else _callback(e, listener), int(mask))
         _created(e, native)

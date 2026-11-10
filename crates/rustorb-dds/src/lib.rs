@@ -47,6 +47,11 @@
 //!
 //! Data flows with ROS 2 nodes too (the `ros2` example).
 //!
+//! A [`ContentFilteredTopic`] (DDS 1.4, 2.2.2.3.3) gives its readers only
+//! the samples of its related topic that pass a filter expression
+//! (DDS 1.4, Annex B, see [`ContentFilter`]); readers are created for a
+//! [`TopicDescription`], a topic or a content filtered topic.
+//!
 //! DDS-XTypes (D3, in progress): a type registered with
 //! [`DomainParticipant::register_type`] (its [`DescribeType`] is written
 //! by `rustorb-idl -Wbxtypes`) is announced with its TypeInformation, and

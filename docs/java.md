@@ -72,6 +72,7 @@ done
 - QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、WriterDataLifecycle、DataRepresentation。`withPolicy`、`withPolicies`、`get(Class)`、`PolicyFactory`
 - 状態と event（`core.status`、`core.event`）、`DataWriterListener`・`DataReaderListener` と Adapter
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`
+- `ContentFilteredTopic`（`DomainParticipant.createContentFilteredTopic`、`getFilterExpression`、`getExpressionParameters`、`setExpressionParameters`、`getRelatedTopic`）。`createDataReader` に渡せる
 - 例外：`ReturnCode_t` ごとに PSM の表 7.1 の例外（`TimeoutException`、`PreconditionNotMetException`、`AlreadyClosedException` など）
 
 ## PSM と違うところ、rustorb の拡張

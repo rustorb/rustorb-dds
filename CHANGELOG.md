@@ -8,6 +8,16 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Content filtered topics (DDS 1.4, 2.2.2.3.3): the filter expressions
+  of DDS 1.4, Annex B (`ContentFilter` in `rustorb-xtypes`, on
+  DynamicData), `DomainParticipant::create_contentfilteredtopic`,
+  `ContentFilteredTopic::set_expression_parameters`, and readers of them
+  through `TopicDescription`. The readers drop the samples that do not
+  pass and announce their filter in SEDP (`PID_CONTENT_FILTER_PROPERTY`,
+  DDSI-RTPS 2.5, 8.7.3.1). The type must be registered. In the C ABI
+  (`rdds_cftopic`), C++ (`dds::topic::ContentFilteredTopic`,
+  `dds::topic::Filter`), Java (`ContentFilteredTopic`) and Python too.
+  `interop/run.sh` runs them with Cyclone DDS and Fast DDS (#56).
 - Interoperation with OpenRTM-aist 2.0's data ports over its Fast DDS
   transport: the example `openrtm` in Rust, C++ and Python behaves as an
   OutPort or InPort of `RTC::TimedLong`, and `interop/openrtm.sh` (CI job

@@ -18,6 +18,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyDynamicType>()?;
     m.add_class::<entity::PyParticipant>()?;
     m.add_class::<entity::PyTopic>()?;
+    m.add_class::<entity::PyContentFilteredTopic>()?;
     m.add_class::<entity::PyPublisher>()?;
     m.add_class::<entity::PySubscriber>()?;
     m.add_class::<entity::PyWriter>()?;
