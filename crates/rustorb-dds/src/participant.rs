@@ -678,6 +678,12 @@ impl WriterState {
         let (payload, change) = match op {
             WriteOp::Value(v, related) => {
                 if let Some(id) = related {
+                    // Cyclone DDS 0.10 drops a DATA with in-line QoS but
+                    // no key hash, even on a keyless topic (whose key
+                    // hash is zero).
+                    if !self.keyed {
+                        q.push(Parameter::new(pid::KEY_HASH, h.0));
+                    }
                     // In the byte order the message is sent in.
                     q.push(Parameter::new(
                         pid::RELATED_SAMPLE_IDENTITY,
