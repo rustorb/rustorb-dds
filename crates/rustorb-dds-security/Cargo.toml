@@ -1,0 +1,28 @@
+[package]
+name = "rustorb-dds-security"
+description = "The builtin plugins of DDS Security 1.2 (PKI-DH, Permissions, AES-GCM-GMAC) for rustorb-dds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# RustCrypto (MIT OR Apache-2.0), chosen on 2026-11-10 (#59).
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pem"] }
+rsa = { version = "0.9", features = ["sha2"] }
+x509-cert = { version = "0.2", features = ["pem"] }
+cms = "0.2"
+der = { version = "0.7", features = ["pem", "alloc", "oid"] }
+spki = { version = "0.7", features = ["alloc"] }
+pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[lints]
+workspace = true
