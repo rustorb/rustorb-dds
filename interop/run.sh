@@ -148,6 +148,9 @@ build_peer() {
       mkdir -p "$dir/gen" &&
         (cd "$dir/gen" && fastddsgen -replace -d . "$ROOT/interop/idl/HelloWorld.idl" "$ROOT/interop/idl/Keyed.idl") \
           >"$dir/cmake.log" 2>&1 &&
+        mkdir -p "$dir/gen-typeobject" &&
+        (cd "$dir/gen-typeobject" && fastddsgen -typeobject -replace -d . "$ROOT/interop/idl/HelloWorld.idl") \
+          >>"$dir/cmake.log" 2>&1 &&
         cmake -S "$src" -B "$dir" -DCMAKE_BUILD_TYPE=Release -DGEN_DIR="$dir/gen" \
           >>"$dir/cmake.log" 2>&1 &&
         cmake --build "$dir" >>"$dir/cmake.log" 2>&1
@@ -248,6 +251,23 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-large" \
     env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$LARGE" 100 reliable "$LARGE_SIZE" -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$LARGE" "$TIMEOUT" reliable "$LARGE_SIZE"
+  # Content filtered topics (rustorb-dds#56): the subscriber reads
+  # "index > N/2"; the publisher writes 1..N, reliably. A peer writer
+  # that filters for the rustorb reader (from the filter it announces)
+  # and one that does not must both work. Cyclone DDS 0.10.4 has no SQL
+  # filters, so only its writer takes part.
+  # Fast DDS's hello_filtered has the type's TypeObject, so that its
+  # writer can filter for the rustorb reader.
+  PF=$P; [ "$peer" = fastdds ] && PF=${P}_filtered
+  run_case "$peer-to-rustorb-filtered" \
+    "$PF" pub @D@ "$RELIABLE" 20 reliable -- \
+    env RUSTORB_DROP_ONE_IN="$DROP" \
+    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" filtered
+  if [ "$peer" = fastdds ]; then
+    run_case "rustorb-to-$peer-filtered" \
+      env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 filtered -- \
+      timeout $((TIMEOUT + 5)) "${P}_filtered" sub @D@ "$RELIABLE" "$TIMEOUT" filtered
+  fi
   # XTypes. rustorb announces the TypeInformation of its types (and both
   # sides match by it when the peer does too); without it, by type name.
   run_case "$peer-to-rustorb-no-type-information" \

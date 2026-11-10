@@ -1,8 +1,8 @@
 // Hello world publisher and subscriber for Fast DDS, written against its
 // public C++ API only. Used by interop/run.sh.
 //
-//   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
-//   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
+//   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local|filtered [size]]
+//   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|filtered [size]]
 //
 // The publisher waits for a matched reader, then writes <count> samples.
 // The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -15,6 +15,13 @@
 // transient_local is reliable and TRANSIENT_LOCAL: the publisher writes at
 // once, before any subscriber is there, then waits for one and for its
 // acknowledgments; the subscriber creates its reader two seconds late.
+//
+// filtered is reliable, and the subscriber reads a ContentFilteredTopic,
+// "index > %0 AND message LIKE 'Hello%'" with <count> / 2 for %0: it must
+// get the samples after the first <count> / 2, in order, and no others.
+// Fast DDS 2.11 makes a ContentFilteredTopic only of a type whose
+// TypeObject it has: run.sh builds hello_filtered with the code of
+// fastddsgen -typeobject for that.
 //
 // The message is "Hello, world!", or with <size>, <size> letters that
 // depend on the index ('a' + (i + index) % 26 for the i-th), so that the
@@ -33,15 +40,20 @@
 #include <fastdds/dds/subscriber/DataReader.hpp>
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
 #include <fastdds/dds/subscriber/Subscriber.hpp>
+#include <fastdds/dds/topic/ContentFilteredTopic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "HelloWorldPubSubTypes.h"
+#ifdef HELLO_TYPEOBJECT
+#include "HelloWorldTypeObject.h"
+#endif
 
 using namespace eprosima::fastdds::dds;
 
 static const char* MESSAGE = "Hello, world!";
 static bool reliable = false;
 static bool transient_local = false;
+static bool filtered = false;
 
 static void wait_for_reader(DataWriter* writer)
 {
@@ -125,14 +137,26 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
     if (transient_local) {
         std::this_thread::sleep_for(std::chrono::seconds(2)); // join late
     }
-    DataReader* reader = sub->create_datareader(topic, qos);
+    // With a filter, the first `skip` samples are not to come.
+    int skip = filtered ? count / 2 : 0;
+    TopicDescription* description = topic;
+    if (filtered) {
+        description = pp->create_contentfilteredtopic(
+            "hello_world_filtered", topic, "index > %0 AND message LIKE 'Hello%'",
+            {std::to_string(skip)});
+        if (description == nullptr) {
+            std::fprintf(stderr, "fastdds: create_contentfilteredtopic failed\n");
+            return 1;
+        }
+    }
+    DataReader* reader = sub->create_datareader(description, qos);
     if (reader == nullptr) {
         std::fprintf(stderr, "fastdds: create_datareader failed\n");
         return 1;
     }
     int got = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
-    while (got < count && std::chrono::steady_clock::now() < deadline) {
+    while (got < count - skip && std::chrono::steady_clock::now() < deadline) {
         HelloWorld::Greeting g;
         SampleInfo info;
         if (reader->take_next_sample(&g, &info) == ReturnCode_t::RETCODE_OK) {
@@ -147,16 +171,16 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
             std::printf("fastdds: received %u\n", g.index());
             std::fflush(stdout);
             got++;
-            if (reliable && g.index() != static_cast<uint32_t>(got)) {
-                std::fprintf(stderr, "fastdds: expected %d, got %u\n", got, g.index());
+            if (reliable && g.index() != static_cast<uint32_t>(got + skip)) {
+                std::fprintf(stderr, "fastdds: expected %d, got %u\n", got + skip, g.index());
                 return 1;
             }
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
-    if (got < count) {
-        std::fprintf(stderr, "fastdds: got %d of %d samples\n", got, count);
+    if (got < count - skip) {
+        std::fprintf(stderr, "fastdds: got %d of %d samples\n", got, count - skip);
         return 1;
     }
     return 0;
@@ -171,7 +195,8 @@ int main(int argc, char** argv)
         return 2;
     }
     transient_local = argc >= 6 && std::string(argv[5]) == "transient_local";
-    reliable = transient_local || (argc >= 6 && std::string(argv[5]) == "reliable");
+    filtered = argc >= 6 && std::string(argv[5]) == "filtered";
+    reliable = transient_local || filtered || (argc >= 6 && std::string(argv[5]) == "reliable");
     if (argc == 7) {
         size = std::atol(argv[6]);
     }
@@ -184,6 +209,9 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "fastdds: create_participant failed\n");
         return 1;
     }
+#ifdef HELLO_TYPEOBJECT
+    registerHelloWorldTypes();
+#endif
     TypeSupport type(new HelloWorld::GreetingPubSubType());
     type.register_type(pp);
     Topic* topic = pp->create_topic("hello_world", type.get_type_name(), TOPIC_QOS_DEFAULT);

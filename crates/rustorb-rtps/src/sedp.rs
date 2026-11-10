@@ -1291,6 +1291,35 @@ mod tests {
     }
 
     #[test]
+    fn fast_dds_content_filter() {
+        // PID_CONTENT_FILTER_PROPERTY of a Fast DDS 2.11.2 reader of a
+        // ContentFilteredTopic (interop/fastdds/hello.cpp, filtered),
+        // little endian, captured.
+        let value = b"\x15\0\0\0hello_world_filtered\0\0\0\0\x0c\0\0\0hello_world\0\
+            \x07\0\0\0DDSSQL\0\0\x25\0\0\0index > %0 AND message LIKE 'Hello%'\0\0\0\0\
+            \x01\0\0\0\x02\0\0\x005\0\0\0";
+        let p = Parameter::new(pid::CONTENT_FILTER_PROPERTY, value.to_vec());
+        let f = crate::pl::PlValues::new(Endianness::Little)
+            .content_filter(&p)
+            .unwrap();
+        assert_eq!(
+            f,
+            ContentFilterProperty {
+                content_filtered_topic_name: "hello_world_filtered".into(),
+                related_topic_name: "hello_world".into(),
+                filter_class_name: "DDSSQL".into(),
+                filter_expression: "index > %0 AND message LIKE 'Hello%'".into(),
+                expression_parameters: vec!["5".into()],
+            }
+        );
+        let b = crate::pl::PlBuilder::new(Endianness::Little);
+        // The same, but for the padding of the list.
+        let mut ours = b.content_filter(pid::CONTENT_FILTER_PROPERTY, &f).value;
+        ours.resize(ours.len().next_multiple_of(4), 0);
+        assert_eq!(ours, value);
+    }
+
+    #[test]
     fn endpoint_data_round_trip() {
         let mut d = EndpointData::reader(rguid(1), "Square", "ShapeType");
         d.reliability.kind = ReliabilityKind::Reliable;

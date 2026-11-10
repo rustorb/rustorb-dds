@@ -7,8 +7,8 @@
 //! `HelloWorld::Greeting`. The full form, used by `interop/run.sh`:
 //!
 //! ```text
-//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
-//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
+//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local|filtered [size]]
+//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|filtered [size]]
 //! ```
 //!
 //! The publisher waits for a subscriber, then writes `count` samples. The
@@ -24,6 +24,11 @@
 //! writes its samples at once, before any subscriber is there, then
 //! waits for one and for its acknowledgments; the subscriber creates its
 //! reader two seconds late, and must still get them all.
+//!
+//! `filtered` is reliable, and the subscriber reads a content filtered
+//! topic, `index > %0 AND message LIKE 'Hello%'` with `count / 2` for
+//! `%0`: of the `count` samples sent, it must get those after the first
+//! `count / 2`, in order, and no others.
 //!
 //! The message is "Hello, world!", or with `size`, `size` letters that
 //! depend on the index (`a` + (i + index) % 26 for the i-th), so that a
@@ -62,9 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let domain = num(2, 0)? as u32;
     let count = num(3, 10)? as u32;
+    let filtered = args.get(5).map(String::as_str) == Some("filtered");
     let (reliable, transient_local) = match args.get(5).map(String::as_str) {
         None | Some("best_effort") => (false, false),
-        Some("reliable") => (true, false),
+        Some("reliable" | "filtered") => (true, false),
         Some("transient_local") => (true, true),
         Some(other) => return Err(format!("unknown reliability {other:?}").into()),
     };
@@ -90,7 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.drop_one_in = Some(n.parse()?);
     }
     let participant = DomainParticipant::with_config(config)?;
-    if std::env::var_os("RUSTORB_NO_TYPE_INFORMATION").is_none() {
+    // A content filter needs the type's description.
+    if filtered || std::env::var_os("RUSTORB_NO_TYPE_INFORMATION").is_none() {
         participant.register_type::<Greeting>()?;
     }
     let topic = participant.create_topic::<Greeting>("hello_world")?;
@@ -161,16 +168,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Join late: what was written before must still come.
                 std::thread::sleep(Duration::from_secs(2));
             }
-            let reader = participant
-                .create_subscriber()?
-                .create_datareader_with_qos(&topic, qos)?;
+            // With a filter, the first `skip` samples are not to come.
+            let skip = if filtered { count / 2 } else { 0 };
+            let subscriber = participant.create_subscriber()?;
+            let reader = if filtered {
+                let cft = participant.create_contentfilteredtopic(
+                    "hello_world_filtered",
+                    &topic,
+                    "index > %0 AND message LIKE 'Hello%'",
+                    &[skip.to_string()],
+                )?;
+                subscriber.create_datareader_with_qos(&cft, qos)?
+            } else {
+                subscriber.create_datareader_with_qos(&topic, qos)?
+            };
             let status = reader.status_condition();
             status.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
             let waitset = WaitSet::new();
             waitset.attach_condition(&status)?;
             println!("rustorb-dds: waiting for greetings...");
             let mut got = 0;
-            while got < count {
+            while got < count - skip {
                 let left = deadline.saturating_duration_since(Instant::now());
                 match waitset.wait(left) {
                     Err(Error::Timeout) => {
@@ -191,8 +209,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     println!("rustorb-dds: received {}", s.index);
                     got += 1;
-                    if reliable && s.index != got {
-                        return Err(format!("expected {got}, got {}", s.index).into());
+                    if reliable && s.index != got + skip {
+                        return Err(format!("expected {}, got {}", got + skip, s.index).into());
                     }
                 }
             }
