@@ -255,9 +255,13 @@ Found on the way:
 
 `ros2.sh` runs ROS 2's demo talker and listener (`demo_nodes_cpp`, topic
 `/chatter` of type `std_msgs/msg/String`) against the `ros2` example of
-the `rustorb-dds` crate, in both directions, with each ROS 2 middleware:
-`rmw_fastrtps_cpp` (Fast DDS) and `rmw_cyclonedds_cpp` (Cyclone DDS)
-(rustorb-dds#21). ROS 2 is a black box: its programs as distributed.
+the `rustorb-dds` crate, and its `add_two_ints_client` and
+`add_two_ints_server` (service `/add_two_ints` of type
+`example_interfaces/srv/AddTwoInts`) against the `ros2_service` example,
+in both directions, with each ROS 2 middleware: `rmw_fastrtps_cpp` (Fast
+DDS) and `rmw_cyclonedds_cpp` (Cyclone DDS) (rustorb-dds#21, #57). ROS 2
+is a black box: its programs as distributed. What ROS 2 services put on
+DDS, as seen in captures, is in [docs/rpc.md](../docs/rpc.md).
 
 ```sh
 source /opt/ros/jazzy/setup.bash
@@ -303,6 +307,7 @@ What a ROS 2 (Jazzy) node puts on DDS, seen from outside (with
 |---|---|---|---|
 | 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.6), `osrf/ros:jazzy-desktop` | both cases pass |
 | 2026-11-03 | rustorb-dds#21 | Jazzy, rmw_fastrtps_cpp 8.4.4 (Fast DDS 2.14.7) and rmw_cyclonedds_cpp 2.2.4 (Cyclone DDS 0.10.5), CI job `ros2` | all 4 cases pass |
+| 2026-11-10 | rustorb-dds#57 | Jazzy, rmw_fastrtps_cpp, `osrf/ros:jazzy-desktop` | all 4 cases pass, the 2 service cases included |
 
 ## OpenRTM-aist 2.0
 

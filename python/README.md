@@ -50,6 +50,8 @@ The type of a declared class is described to the network as an XTypes TypeObject
 
 `DomainParticipant(domain_id, localhost=False)`, `create_topic`, `create_contentfilteredtopic(name, topic, expression, parameters)` (readers of it get the samples that pass the filter; `set_expression_parameters` changes the parameters), `create_publisher(partition=[...])`, `create_subscriber`, `create_datawriter(topic, qos, listener, mask)`, `create_datareader(...)`.
 
+Requests and replies (DDS-RPC): `Requester(participant, request_topic, reply_topic)` with `wait_for_service`, `send_request` (returns a `SampleIdentity`), `receive_reply(identity, timeout)` and `request(sample, timeout)`; `Replier(participant, request_topic, reply_topic, instance_name=None)` with `receive_requests(timeout)` (`(sample, identity)` pairs) and `send_reply(sample, identity)`. See docs/rpc.md in the repository.
+
 `DataWriter`: `write`, `register_instance`, `unregister_instance`, `dispose`, `lookup_instance`, `wait_for_acknowledgments`, `wait_for_subscriptions`, statuses, `status_condition`, `set_listener`.
 
 `DataReader`: `take` / `read` (by state, or of an instance), `take_w_condition` / `read_w_condition`, `lookup_instance`, `get_key_value`, `wait_for_data`, `wait_for_publications`, statuses, `status_condition`, `create_readcondition`, `set_listener`.

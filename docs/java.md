@@ -73,6 +73,7 @@ done
 - 状態と event（`core.status`、`core.event`）、`DataWriterListener`・`DataReaderListener` と Adapter
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`
 - `ContentFilteredTopic`（`DomainParticipant.createContentFilteredTopic`、`getFilterExpression`、`getExpressionParameters`、`setExpressionParameters`、`getRelatedTopic`）。`createDataReader` に渡せる
+- DDS-RPC の `org.rustorb.dds.Requester`、`Replier`、`SampleIdentity`（rustorb の API。要求と応答のトピックから作る）。[rpc.md](rpc.md)
 - 例外：`ReturnCode_t` ごとに PSM の表 7.1 の例外（`TimeoutException`、`PreconditionNotMetException`、`AlreadyClosedException` など）
 
 ## PSM と違うところ、rustorb の拡張

@@ -60,6 +60,10 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 
 `rdds_participant_create_contentfilteredtopic` は `rdds_topic` からフィルタ式（DDS 1.4 付録 B）とその引数の文字列で `rdds_cftopic` を作る。その reader は `rdds_subscriber_create_filtered_reader` で作り、ほかの reader と同じに読む。引数は `rdds_cftopic_set_expression_parameters` で変えられる。式が型に合わなければ `RDDS_RETCODE_BAD_PARAMETER`。
 
+### 要求と応答（DDS-RPC）
+
+`rdds_requester_new` と `rdds_replier_new` は要求と応答の 2 つの `rdds_topic` から作る（QoS は NULL で RELIABLE、KEEP_ALL）。要求は `rdds_requester_send_request` が返す `rdds_sample_identity`（書き手の GUID と sequence number）で識別し、`rdds_requester_receive_reply` でその応答を待つ。サービス側は `rdds_replier_receive_request` で要求を 1 件ずつ受け、受け取った identity を `rdds_replier_send_reply` に渡す。待ち時間が尽きれば `RDDS_RETCODE_TIMEOUT`。標本の related sample identity は `rdds_samples_related_sample_identity` で読める。詳しくは [rpc.md](rpc.md)。
+
 ### WaitSet と条件
 
 guard・status・read の各条件は一つのハンドル型 `rdds_condition`。`rdds_waitset_wait` は真になった条件を、付けた順の番号で返す。言語側は番号から自分の条件オブジェクトを引く。

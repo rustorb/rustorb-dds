@@ -7,9 +7,9 @@ A DDS (Data Distribution Service) implementation in Rust, from the
 exchange samples with reliable or best-effort writers and readers over
 UDPv4, with keyed instances, large samples (DATA_FRAG), TRANSIENT_LOCAL
 durability, partitions, LIVELINESS and DEADLINE, and WaitSets, conditions
-and listeners for the communication statuses, and content filtered topics. Hello world works both ways with Cyclone DDS
+and listeners for the communication statuses, content filtered topics, and requests and replies (DDS-RPC). Hello world works both ways with Cyclone DDS
 and Fast DDS, reliable transient-local and liveliness too, and `std_msgs/msg/String` both ways
-with ROS 2's demo talker and listener ([interop](interop/)). The plan is
+with ROS 2's demo talker and listener, and the `add_two_ints` service both ways ([interop](interop/)). The plan is
 [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111).
 
 Try the hello world in two terminals:

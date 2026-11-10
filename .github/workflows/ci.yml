@@ -191,7 +191,14 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/jazzy/setup.bash
+          # A capture of the cases, kept with the logs, to see what each
+          # middleware puts on the wire.
+          mkdir -p target/interop-ros2
+          sudo tcpdump -i lo -U -Z root -w target/interop-ros2/ros2.pcap udp >/dev/null 2>&1 &
           interop/ros2.sh
+      - name: Stop the capture
+        if: always()
+        run: sudo pkill tcpdump || true
       - name: Keep the logs and versions
         if: always()
         uses: actions/upload-artifact@v4
