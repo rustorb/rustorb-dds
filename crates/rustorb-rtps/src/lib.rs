@@ -68,7 +68,7 @@ pub mod wlp;
 
 pub use error::{DecodeError, EncodeError};
 pub use message::{Header, Message, PROTOCOL_RTPS, Submessages};
-pub use parameter::{Parameter, ParameterId, ParameterList};
+pub use parameter::{Parameter, ParameterId, ParameterList, SecurityParameters};
 pub use submessage::{
     AckNack, Checksum, Data, DataFrag, Gap, HeaderExtension, Heartbeat, HeartbeatFrag,
     HeartbeatGroupInfo, InfoDestination, InfoReply, InfoReplyIp4, InfoSource, InfoTimestamp,

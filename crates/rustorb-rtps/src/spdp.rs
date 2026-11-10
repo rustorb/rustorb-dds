@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::error::DecodeError;
 use crate::message::{Header, Message};
-use crate::parameter::ParameterList;
+use crate::parameter::{ParameterList, SecurityParameters};
 use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
 use crate::submessage::{Data, InfoTimestamp, PayloadKind, SerializedPayload, Submessage};
 use crate::types::{
@@ -58,6 +58,8 @@ pub struct ParticipantData {
     pub user_data: Vec<u8>,
     /// `PID_ENTITY_NAME`, if any.
     pub entity_name: Option<String>,
+    /// The parameters of DDS Security: tokens and security info.
+    pub security: SecurityParameters,
 }
 
 impl ParticipantData {
@@ -86,6 +88,7 @@ impl ParticipantData {
             builtin_endpoint_qos: None,
             user_data: Vec::new(),
             entity_name: None,
+            security: SecurityParameters::default(),
         }
     }
 
@@ -149,6 +152,9 @@ impl ParticipantData {
         if let Some(n) = &self.entity_name {
             l.push(b.string(pid::ENTITY_NAME, n));
         }
+        for p in self.security.of(endianness) {
+            l.push(p.clone());
+        }
         l
     }
 
@@ -197,6 +203,7 @@ impl ParticipantData {
                 pid::BUILTIN_ENDPOINT_QOS => d.builtin_endpoint_qos = Some(v.u32(p)?),
                 pid::USER_DATA => d.user_data = v.octets(p)?,
                 pid::ENTITY_NAME => d.entity_name = Some(v.string(p)?),
+                id if SecurityParameters::is_security(id) => d.security.push(p.clone(), endianness),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }

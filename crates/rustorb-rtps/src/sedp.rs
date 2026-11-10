@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use crate::error::DecodeError;
-use crate::parameter::{Parameter, ParameterList};
+use crate::parameter::{Parameter, ParameterList, SecurityParameters};
 use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
 use crate::qos::{
     DurabilityKind, Liveliness, QosPolicyId, Reliability, RxO, incompatible_policies,
@@ -116,6 +116,9 @@ pub struct EndpointData {
     /// `service_instance_name` (`PID_SERVICE_INSTANCE_NAME`, DDS-RPC 1.0,
     /// 7.6.2.1), of the endpoints of a service.
     pub service_instance_name: Option<String>,
+    /// The parameters of DDS Security, such as the endpoint security
+    /// info.
+    pub security: SecurityParameters,
 }
 
 /// `ContentFilterProperty_t` (DDSI-RTPS 2.5, 8.7.3.1, Table 8.86): the
@@ -187,6 +190,7 @@ impl EndpointData {
             content_filter: None,
             related_entity_guid: None,
             service_instance_name: None,
+            security: SecurityParameters::default(),
         }
     }
 
@@ -308,6 +312,9 @@ impl EndpointData {
                 l.push(Parameter::new(pid::TYPE_INFORMATION, v));
             }
         }
+        for p in self.security.of(endianness) {
+            l.push(p.clone());
+        }
         l
     }
 
@@ -377,6 +384,7 @@ impl EndpointData {
                 // DDS-RPC's extensions are optional too.
                 pid::RELATED_ENTITY_GUID => d.related_entity_guid = v.guid(p).ok(),
                 pid::SERVICE_INSTANCE_NAME => d.service_instance_name = v.string(p).ok(),
+                id if SecurityParameters::is_security(id) => d.security.push(p.clone(), endianness),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }
