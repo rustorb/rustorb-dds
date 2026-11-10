@@ -2,6 +2,7 @@
 //! data for it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -74,6 +75,10 @@ pub struct ParticipantConfig {
     /// to the other participants with SPDP. Empty by default. ROS 2
     /// announces `enclave=/;` here.
     pub user_data: Vec<u8>,
+    /// Whether to exchange messages with the participants of rustorb-dds
+    /// on this host through shared memory rather than UDP (feature `shm`,
+    /// Unix; true by default). Others are reached by UDP either way.
+    pub shared_memory: bool,
 }
 
 impl ParticipantConfig {
@@ -96,6 +101,7 @@ impl ParticipantConfig {
             reader: ReaderConfig::default(),
             drop_one_in: None,
             user_data: Vec::new(),
+            shared_memory: true,
         }
     }
 
@@ -913,6 +919,9 @@ pub(crate) struct Shared {
     /// to wake when a status changes.
     pub(crate) waitsets: Mutex<Vec<Weak<Waker>>>,
     pub(crate) transport: UdpTransport,
+    /// The shared memory transport, if it is on.
+    #[cfg(all(unix, feature = "shm"))]
+    shm: Option<rustorb_rtps::shm::ShmTransport>,
     pub(crate) prefix: GuidPrefix,
     domain_id: u32,
     inner: Mutex<Inner>,
@@ -927,6 +936,37 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Sends a message to one destination, given by its locators:
+    /// through shared memory if the peer has a locator of it that can be
+    /// used, else to its other locators. Whether some send went, and the
+    /// last error.
+    pub(crate) fn send(&self, bytes: &[u8], locators: &[Locator]) -> (bool, Option<io::Error>) {
+        let mut sent = false;
+        let mut last_err = None;
+        #[cfg(all(unix, feature = "shm"))]
+        if let Some(shm) = &self.shm {
+            for l in shm.select(locators) {
+                let r = if l.kind == Locator::KIND_SHM {
+                    shm.send(bytes, l)
+                } else {
+                    self.transport.send(bytes, l)
+                };
+                match r {
+                    Ok(()) => sent = true,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return (sent, last_err);
+        }
+        for l in locators.iter().filter(|l| l.kind != Locator::KIND_SHM) {
+            match self.transport.send(bytes, l) {
+                Ok(()) => sent = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        (sent, last_err)
+    }
+
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Inner>> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.deleted {
@@ -1394,11 +1434,10 @@ impl Shared {
         let mut last_err = None;
         let mut sent = false;
         for o in &out {
-            for l in &o.locators {
-                match self.transport.send(&o.bytes, l) {
-                    Ok(()) => sent = true,
-                    Err(e) => last_err = Some(e),
-                }
+            let (ok, err) = self.send(&o.bytes, &o.locators);
+            sent |= ok;
+            if err.is_some() {
+                last_err = err;
             }
         }
         match last_err {
@@ -1471,9 +1510,7 @@ impl Shared {
         // sent (to a locator kind not supported here, say) is not an
         // error of the call.
         for o in &out {
-            for l in &o.locators {
-                let _ = self.transport.send(&o.bytes, l);
-            }
+            let _ = self.send(&o.bytes, &o.locators);
         }
         Ok(())
     }
@@ -1770,6 +1807,24 @@ impl DomainParticipant {
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
         data.default_multicast_locators = transport.user_multicast_locators();
+        #[cfg(all(unix, feature = "shm"))]
+        let shm = if config.shared_memory {
+            // Without shared memory (no /dev/shm, say), UDP alone.
+            rustorb_rtps::shm::ShmTransport::open(
+                &rustorb_rtps::shm::ShmConfig::default(),
+                prefix,
+                transport.injector(),
+            )
+            .ok()
+        } else {
+            None
+        };
+        #[cfg(all(unix, feature = "shm"))]
+        if let Some(shm) = &shm {
+            data.metatraffic_unicast_locators
+                .push(shm.metatraffic_locator());
+            data.default_unicast_locators.push(shm.user_locator());
+        }
         data.lease_duration = rustorb_rtps::Duration::from_std(config.lease_duration);
         data.user_data = config.user_data.clone();
         let mut spdp_config = SpdpConfig::new(domain_id, transport.discovery_multicast_locators());
@@ -1810,6 +1865,8 @@ impl DomainParticipant {
             this: this.clone(),
             waitsets: Mutex::new(Vec::new()),
             transport,
+            #[cfg(all(unix, feature = "shm"))]
+            shm,
             prefix,
             domain_id,
             inner: Mutex::new(inner),
@@ -2048,9 +2105,7 @@ impl Drop for DomainParticipant {
         let (bytes, to) = g.spdp.dispose();
         let to = to.to_vec();
         drop(g);
-        for l in &to {
-            let _ = self.shared.transport.send(&bytes, l);
-        }
+        let _ = self.shared.send(&bytes, &to);
         self.shared.data_arrived.notify_all();
         self.shared.acknowledged.notify_all();
         self.shared.wake_waitsets();
@@ -2166,11 +2221,9 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         }
     }
     for (bytes, to) in out {
-        for l in &to {
-            // Discovery and reliable traffic are repeated, so a datagram
-            // that cannot be sent now is sent again later.
-            let _ = shared.transport.send(&bytes, l);
-        }
+        // Discovery and reliable traffic are repeated, so a datagram
+        // that cannot be sent now is sent again later.
+        let _ = shared.send(&bytes, &to);
     }
     shared.flush();
 }

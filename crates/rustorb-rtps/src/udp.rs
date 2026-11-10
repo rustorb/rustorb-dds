@@ -217,6 +217,8 @@ pub struct UdpTransport {
     multicast_senders: Vec<UdpSocket>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// For other transports to deliver to the same [`Incoming`].
+    tx: mpsc::Sender<Datagram>,
 }
 
 impl UdpTransport {
@@ -287,9 +289,16 @@ impl UdpTransport {
                 multicast_senders,
                 stop,
                 threads,
+                tx,
             },
             Incoming { rx },
         ))
+    }
+
+    /// A sender of datagrams to this transport's [`Incoming`], for
+    /// another transport (shared memory) to deliver there too.
+    pub fn injector(&self) -> mpsc::Sender<Datagram> {
+        self.tx.clone()
     }
 
     /// The domain id.

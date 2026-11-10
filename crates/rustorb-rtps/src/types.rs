@@ -708,6 +708,10 @@ impl Locator {
     pub const KIND_UDPV4: i32 = 1;
     /// `LOCATOR_KIND_UDPv6`.
     pub const KIND_UDPV6: i32 = 2;
+    /// The shared memory transport of rustorb-dds (a vendor kind, "RD"
+    /// and 1): the address holds the host and the segment, the port the
+    /// traffic (see the module `shm`).
+    pub const KIND_SHM: i32 = 0x5244_0001;
     /// `LOCATOR_PORT_INVALID`.
     pub const PORT_INVALID: u32 = 0;
     /// `LOCATOR_ADDRESS_INVALID`.
