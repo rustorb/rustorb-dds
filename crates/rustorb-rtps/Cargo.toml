@@ -16,13 +16,11 @@ rustorb-cdr.workspace = true
 rustorb-typesupport.workspace = true
 rustorb-xtypes.workspace = true
 socket2.workspace = true
-
-[target.'cfg(unix)'.dependencies]
 memmap2 = { workspace = true, optional = true }
 
 [features]
 default = ["shm"]
-# The shared memory transport between participants of one host (Unix).
+# The shared memory transport between participants of one host.
 shm = ["dep:memmap2"]
 
 [lints]

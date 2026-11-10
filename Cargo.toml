@@ -26,7 +26,7 @@ rustorb-rtps = { path = "crates/rustorb-rtps", default-features = false }
 # Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
 # MIT OR Apache-2.0.
 socket2 = { version = "0.6", features = ["all"] }
-# Mapping the segments of the shared memory transport (Unix).
+# Mapping the segments of the shared memory transport.
 # MIT OR Apache-2.0.
 memmap2 = "0.9"
 # The shared parts of rustorb, released in 0.2.0 (rustorb/rustorb#114).

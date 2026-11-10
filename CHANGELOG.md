@@ -9,9 +9,9 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 ### Added
 
 - A shared memory transport between participants of rustorb-dds on one
-  host (Unix, feature `shm`, on by default): a ring buffer in a mapped
-  file of `/dev/shm` per participant and a Unix datagram socket to wake
-  it, announced in SPDP with locators of a vendor kind; UDP with other
+  host (feature `shm`, on by default; Linux, macOS and Windows): a ring
+  buffer in a mapped file of `/dev/shm` (else the temporary directory)
+  per participant and a loopback UDP port to wake it, announced in SPDP with locators of a vendor kind; UDP with other
   implementations and other hosts. `ParticipantConfig::shared_memory`
   turns it off (docs/shm.md, #58).
 - Requests and replies over DDS (DDS-RPC 1.0, the request/reply style):

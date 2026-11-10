@@ -1,7 +1,7 @@
 //! The shared memory transport between participants of one host, and
 //! UDP with a participant that does not use it.
 
-#![cfg(all(unix, feature = "shm"))]
+#![cfg(feature = "shm")]
 
 #[path = "../examples/keyed/shape.rs"]
 mod shape;

@@ -1,10 +1,11 @@
 //! A shared memory transport for participants of rustorb-dds on the same
-//! host (Unix only, feature `shm`).
+//! host (feature `shm`).
 //!
 //! Each participant has a receive segment: a file in a shared memory
-//! directory (`/dev/shm` on Linux), mapped by every process that sends to
-//! it, holding a ring buffer of RTPS messages; and a Unix datagram socket
-//! beside it that senders ring after writing. Senders take turns through a
+//! directory (`/dev/shm` on Linux, else the temporary directory), mapped
+//! by every process that sends to it, holding a ring buffer of RTPS
+//! messages; and a UDP socket on the loopback interface, whose port the
+//! segment gives, that senders ring after writing. Senders take turns through a
 //! lock in the segment. A message that does not fit is dropped, like a
 //! datagram lost on the way: the reliable protocol repairs it.
 //!
@@ -18,7 +19,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::net::UnixDatagram;
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -37,13 +38,15 @@ pub const PORT_USER: u32 = 2;
 
 /// "RSHM" and the layout version.
 const MAGIC: u64 = 0x5253_484d_0000_0001;
-/// The header: magic, capacity, lock, head, tail, each on its own word.
+/// The header: magic, capacity, lock, head, tail and the port of the
+/// receiver's bell, each on its own word.
 const HEADER: usize = 64;
 const OFF_MAGIC: usize = 0;
 const OFF_CAPACITY: usize = 8;
 const OFF_LOCK: usize = 16;
 const OFF_HEAD: usize = 24;
 const OFF_TAIL: usize = 32;
+const OFF_BELL: usize = 40;
 /// A record: its length and port, then the message, padded to 8.
 const RECORD_HEADER: usize = 8;
 /// The length that marks the rest of the buffer as unused.
@@ -57,8 +60,8 @@ const LOCK_PATIENCE: Duration = Duration::from_millis(500);
 /// How the transport is set up.
 #[derive(Clone, Debug)]
 pub struct ShmConfig {
-    /// The directory of the segments and sockets: `/dev/shm` where it
-    /// exists, else the temporary directory.
+    /// The directory of the segments: `/dev/shm` where it exists, else
+    /// the temporary directory.
     pub directory: PathBuf,
     /// The size of the receive buffer, in octets (default 4 MiB). A
     /// message larger than a quarter of it cannot be sent this way.
@@ -88,6 +91,7 @@ fn host_id() -> [u8; 8] {
         .find_map(|p| std::fs::read_to_string(p).ok())
         .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
     fnv(text.trim().as_bytes()).to_be_bytes()
 }
@@ -102,11 +106,8 @@ fn fnv(b: &[u8]) -> u64 {
     h
 }
 
-fn names(dir: &Path, segment: u64) -> (PathBuf, PathBuf) {
-    (
-        dir.join(format!("rustorb-dds-{segment:016x}")),
-        dir.join(format!("rustorb-dds-{segment:016x}.sock")),
-    )
+fn segment_path(dir: &Path, segment: u64) -> PathBuf {
+    dir.join(format!("rustorb-dds-{segment:016x}"))
 }
 
 /// A mapped segment.
@@ -121,7 +122,7 @@ unsafe impl Send for Segment {}
 unsafe impl Sync for Segment {}
 
 impl Segment {
-    fn create(path: &Path, capacity: usize) -> io::Result<Segment> {
+    fn create(path: &Path, capacity: usize, bell: u16) -> io::Result<Segment> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -131,6 +132,7 @@ impl Segment {
         let s = Segment::map(&file, capacity)?;
         s.word(OFF_CAPACITY)
             .store(capacity as u64, Ordering::Relaxed);
+        s.word(OFF_BELL).store(u64::from(bell), Ordering::Relaxed);
         s.word(OFF_MAGIC).store(MAGIC, Ordering::Release);
         Ok(s)
     }
@@ -163,6 +165,12 @@ impl Segment {
         unsafe { &*(self.map.as_ptr().add(off) as *const AtomicU64) }
     }
 
+    /// The receiver's bell.
+    fn bell(&self) -> SocketAddr {
+        let port = self.word(OFF_BELL).load(Ordering::Relaxed) as u16;
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
     fn lock_word(&self) -> &AtomicU32 {
         // SAFETY: as in `word`.
         unsafe { &*(self.map.as_ptr().add(OFF_LOCK) as *const AtomicU32) }
@@ -189,9 +197,14 @@ impl Segment {
                     return true;
                 }
             } else if start.elapsed() > LOCK_PATIENCE {
-                // A holder that is gone (on Linux, no /proc/<pid>) left it.
-                let gone = Path::new("/proc/self").exists()
-                    && !Path::new(&format!("/proc/{held}")).exists();
+                // A holder that is gone left it: on Linux, one with no
+                // /proc/<pid>; elsewhere, one that kept it far longer
+                // than a copy takes.
+                let gone = if Path::new("/proc/self").exists() {
+                    !Path::new(&format!("/proc/{held}")).exists()
+                } else {
+                    start.elapsed() > 4 * LOCK_PATIENCE
+                };
                 if gone
                     && lock
                         .compare_exchange(held, me, Ordering::Acquire, Ordering::Relaxed)
@@ -199,7 +212,7 @@ impl Segment {
                 {
                     return true;
                 }
-                if start.elapsed() > 4 * LOCK_PATIENCE {
+                if start.elapsed() > 8 * LOCK_PATIENCE {
                     return false;
                 }
             }
@@ -288,10 +301,9 @@ impl Segment {
     }
 }
 
-/// A peer's segment and socket, opened on first use.
+/// A peer's segment, opened on first use.
 struct Peer {
     segment: Segment,
-    socket: PathBuf,
 }
 
 /// The shared memory transport of one participant.
@@ -299,10 +311,11 @@ pub struct ShmTransport {
     host: [u8; 8],
     segment_id: u64,
     directory: PathBuf,
-    paths: (PathBuf, PathBuf),
+    path: PathBuf,
     /// Peers by segment; `None` for one that could not be opened.
     peers: Mutex<HashMap<u64, Option<Arc<Peer>>>>,
-    bell: UnixDatagram,
+    /// Rings the peers' bells.
+    bell: UdpSocket,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -310,7 +323,7 @@ pub struct ShmTransport {
 impl std::fmt::Debug for ShmTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShmTransport")
-            .field("segment", &self.paths.0)
+            .field("segment", &self.path)
             .finish()
     }
 }
@@ -325,19 +338,13 @@ impl ShmTransport {
         tx: mpsc::Sender<Datagram>,
     ) -> io::Result<ShmTransport> {
         let segment_id = fnv(&prefix.0) ^ u64::from(std::process::id());
-        let paths = names(&config.directory, segment_id);
-        let _ = std::fs::remove_file(&paths.0);
-        let _ = std::fs::remove_file(&paths.1);
-        let segment = Arc::new(Segment::create(&paths.0, config.capacity)?);
-        let socket = match UnixDatagram::bind(&paths.1) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = std::fs::remove_file(&paths.0);
-                return Err(e);
-            }
-        };
+        let path = segment_path(&config.directory, segment_id);
+        let _ = std::fs::remove_file(&path);
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         socket.set_read_timeout(Some(POLL))?;
-        let bell = UnixDatagram::unbound()?;
+        let port = socket.local_addr()?.port();
+        let segment = Arc::new(Segment::create(&path, config.capacity, port)?);
+        let bell = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         bell.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -350,7 +357,7 @@ impl ShmTransport {
             host: host_id(),
             segment_id,
             directory: config.directory.clone(),
-            paths,
+            path,
             peers: Mutex::new(HashMap::new()),
             bell,
             stop,
@@ -389,13 +396,9 @@ impl ShmTransport {
         peers
             .entry(id)
             .or_insert_with(|| {
-                let (seg, sock) = names(&self.directory, id);
-                Segment::open(&seg).ok().map(|segment| {
-                    Arc::new(Peer {
-                        segment,
-                        socket: sock,
-                    })
-                })
+                Segment::open(&segment_path(&self.directory, id))
+                    .ok()
+                    .map(|segment| Arc::new(Peer { segment }))
             })
             .clone()
     }
@@ -427,7 +430,7 @@ impl ShmTransport {
                 "the shared memory buffer is full",
             ));
         }
-        match self.bell.send_to(&[0], &peer.socket) {
+        match self.bell.send_to(&[0], peer.segment.bell()) {
             Ok(_) => Ok(()),
             // The peer is busy or its socket is full: it drains the ring
             // at its next wake-up anyway.
@@ -450,19 +453,20 @@ impl Drop for ShmTransport {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        let _ = std::fs::remove_file(&self.paths.0);
-        let _ = std::fs::remove_file(&self.paths.1);
+        // On Windows this fails while a peer still maps the file; the
+        // next participant with the same id removes it.
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
 fn receive_loop(
     segment: &Segment,
-    socket: &UnixDatagram,
+    socket: &UdpSocket,
     stop: &AtomicBool,
     tx: &mpsc::Sender<Datagram>,
 ) {
     let mut buf = [0u8; 64];
-    let source = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let source = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     while !stop.load(Ordering::Relaxed) {
         // A ring, or the poll interval, wakes it; then it drains the
         // buffer, which may hold more than one message per ring.
@@ -570,9 +574,9 @@ mod tests {
     fn dropping_removes_the_files() {
         let (tx, _rx) = mpsc::channel();
         let a = ShmTransport::open(&config(), prefix(5), tx).unwrap();
-        let (seg, sock) = a.paths.clone();
-        assert!(seg.exists() && sock.exists());
+        let seg = a.path.clone();
+        assert!(seg.exists());
         drop(a);
-        assert!(!seg.exists() && !sock.exists());
+        assert!(!seg.exists());
     }
 }

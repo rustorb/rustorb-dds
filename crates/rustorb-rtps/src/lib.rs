@@ -56,7 +56,7 @@ pub mod qos;
 pub mod receiver;
 pub mod reliable;
 pub mod sedp;
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(feature = "shm")]
 pub mod shm;
 pub mod spdp;
 mod submessage;

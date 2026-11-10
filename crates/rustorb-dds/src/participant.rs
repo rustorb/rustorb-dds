@@ -76,8 +76,8 @@ pub struct ParticipantConfig {
     /// announces `enclave=/;` here.
     pub user_data: Vec<u8>,
     /// Whether to exchange messages with the participants of rustorb-dds
-    /// on this host through shared memory rather than UDP (feature `shm`,
-    /// Unix; true by default). Others are reached by UDP either way.
+    /// on this host through shared memory rather than UDP (feature `shm`;
+    /// true by default). Others are reached by UDP either way.
     pub shared_memory: bool,
 }
 
@@ -920,7 +920,7 @@ pub(crate) struct Shared {
     pub(crate) waitsets: Mutex<Vec<Weak<Waker>>>,
     pub(crate) transport: UdpTransport,
     /// The shared memory transport, if it is on.
-    #[cfg(all(unix, feature = "shm"))]
+    #[cfg(feature = "shm")]
     shm: Option<rustorb_rtps::shm::ShmTransport>,
     pub(crate) prefix: GuidPrefix,
     domain_id: u32,
@@ -943,7 +943,7 @@ impl Shared {
     pub(crate) fn send(&self, bytes: &[u8], locators: &[Locator]) -> (bool, Option<io::Error>) {
         let mut sent = false;
         let mut last_err = None;
-        #[cfg(all(unix, feature = "shm"))]
+        #[cfg(feature = "shm")]
         if let Some(shm) = &self.shm {
             for l in shm.select(locators) {
                 let r = if l.kind == Locator::KIND_SHM {
@@ -1807,7 +1807,7 @@ impl DomainParticipant {
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
         data.default_multicast_locators = transport.user_multicast_locators();
-        #[cfg(all(unix, feature = "shm"))]
+        #[cfg(feature = "shm")]
         let shm = if config.shared_memory {
             // Without shared memory (no /dev/shm, say), UDP alone.
             rustorb_rtps::shm::ShmTransport::open(
@@ -1819,7 +1819,7 @@ impl DomainParticipant {
         } else {
             None
         };
-        #[cfg(all(unix, feature = "shm"))]
+        #[cfg(feature = "shm")]
         if let Some(shm) = &shm {
             data.metatraffic_unicast_locators
                 .push(shm.metatraffic_locator());
@@ -1865,7 +1865,7 @@ impl DomainParticipant {
             this: this.clone(),
             waitsets: Mutex::new(Vec::new()),
             transport,
-            #[cfg(all(unix, feature = "shm"))]
+            #[cfg(feature = "shm")]
             shm,
             prefix,
             domain_id,

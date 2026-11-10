@@ -18,7 +18,7 @@ rustorb-typesupport.workspace = true
 
 [features]
 default = ["shm"]
-# The shared memory transport between participants of one host (Unix).
+# The shared memory transport between participants of one host.
 shm = ["rustorb-rtps/shm"]
 
 [dev-dependencies]
