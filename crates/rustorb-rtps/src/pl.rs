@@ -71,6 +71,14 @@ pub mod pid {
     pub const DEFAULT_UNICAST_LOCATOR: ParameterId = ParameterId(0x0031);
     /// `PID_METATRAFFIC_UNICAST_LOCATOR`.
     pub const METATRAFFIC_UNICAST_LOCATOR: ParameterId = ParameterId(0x0032);
+    /// `PID_SERVICE_INSTANCE_NAME` (DDS-RPC 1.0, 7.6.2.1).
+    pub const SERVICE_INSTANCE_NAME: ParameterId = ParameterId(0x0080);
+    /// `PID_RELATED_ENTITY_GUID` (DDS-RPC 1.0, 7.6.2.1).
+    pub const RELATED_ENTITY_GUID: ParameterId = ParameterId(0x0081);
+    /// `PID_TOPIC_ALIASES` (DDS-RPC 1.0, 7.6.2.1).
+    pub const TOPIC_ALIASES: ParameterId = ParameterId(0x0082);
+    /// `PID_RELATED_SAMPLE_IDENTITY`, in-line (DDS-RPC 1.0, 7.8.2).
+    pub const RELATED_SAMPLE_IDENTITY: ParameterId = ParameterId(0x0083);
     /// `PID_METATRAFFIC_MULTICAST_LOCATOR`.
     pub const METATRAFFIC_MULTICAST_LOCATOR: ParameterId = ParameterId(0x0033);
     /// `PID_PARTICIPANT_MANUAL_LIVELINESS_COUNT`.

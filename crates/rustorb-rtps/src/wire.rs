@@ -58,6 +58,10 @@ impl<'a> Reader<'a> {
         }
     }
 
+    pub(crate) fn endianness(&self) -> Endianness {
+        self.endianness
+    }
+
     pub(crate) fn position(&self) -> usize {
         self.pos
     }

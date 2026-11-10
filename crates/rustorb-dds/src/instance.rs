@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::BitOr;
 
-use rustorb_rtps::{Guid, SequenceNumber, Time};
+use rustorb_rtps::{Guid, SampleIdentity, SequenceNumber, Time};
 
 use crate::qos::{History, ResourceLimits};
 use crate::status::{SampleLostStatus, SampleRejectedReason, SampleRejectedStatus};
@@ -176,6 +176,10 @@ pub struct SampleInfo {
     pub writer: Guid,
     /// Its sequence number from that writer.
     pub sequence_number: SequenceNumber,
+    /// The sample this one answers, when its writer said
+    /// (`PID_RELATED_SAMPLE_IDENTITY`, DDS-RPC 1.0, 7.8.2): the request
+    /// of a reply.
+    pub related_sample_identity: Option<SampleIdentity>,
     /// How many times the instance went from disposed to alive, when the
     /// sample arrived.
     pub disposed_generation_count: u32,
@@ -209,6 +213,7 @@ pub(crate) struct Incoming {
     pub(crate) writer: Guid,
     pub(crate) sequence_number: SequenceNumber,
     pub(crate) source_timestamp: Option<Time>,
+    pub(crate) related_sample_identity: Option<SampleIdentity>,
     pub(crate) instance: InstanceHandle,
     pub(crate) change: Change,
 }
@@ -220,6 +225,7 @@ struct Stored {
     writer: Guid,
     sequence_number: SequenceNumber,
     source_timestamp: Option<Time>,
+    related_sample_identity: Option<SampleIdentity>,
     read: bool,
     disposed_generation_count: u32,
     no_writers_generation_count: u32,
@@ -437,6 +443,7 @@ impl ReaderHistory {
             writer: c.writer,
             sequence_number: c.sequence_number,
             source_timestamp: c.source_timestamp,
+            related_sample_identity: c.related_sample_identity,
             read: false,
             disposed_generation_count: inst.disposed_generation_count,
             no_writers_generation_count: inst.no_writers_generation_count,
@@ -523,6 +530,7 @@ impl ReaderHistory {
                 writer: *writer,
                 sequence_number: SequenceNumber(0),
                 source_timestamp: None,
+                related_sample_identity: None,
                 read: false,
                 disposed_generation_count: inst.disposed_generation_count,
                 no_writers_generation_count: inst.no_writers_generation_count,
@@ -641,6 +649,7 @@ impl ReaderHistory {
                     instance_handle: *h,
                     writer: s.writer,
                     sequence_number: s.sequence_number,
+                    related_sample_identity: s.related_sample_identity,
                     disposed_generation_count: s.disposed_generation_count,
                     no_writers_generation_count: s.no_writers_generation_count,
                     sample_rank: 0,
@@ -691,6 +700,7 @@ mod tests {
             writer,
             sequence_number: SequenceNumber(sn),
             source_timestamp: None,
+            related_sample_identity: None,
             instance: h(inst),
             change: Change::Write(vec![v]),
         }

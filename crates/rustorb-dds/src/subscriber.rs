@@ -143,8 +143,8 @@ pub struct Sample<T> {
 /// read or taken. Dropping the reader tells the other participants it is
 /// gone.
 pub struct DataReader<T> {
-    shared: Arc<Shared>,
-    guid: Guid,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) guid: Guid,
     /// Whether dropping this handle deletes the reader: not for the
     /// handle given to a listener.
     owned: bool,

@@ -79,6 +79,7 @@ mod listener;
 mod participant;
 mod publisher;
 mod qos;
+pub mod rpc;
 mod status;
 mod subscriber;
 #[cfg(test)]
@@ -95,7 +96,7 @@ pub use instance::{
 };
 pub use listener::{DataReaderListener, DataWriterListener};
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
-pub use publisher::{DataWriter, Publisher};
+pub use publisher::{DataWriter, Publisher, WriteParams};
 pub use qos::{
     DataReaderQos, DataWriterQos, DurabilityKind, History, Liveliness, LivelinessKind,
     PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos, TypeConsistency,
@@ -103,7 +104,7 @@ pub use qos::{
 };
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
-pub use rustorb_rtps::{Guid, GuidPrefix, SequenceNumber, Time};
+pub use rustorb_rtps::{Guid, GuidPrefix, SampleIdentity, SequenceNumber, Time};
 pub use rustorb_typesupport::TopicType;
 pub use rustorb_xtypes::dynamic::ContentFilter;
 pub use rustorb_xtypes::dynamic::{
