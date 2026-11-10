@@ -35,6 +35,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p rustorb-dds --features security --all-targets --locked -- -D warnings
 
   test:
     strategy:
@@ -48,6 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+      - run: cargo test -p rustorb-dds --features security --locked
 
   msrv:
     runs-on: ubuntu-latest
@@ -56,6 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
+      - run: cargo build -p rustorb-dds --features security --locked
 
   doc:
     runs-on: ubuntu-latest

@@ -180,6 +180,13 @@ impl DataHolder {
         w.into_inner()
     }
 
+    /// Its CDR, little-endian if `little`.
+    pub fn to_cdr_endian(&self, little: bool) -> Vec<u8> {
+        let mut w = CdrWriter::with_endian(little);
+        self.write(&mut w);
+        w.into_inner()
+    }
+
     /// From CDR, little-endian if `little`.
     pub fn from_cdr(b: &[u8], little: bool) -> Result<Self, Error> {
         Self::read(&mut CdrReader::with_endian(b, little))

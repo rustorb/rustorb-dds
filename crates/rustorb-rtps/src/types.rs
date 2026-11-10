@@ -160,25 +160,33 @@ impl EntityId {
     /// SEDPbuiltinPublicationsSecureReader.
     pub const SEDP_BUILTIN_PUBLICATIONS_SECURE_READER: EntityId = EntityId::new([0xff, 0, 3], 0xc7);
     /// SEDPbuiltinSubscriptionsSecureWriter.
-    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER: EntityId = EntityId::new([0xff, 0, 4], 0xc2);
+    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 0, 4], 0xc2);
     /// SEDPbuiltinSubscriptionsSecureReader.
-    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER: EntityId = EntityId::new([0xff, 0, 4], 0xc7);
+    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER: EntityId =
+        EntityId::new([0xff, 0, 4], 0xc7);
     /// BuiltinParticipantMessageSecureWriter.
-    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER: EntityId = EntityId::new([0xff, 2, 0], 0xc2);
+    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 2, 0], 0xc2);
     /// BuiltinParticipantMessageSecureReader.
-    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER: EntityId = EntityId::new([0xff, 2, 0], 0xc7);
+    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER: EntityId =
+        EntityId::new([0xff, 2, 0], 0xc7);
     /// BuiltinParticipantStatelessMessageWriter.
     pub const P2P_BUILTIN_PARTICIPANT_STATELESS_WRITER: EntityId = EntityId::new([0, 2, 1], 0xc3);
     /// BuiltinParticipantStatelessMessageReader.
     pub const P2P_BUILTIN_PARTICIPANT_STATELESS_READER: EntityId = EntityId::new([0, 2, 1], 0xc4);
     /// BuiltinParticipantVolatileMessageSecureWriter.
-    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_WRITER: EntityId = EntityId::new([0xff, 2, 2], 0xc3);
+    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 2, 2], 0xc3);
     /// BuiltinParticipantVolatileMessageSecureReader.
-    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_READER: EntityId = EntityId::new([0xff, 2, 2], 0xc4);
+    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_READER: EntityId =
+        EntityId::new([0xff, 2, 2], 0xc4);
     /// SPDPbuiltinParticipantsSecureWriter.
-    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_WRITER: EntityId = EntityId::new([0xff, 1, 1], 0xc2);
+    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 1, 1], 0xc2);
     /// SPDPbuiltinParticipantsSecureReader.
-    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_READER: EntityId = EntityId::new([0xff, 1, 1], 0xc7);
+    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_READER: EntityId =
+        EntityId::new([0xff, 1, 1], 0xc7);
 
     /// Makes a user-defined entity id from a key and a kind.
     pub const fn user(entity_key: [u8; 3], entity_kind: u8) -> Self {

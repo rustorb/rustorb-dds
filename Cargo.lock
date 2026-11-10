@@ -733,6 +733,7 @@ dependencies = [
 name = "rustorb-dds"
 version = "0.0.0"
 dependencies = [
+ "rustorb-dds-security",
  "rustorb-rtps",
  "rustorb-typesupport",
  "rustorb-xtypes",

@@ -80,6 +80,8 @@ mod participant;
 mod publisher;
 mod qos;
 pub mod rpc;
+#[cfg(feature = "security")]
+mod security;
 mod status;
 mod subscriber;
 #[cfg(test)]
@@ -112,6 +114,8 @@ pub use rustorb_xtypes::dynamic::{
     MEMBER_ID_INVALID,
 };
 pub use rustorb_xtypes::types::DescribeType;
+#[cfg(feature = "security")]
+pub use security::SecurityConfig;
 pub use status::{
     DeadlineMissedStatus, IncompatibleQosStatus, InconsistentTopicStatus, LivelinessChangedStatus,
     LivelinessLostStatus, MatchedStatus, QosPolicyCount, SampleLostStatus, SampleRejectedReason,

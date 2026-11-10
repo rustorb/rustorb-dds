@@ -2,16 +2,25 @@
 
 use crate::Error;
 
-/// Writes big-endian CDR.
+/// Writes big-endian (or little-endian) CDR.
 #[derive(Debug, Default)]
 pub struct CdrWriter {
     out: Vec<u8>,
+    little: bool,
 }
 
 impl CdrWriter {
-    /// An empty stream.
+    /// An empty big-endian stream.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty stream, little-endian if `little`.
+    pub fn with_endian(little: bool) -> Self {
+        CdrWriter {
+            out: Vec::new(),
+            little,
+        }
     }
 
     fn align(&mut self, n: usize) {
@@ -28,13 +37,21 @@ impl CdrWriter {
     /// An unsigned long.
     pub fn u32(&mut self, v: u32) {
         self.align(4);
-        self.out.extend_from_slice(&v.to_be_bytes());
+        if self.little {
+            self.out.extend_from_slice(&v.to_le_bytes());
+        } else {
+            self.out.extend_from_slice(&v.to_be_bytes());
+        }
     }
 
     /// A long long.
     pub fn i64(&mut self, v: i64) {
         self.align(8);
-        self.out.extend_from_slice(&v.to_be_bytes());
+        if self.little {
+            self.out.extend_from_slice(&v.to_le_bytes());
+        } else {
+            self.out.extend_from_slice(&v.to_be_bytes());
+        }
     }
 
     /// A sequence of octets.
