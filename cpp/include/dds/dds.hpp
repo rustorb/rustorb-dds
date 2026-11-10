@@ -9,6 +9,7 @@
 #include <rustorb/dds/core.hpp>
 #include <rustorb/dds/entities.hpp>
 #include <rustorb/dds/policy.hpp>
+#include <rustorb/dds/rpc.hpp>
 #include <rustorb/dds/types.hpp>
 
 #endif  // RUSTORB_DDS_DDS_HPP
