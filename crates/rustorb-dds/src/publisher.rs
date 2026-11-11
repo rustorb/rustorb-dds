@@ -182,10 +182,22 @@ impl<T> DataWriter<T> {
     /// identity of the sample written (its writer and sequence number),
     /// which a reply names as its related sample (DDS-RPC 1.0, 7.8.2).
     pub fn write_w_params(&self, sample: &T, params: &WriteParams) -> Result<SampleIdentity> {
+        self.write_mapped(sample, params, |p| p)
+    }
+
+    /// Like [`Self::write_w_params`], with the serialized payload passed
+    /// through `map` before it is written.
+    pub(crate) fn write_mapped(
+        &self,
+        sample: &T,
+        params: &WriteParams,
+        map: impl FnOnce(Vec<u8>) -> Vec<u8>,
+    ) -> Result<SampleIdentity> {
         let mut payload = self
             .samples
             .to_payload(sample, self.encoding, ByteOrder::NATIVE)?;
         table_60_identifier(&mut payload);
+        let payload = map(payload);
         let sequence_number = self.shared.write(
             self.guid,
             self.samples.instance_of(sample)?,

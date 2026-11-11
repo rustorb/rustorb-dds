@@ -204,6 +204,23 @@ impl<T> DataReader<T> {
             .collect()
     }
 
+    /// Removes and returns the samples received, still serialized.
+    pub(crate) fn take_raw(&self) -> Vec<(Option<Vec<u8>>, SampleInfo)> {
+        let mut g = self.shared.lock_any();
+        match g.readers.get_mut(&self.guid) {
+            Some(r) => {
+                r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
+                r.samples.select(StateFilter::ANY, None, true)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Deserializes a payload of the reader's type.
+    pub(crate) fn decode_raw(&self, payload: &[u8]) -> Option<T> {
+        self.samples.decode(payload)
+    }
+
     /// Removes and returns the samples received, in the order they
     /// arrived.
     pub fn take(&self) -> Vec<Sample<T>> {

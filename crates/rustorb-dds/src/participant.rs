@@ -678,12 +678,6 @@ impl WriterState {
         let (payload, change) = match op {
             WriteOp::Value(v, related) => {
                 if let Some(id) = related {
-                    // Cyclone DDS 0.10 drops a DATA with in-line QoS but
-                    // no key hash, even on a keyless topic (whose key
-                    // hash is zero).
-                    if !self.keyed {
-                        q.push(Parameter::new(pid::KEY_HASH, h.0));
-                    }
                     // In the byte order the message is sent in.
                     q.push(Parameter::new(
                         pid::RELATED_SAMPLE_IDENTITY,
@@ -724,6 +718,12 @@ impl WriterState {
                 )
             }
         };
+        // Cyclone DDS 0.10 drops a DATA with in-line QoS but no key hash,
+        // even on a keyless topic (whose key hash is zero): a keyless
+        // writer sends it whenever it sends in-line QoS.
+        if !self.keyed && !q.parameters.is_empty() {
+            q.parameters.insert(0, Parameter::new(pid::KEY_HASH, h.0));
+        }
         let inline_qos = (!q.parameters.is_empty()).then_some(q);
         if payload.is_some() {
             self.deadlines.renew(h, Instant::now());
@@ -971,6 +971,14 @@ impl Shared {
             }
         }
         (sent, last_err)
+    }
+
+    /// The vendor of a discovered participant.
+    pub(crate) fn vendor_of(&self, prefix: &GuidPrefix) -> Option<VendorId> {
+        self.lock_any()
+            .spdp
+            .participant(prefix)
+            .map(|p| p.vendor_id)
     }
 
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Inner>> {

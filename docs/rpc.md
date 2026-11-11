@@ -78,6 +78,14 @@ cargo run --example ros2_service -- client [domain [count [timeout_s]]]
 
 rmw_cyclonedds_cpp は手元の環境（packages.ros.org に届かない）で動かせないので、CI の job `ros2` で試す。
 
+CI の job `ros2` の pcap から見た rmw_cyclonedds_cpp（Cyclone DDS 0.10、vendor id 0x0110）のサービスは、Fast DDS と違う。
+
+- 要求に in-line QoS がなく、payload の encapsulation と本体のあいだに 16 octet のヘッダがある。クライアントの 8 octet の id と、クライアント自身の 64 bit の sequence number（encapsulation の byte order）。
+- 応答はそのヘッダを頭に付けて返す。
+- Cyclone DDS は in-line QoS があって `PID_KEY_HASH` がない DATA を捨てる（key のない topic でも）。key のない writer は in-line QoS を送るときは常に key hash（ゼロ）を付ける。
+
+`Requester` は、Cyclone DDS の参加者の要求 reader と match していればヘッダを付けて送り、Cyclone DDS の writer からの応答はヘッダで要求を見分ける。`Replier` は Cyclone DDS の writer からの要求のヘッダを外して覚え、その要求への応答に付ける。
+
 ## 未対応
 
 - 仕様の function-call 形式（インタフェースから生成するクライアントとサービス）と Basic Service Mapping（明示的な RequestHeader/ReplyHeader）。

@@ -24,19 +24,99 @@
 //! [`Requester::wait_for_service`] waits for a replier both of whose
 //! endpoints are matched. A remote endpoint that does not announce a
 //! related entity is paired with those of the same participant.
+//!
+//! ROS 2's rmw_cyclonedds_cpp puts a header in the payload instead,
+//! between the encapsulation and the body (seen in captures): the client's
+//! 8-octet id and a 64-bit sequence number of its own, in the byte order of
+//! the encapsulation, which the service sends back at the head of the
+//! reply. With the endpoints of a participant of Cyclone DDS (vendor
+//! 0x0110), a [`Requester`] and a [`Replier`] write and read that header.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rustorb_rtps::{Guid, SampleIdentity, SequenceNumber};
+use rustorb_rtps::{Guid, SampleIdentity, SequenceNumber, VendorId};
 use rustorb_typesupport::TopicType;
 
 use crate::participant::Shared;
 use crate::publisher::{DataWriter, WriteParams};
 use crate::qos::{DataReaderQos, DataWriterQos, History, Reliability};
 use crate::subscriber::DataReader;
-use crate::{DomainParticipant, Error, Result, Topic};
+use crate::{DomainParticipant, Error, Result, SampleInfo, Topic};
+
+/// The vendor of Cyclone DDS, whose ROS 2 services carry a header in the
+/// payload.
+const CYCLONE: VendorId = VendorId([0x01, 0x10]);
+
+/// The length of the encapsulation and of the in-payload header.
+const ENCAP: usize = 4;
+const HEADER: usize = 16;
+
+/// An in-payload header: the client id and the sequence number.
+type Header = ([u8; 8], i64);
+
+/// Whether the endpoint `guid` is of a participant of Cyclone DDS.
+fn is_cyclone(shared: &Shared, guid: &Guid) -> bool {
+    shared.vendor_of(&guid.prefix) == Some(CYCLONE)
+}
+
+/// Whether a payload's encapsulation is little-endian.
+fn little_endian(payload: &[u8]) -> bool {
+    payload.get(1).is_some_and(|b| b & 1 == 1)
+}
+
+/// Puts the header (`client`, `seq`) after the encapsulation of `payload`.
+fn insert_header(mut payload: Vec<u8>, client: [u8; 8], seq: i64) -> Vec<u8> {
+    let mut header = [0u8; HEADER];
+    header[..8].copy_from_slice(&client);
+    header[8..].copy_from_slice(&if little_endian(&payload) {
+        seq.to_le_bytes()
+    } else {
+        seq.to_be_bytes()
+    });
+    let at = ENCAP.min(payload.len());
+    payload.splice(at..at, header);
+    payload
+}
+
+/// Takes the header out of `payload`: the client id and the sequence
+/// number, and the payload left.
+fn strip_header(payload: &[u8]) -> Option<([u8; 8], i64, Vec<u8>)> {
+    if payload.len() < ENCAP + HEADER {
+        return None;
+    }
+    let h = &payload[ENCAP..ENCAP + HEADER];
+    let client: [u8; 8] = h[..8].try_into().ok()?;
+    let seq: [u8; 8] = h[8..].try_into().ok()?;
+    let seq = if little_endian(payload) {
+        i64::from_le_bytes(seq)
+    } else {
+        i64::from_be_bytes(seq)
+    };
+    let mut rest = payload[..ENCAP].to_vec();
+    rest.extend_from_slice(&payload[ENCAP + HEADER..]);
+    Some((client, seq, rest))
+}
+
+/// Takes the samples of `reader`, deserialized, with the header of those
+/// written by a participant of Cyclone DDS taken out of the payload.
+fn take_with_headers<T>(reader: &DataReader<T>) -> Vec<(T, SampleInfo, Option<Header>)> {
+    let shared = &reader.shared;
+    reader
+        .take_raw()
+        .into_iter()
+        .filter_map(|(payload, info)| {
+            let payload = payload?;
+            if is_cyclone(shared, &info.writer) {
+                let (client, seq, rest) = strip_header(&payload)?;
+                Some((reader.decode_raw(&rest)?, info, Some((client, seq))))
+            } else {
+                Some((reader.decode_raw(&payload)?, info, None))
+            }
+        })
+        .collect()
+}
 
 /// How a [`Requester`] or [`Replier`] is made.
 #[derive(Clone, Debug)]
@@ -134,6 +214,11 @@ pub struct Requester<Req, Rep> {
     /// Replies taken from the reader and not yet given out, by the
     /// request they answer.
     replies: Mutex<HashMap<SampleIdentity, Vec<Rep>>>,
+    /// The client id of the in-payload header.
+    client_id: [u8; 8],
+    /// The last sequence number of the in-payload header, and the
+    /// requests sent with one by it.
+    headers: Mutex<(i64, HashMap<i64, SampleIdentity>)>,
 }
 
 impl<Req, Rep> std::fmt::Debug for Requester<Req, Rep> {
@@ -176,10 +261,25 @@ impl<Req, Rep> Requester<Req, Rep> {
             .create_subscriber()?
             .create_datareader_with_qos(reply, config.reader_qos.clone())?;
         pair(&writer, &reader, None)?;
+        // FNV-1a of the writer's GUID.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let e = &writer.guid.entity_id;
+        for b in writer
+            .guid
+            .prefix
+            .0
+            .iter()
+            .chain(&e.entity_key)
+            .chain([&e.entity_kind])
+        {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+        }
         Ok(Requester {
             writer,
             reader,
             replies: Mutex::new(HashMap::new()),
+            client_id: h.to_be_bytes(),
+            headers: Mutex::new((0, HashMap::new())),
         })
     }
 
@@ -212,25 +312,53 @@ impl<Req, Rep> Requester<Req, Rep> {
     }
 
     /// Sends a request; returns its identity, which its replies name.
+    ///
+    /// When a request reader of Cyclone DDS is matched, the request
+    /// carries the in-payload header too.
     pub fn send_request(&self, request: &Req) -> Result<SampleIdentity> {
-        self.writer.write_w_params(
-            request,
-            &WriteParams {
-                related_sample_identity: Some(SampleIdentity {
-                    writer_guid: self.reader.guid,
-                    sequence_number: SequenceNumber::UNKNOWN,
-                }),
-                ..WriteParams::default()
-            },
-        )
+        let params = WriteParams {
+            related_sample_identity: Some(SampleIdentity {
+                writer_guid: self.reader.guid,
+                sequence_number: SequenceNumber::UNKNOWN,
+            }),
+            ..WriteParams::default()
+        };
+        let shared = &self.writer.shared;
+        let cyclone = self
+            .writer
+            .matched_subscriptions()
+            .iter()
+            .any(|r| is_cyclone(shared, r));
+        if !cyclone {
+            return self.writer.write_w_params(request, &params);
+        }
+        let mut headers = self.headers.lock().map_err(|_| Error::PreconditionNotMet)?;
+        let seq = headers.0 + 1;
+        let id = self
+            .writer
+            .write_mapped(request, &params, |p| insert_header(p, self.client_id, seq))?;
+        headers.0 = seq;
+        headers.1.insert(seq, id);
+        Ok(id)
     }
 
     /// Moves the replies to this requester's requests from the reader to
     /// `replies`; drops those to others.
     fn collect(&self) -> Result<std::sync::MutexGuard<'_, HashMap<SampleIdentity, Vec<Rep>>>> {
         let mut replies = self.replies.lock().map_err(|_| Error::PreconditionNotMet)?;
-        for s in self.reader.take() {
-            let (Some(data), Some(mut id)) = (s.data, s.info.related_sample_identity) else {
+        for (data, info, header) in take_with_headers(&self.reader) {
+            let id = match header {
+                // The header names the request.
+                Some((client, seq)) => {
+                    if client != self.client_id {
+                        continue;
+                    }
+                    let mut headers = self.headers.lock().map_err(|_| Error::PreconditionNotMet)?;
+                    headers.1.remove(&seq)
+                }
+                None => info.related_sample_identity,
+            };
+            let Some(mut id) = id else {
                 continue;
             };
             // A reply names the request, or the reply reader with the
@@ -307,6 +435,9 @@ pub struct Replier<Req, Rep> {
     /// Requests of requesters whose reply reader is not yet matched,
     /// held back (DDS-RPC 1.0, 7.6.2.2.1).
     held: Mutex<Vec<Request<Req>>>,
+    /// The in-payload headers of the requests not yet answered, by the
+    /// identity a reply names.
+    headers: Mutex<HashMap<SampleIdentity, Header>>,
 }
 
 impl<Req, Rep> std::fmt::Debug for Replier<Req, Rep> {
@@ -353,6 +484,7 @@ impl<Req, Rep> Replier<Req, Rep> {
             reader,
             writer,
             held: Mutex::new(Vec::new()),
+            headers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -381,21 +513,27 @@ impl<Req, Rep> Replier<Req, Rep> {
     /// it is.
     pub fn take_requests(&self) -> Result<Vec<Request<Req>>> {
         let mut held = self.held.lock().map_err(|_| Error::PreconditionNotMet)?;
-        held.extend(self.reader.take().into_iter().filter_map(|s| {
-            let named = s
-                .info
+        for (data, info, header) in take_with_headers(&self.reader) {
+            let named = info
                 .related_sample_identity
                 .map(|id| id.writer_guid)
                 .filter(|g| *g != Guid::UNKNOWN);
-            Some(Request {
-                data: s.data?,
-                id: SampleIdentity {
-                    writer_guid: named.unwrap_or(s.info.writer),
-                    sequence_number: s.info.sequence_number,
-                },
-                writer: s.info.writer,
-            })
-        }));
+            let id = SampleIdentity {
+                writer_guid: named.unwrap_or(info.writer),
+                sequence_number: info.sequence_number,
+            };
+            if let Some(h) = header {
+                self.headers
+                    .lock()
+                    .map_err(|_| Error::PreconditionNotMet)?
+                    .insert(id, h);
+            }
+            held.push(Request {
+                data,
+                id,
+                writer: info.writer,
+            });
+        }
         let mut ready = Vec::new();
         let mut i = 0;
         while i < held.len() {
@@ -418,16 +556,49 @@ impl<Req, Rep> Replier<Req, Rep> {
         .unwrap_or(Ok(Vec::new()))
     }
 
-    /// Sends `reply` to the request `request`.
+    /// Sends `reply` to the request `request`; with the request's
+    /// in-payload header at its head when it had one.
     pub fn send_reply(&self, reply: &Rep, request: &SampleIdentity) -> Result<()> {
-        self.writer
-            .write_w_params(
-                reply,
-                &WriteParams {
-                    related_sample_identity: Some(*request),
-                    ..WriteParams::default()
-                },
-            )
-            .map(|_| ())
+        let params = WriteParams {
+            related_sample_identity: Some(*request),
+            ..WriteParams::default()
+        };
+        let header = self
+            .headers
+            .lock()
+            .map_err(|_| Error::PreconditionNotMet)?
+            .remove(request);
+        match header {
+            Some((client, seq)) => self
+                .writer
+                .write_mapped(reply, &params, |p| insert_header(p, client, seq)),
+            None => self.writer.write_w_params(reply, &params),
+        }
+        .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_payload_header() {
+        let client = [1, 2, 3, 4, 5, 6, 7, 8];
+        for encap in [[0, 1, 0, 0], [0, 0, 0, 0]] {
+            let mut payload = encap.to_vec();
+            payload.extend_from_slice(&[9, 9, 9, 9]);
+            let with = insert_header(payload.clone(), client, 42);
+            assert_eq!(with.len(), payload.len() + HEADER);
+            assert_eq!(&with[ENCAP..ENCAP + 8], &client);
+            let seq = if encap[1] == 1 {
+                42i64.to_le_bytes()
+            } else {
+                42i64.to_be_bytes()
+            };
+            assert_eq!(&with[ENCAP + 8..ENCAP + HEADER], &seq);
+            assert_eq!(strip_header(&with), Some((client, 42, payload)));
+        }
+        assert_eq!(strip_header(&[0, 1, 0, 0, 1, 2]), None);
     }
 }
