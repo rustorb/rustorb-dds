@@ -31,6 +31,9 @@
 //! the encapsulation, which the service sends back at the head of the
 //! reply. With the endpoints of a participant of Cyclone DDS (vendor
 //! 0x0110), a [`Requester`] and a [`Replier`] write and read that header.
+//! Its services answer only a client whose reply reader they have matched,
+//! known by `clientid= ...;` in the USER_DATA of the client's writer and
+//! reader, which a [`Requester`] announces.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -191,6 +194,33 @@ fn pair<A, B>(
     })
 }
 
+/// Puts `clientid= <octets>;` at the head of the USER_DATA of a
+/// requester's writer and reader, the octets being the writer's GUID in
+/// hexadecimal, separated by dots: a service of rmw_cyclonedds_cpp
+/// answers a request only when it has matched a reader with the
+/// `clientid` of the request's writer (seen in captures, where its own
+/// clients announce one).
+fn announce_client_id<A, B>(writer: &DataWriter<A>, reader: &DataReader<B>) -> Result<()> {
+    let g = writer.guid;
+    let e = &g.entity_id;
+    let octets: Vec<String> = g
+        .prefix
+        .0
+        .iter()
+        .chain(&e.entity_key)
+        .chain([&e.entity_kind])
+        .map(|b| format!("{b:x}"))
+        .collect();
+    let id = format!("clientid= {};", octets.join("."));
+    let add = |d: &mut rustorb_rtps::sedp::EndpointData| {
+        if !d.user_data.starts_with(b"clientid=") {
+            d.user_data.splice(0..0, id.bytes());
+        }
+    };
+    writer.shared.update_endpoint(&writer.guid, add)?;
+    reader.shared.update_endpoint(&reader.guid, add)
+}
+
 /// Waits, a little at a time, until `f` gives something or `timeout`
 /// passes.
 fn wait_until<R>(timeout: Duration, mut f: impl FnMut() -> Option<R>) -> Option<R> {
@@ -261,6 +291,7 @@ impl<Req, Rep> Requester<Req, Rep> {
             .create_subscriber()?
             .create_datareader_with_qos(reply, config.reader_qos.clone())?;
         pair(&writer, &reader, None)?;
+        announce_client_id(&writer, &reader)?;
         // FNV-1a of the writer's GUID.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let e = &writer.guid.entity_id;

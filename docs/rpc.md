@@ -82,6 +82,7 @@ CI の job `ros2` の pcap から見た rmw_cyclonedds_cpp（Cyclone DDS 0.10、
 
 - 要求に in-line QoS がなく、payload の encapsulation と本体のあいだに 16 octet のヘッダがある。クライアントの 8 octet の id と、クライアント自身の 64 bit の sequence number（encapsulation の byte order）。
 - 応答はそのヘッダを頭に付けて返す。
+- クライアントの要求 writer と応答 reader は USER_DATA に `clientid= 1.10.32.b4....0.0.0.8;`（16 octet を 16 進で `.` 区切り）を載せ、サービスは要求の writer と同じ `clientid` の reader と match するまで応答しない（`Requester` も自分の writer の GUID で載せる）。サービス側は `serviceid= ...;` を載せる。
 - Cyclone DDS は in-line QoS があって `PID_KEY_HASH` がない DATA を捨てる（key のない topic でも）。key のない writer は in-line QoS を送るときは常に key hash（ゼロ）を付ける。
 
 `Requester` は、Cyclone DDS の参加者の要求 reader と match していればヘッダを付けて送り、Cyclone DDS の writer からの応答はヘッダで要求を見分ける。`Replier` は Cyclone DDS の writer からの要求のヘッダを外して覚え、その要求への応答に付ける。
