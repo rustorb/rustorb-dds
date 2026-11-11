@@ -204,6 +204,7 @@ jobs:
         run: |
           sudo chmod a+r target/interop-ros2/ros2.pcap || true
           python3 interop/rtps_dump.py target/interop-ros2/ros2.pcap 113 114 117 118 --max 3 || true
+          python3 interop/rtps_dump.py target/interop-ros2/ros2.pcap 117 118 --trace || true
       - name: Keep the logs and versions
         if: always()
         uses: actions/upload-artifact@v4

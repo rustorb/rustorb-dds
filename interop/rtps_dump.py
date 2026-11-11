@@ -3,10 +3,13 @@
 between the ports of the given domains, the sender's vendor and prefix,
 then each DATA of a user writer (not a builtin one) in hex.
 
-    rtps_dump.py capture.pcap DOMAIN... [--max N] [--all]
+    rtps_dump.py capture.pcap DOMAIN... [--max N] [--all] [--trace]
 
---all shows the builtin writers' DATA too.
+--all shows the builtin writers' DATA too. --trace shows instead one line
+for each DATA, HEARTBEAT, ACKNACK and GAP between user endpoints, and
+the text of each SEDP announcement.
 """
+import re
 import struct
 import sys
 
@@ -28,6 +31,8 @@ def packets(path):
             p = p[14:]
         elif link == 113:  # Linux cooked
             p = p[16:]
+        elif link == 276:  # Linux cooked v2
+            p = p[20:]
         if not p or p[0] >> 4 != 4:
             continue
         ihl = (p[0] & 15) * 4
@@ -42,11 +47,46 @@ def domain_of(port):
     return (port - 7400) // 250 if port >= 7400 else None
 
 
+def sn(b, e):
+    high, low = struct.unpack(e + "iI", b[:8])
+    return (high << 32) + low
+
+
+def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
+    e = "<" if flags & 1 else ">"
+    if sid == 0x15:
+        reader, writer, rest = body[4:8], body[8:12], body[12:]
+    else:
+        reader, writer, rest = body[0:4], body[4:8], body[8:]
+    if sid == 0x15 and writer.hex() in ("000003c2", "000004c2"):
+        # An endpoint's announcement: its text (topic, type, USER_DATA).
+        text = re.findall(rb"[\x20-\x7e]{4,}", bytes(rest))
+        print(f"domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} SEDP"
+              f" {writer.hex()} " + " | ".join(t.decode() for t in text))
+        return
+    if writer[3] & 0xC0 == 0xC0 and (reader[3] & 0xC0 == 0xC0 or reader == bytes(4)):
+        return
+    what = {0x06: "ACKNACK", 0x07: "HEARTBEAT", 0x08: "GAP", 0x15: "DATA"}[sid]
+    if sid == 0x15:
+        detail = f"sn {sn(rest, e)} len {len(body)}"
+    elif sid == 0x06:
+        bits = struct.unpack(e + "I", rest[8:12])[0]
+        words = rest[12:12 + 4 * ((bits + 31) // 32)]
+        detail = f"base {sn(rest, e)} bits {bits} {words.hex()}"
+    elif sid == 0x07:
+        detail = f"first {sn(rest, e)} last {sn(rest[8:], e)}"
+    else:
+        detail = f"start {sn(rest, e)} base {sn(rest[8:], e)}"
+    print(f"domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} {what}"
+          f" flags {flags:#04x} writer {writer.hex()} reader {reader.hex()} {detail}")
+
+
 def main():
     args = sys.argv[1:]
     limit = 20
     builtin = "--all" in args
-    args = [a for a in args if a != "--all"]
+    trace = "--trace" in args
+    args = [a for a in args if a not in ("--all", "--trace")]
     if "--max" in args:
         i = args.index("--max")
         limit = int(args[i + 1])
@@ -64,7 +104,9 @@ def main():
             le = flags & 1
             n = struct.unpack("<H" if le else ">H", u[at + 2:at + 4])[0]
             body = u[at + 4:at + 4 + n] if n else u[at + 4:]
-            if sid == 0x15 and len(body) >= 12:
+            if trace and sid in (0x06, 0x07, 0x08, 0x15) and len(body) >= 8:
+                show_trace(dom, sport, dport, vendor, prefix, sid, flags, body)
+            elif sid == 0x15 and len(body) >= 12:
                 writer = body[8:12]
                 key = (dom, prefix, writer.hex())
                 if (builtin or writer[3] & 0xC0 != 0xC0) and shown.get(key, 0) < limit:
