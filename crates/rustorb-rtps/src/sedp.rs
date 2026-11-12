@@ -109,6 +109,13 @@ pub struct EndpointData {
     /// (`PID_CONTENT_FILTER_PROPERTY`, 8.7.3.1), for writer side
     /// filtering.
     pub content_filter: Option<ContentFilterProperty>,
+    /// `related_datareader_key` of a writer, `related_datawriter_key` of
+    /// a reader (`PID_RELATED_ENTITY_GUID`, DDS-RPC 1.0, 7.6.2.1): the
+    /// other endpoint of the same client or service.
+    pub related_entity_guid: Option<Guid>,
+    /// `service_instance_name` (`PID_SERVICE_INSTANCE_NAME`, DDS-RPC 1.0,
+    /// 7.6.2.1), of the endpoints of a service.
+    pub service_instance_name: Option<String>,
 }
 
 /// `ContentFilterProperty_t` (DDSI-RTPS 2.5, 8.7.3.1, Table 8.86): the
@@ -178,6 +185,8 @@ impl EndpointData {
             data_representation: Vec::new(),
             type_consistency: None,
             content_filter: None,
+            related_entity_guid: None,
+            service_instance_name: None,
         }
     }
 
@@ -286,6 +295,12 @@ impl EndpointData {
         if let Some(f) = &self.content_filter {
             l.push(b.content_filter(pid::CONTENT_FILTER_PROPERTY, f));
         }
+        if let Some(g) = self.related_entity_guid {
+            l.push(b.guid(pid::RELATED_ENTITY_GUID, g));
+        }
+        if let Some(n) = &self.service_instance_name {
+            l.push(b.string(pid::SERVICE_INSTANCE_NAME, n));
+        }
         if let Some(info) = &self.type_information {
             // An XCDR2 stream of its own, as Cyclone DDS 0.10 writes it.
             if let Ok(mut v) = info.to_bytes(order) {
@@ -359,6 +374,9 @@ impl EndpointData {
                 // Writer side filtering is optional (8.7.3.4): a filter
                 // that cannot be read is left out.
                 pid::CONTENT_FILTER_PROPERTY => d.content_filter = v.content_filter(p).ok(),
+                // DDS-RPC's extensions are optional too.
+                pid::RELATED_ENTITY_GUID => d.related_entity_guid = v.guid(p).ok(),
+                pid::SERVICE_INSTANCE_NAME => d.service_instance_name = v.string(p).ok(),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }
@@ -1336,6 +1354,8 @@ mod tests {
             filter_expression: "x > %0 AND color = %1".into(),
             expression_parameters: vec!["100".into(), "'BLUE'".into()],
         });
+        d.related_entity_guid = Some(rguid(2));
+        d.service_instance_name = Some("robot".into());
         for e in [Endianness::Big, Endianness::Little] {
             assert_eq!(
                 EndpointData::from_payload(&d.to_payload(e), false).unwrap(),

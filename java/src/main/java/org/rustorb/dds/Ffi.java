@@ -155,6 +155,15 @@ final class Ffi {
     static final MethodHandle rdds_reader_subscription_matched_status = Library.fn("rdds_reader_subscription_matched_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_wait_for_data = Library.fn("rdds_reader_wait_for_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, Ffi.DURATION));
     static final MethodHandle rdds_reader_wait_for_publications = Library.fn("rdds_reader_wait_for_publications", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, Ffi.DURATION));
+    static final MethodHandle rdds_replier_new = Library.fn("rdds_replier_new", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_replier_receive_request = Library.fn("rdds_replier_receive_request", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, Ffi.DURATION, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_replier_release = Library.fn("rdds_replier_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_replier_send_reply = Library.fn("rdds_replier_send_reply", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_requester_new = Library.fn("rdds_requester_new", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_requester_receive_reply = Library.fn("rdds_requester_receive_reply", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, Ffi.DURATION, JAVA_LONG));
+    static final MethodHandle rdds_requester_release = Library.fn("rdds_requester_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_requester_send_request = Library.fn("rdds_requester_send_request", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_requester_wait_for_service = Library.fn("rdds_requester_wait_for_service", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, Ffi.DURATION));
     static final MethodHandle rdds_samples_count = Library.fn("rdds_samples_count", FunctionDescriptor.of(JAVA_LONG, JAVA_LONG), Library.CRITICAL);
     static final MethodHandle rdds_samples_data = Library.fn("rdds_samples_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_samples_info = Library.fn("rdds_samples_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG), Library.CRITICAL);

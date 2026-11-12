@@ -28,6 +28,7 @@
 
 pub mod condition;
 pub mod entity;
+pub mod rpc;
 pub mod stream;
 pub mod types;
 

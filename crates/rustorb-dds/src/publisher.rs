@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustorb_rtps::sedp::EndpointData;
-use rustorb_rtps::{Guid, Time, entity_kind};
+use rustorb_rtps::{Guid, SampleIdentity, Time, entity_kind};
 use rustorb_typesupport::{ByteOrder, Encoding};
 
 use crate::condition::StatusCondition;
@@ -126,8 +126,8 @@ impl Publisher {
 ///
 /// Dropping it tells the other participants it is gone.
 pub struct DataWriter<T> {
-    shared: Arc<Shared>,
-    guid: Guid,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) guid: Guid,
     /// How samples are serialized: the writer's data representation.
     encoding: Encoding,
     /// Whether dropping this handle deletes the writer: not for the
@@ -168,16 +168,46 @@ impl<T> DataWriter<T> {
 
     /// Like [`Self::write`], with the source timestamp given.
     pub fn write_w_timestamp(&self, sample: &T, timestamp: Time) -> Result<()> {
+        self.write_w_params(
+            sample,
+            &WriteParams {
+                source_timestamp: Some(timestamp),
+                ..WriteParams::default()
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Like [`Self::write`], with the parameters given; returns the
+    /// identity of the sample written (its writer and sequence number),
+    /// which a reply names as its related sample (DDS-RPC 1.0, 7.8.2).
+    pub fn write_w_params(&self, sample: &T, params: &WriteParams) -> Result<SampleIdentity> {
+        self.write_mapped(sample, params, |p| p)
+    }
+
+    /// Like [`Self::write_w_params`], with the serialized payload passed
+    /// through `map` before it is written.
+    pub(crate) fn write_mapped(
+        &self,
+        sample: &T,
+        params: &WriteParams,
+        map: impl FnOnce(Vec<u8>) -> Vec<u8>,
+    ) -> Result<SampleIdentity> {
         let mut payload = self
             .samples
             .to_payload(sample, self.encoding, ByteOrder::NATIVE)?;
         table_60_identifier(&mut payload);
-        self.shared.write(
+        let payload = map(payload);
+        let sequence_number = self.shared.write(
             self.guid,
             self.samples.instance_of(sample)?,
-            WriteOp::Value(payload),
-            timestamp,
-        )
+            WriteOp::Value(payload, params.related_sample_identity),
+            params.source_timestamp.unwrap_or_else(Time::now),
+        )?;
+        Ok(SampleIdentity {
+            writer_guid: self.guid,
+            sequence_number,
+        })
     }
 
     /// Registers the instance of `instance` (whose key members are what
@@ -204,15 +234,17 @@ impl<T> DataWriter<T> {
     /// given.
     pub fn unregister_instance_w_timestamp(&self, instance: &T, timestamp: Time) -> Result<()> {
         let dispose = self.shared.autodispose_of(&self.guid);
-        self.shared.write(
-            self.guid,
-            self.samples.instance_of(instance)?,
-            WriteOp::Lifecycle {
-                dispose,
-                unregister: true,
-            },
-            timestamp,
-        )
+        self.shared
+            .write(
+                self.guid,
+                self.samples.instance_of(instance)?,
+                WriteOp::Lifecycle {
+                    dispose,
+                    unregister: true,
+                },
+                timestamp,
+            )
+            .map(|_| ())
     }
 
     /// Disposes an instance (`dispose`): readers see it
@@ -224,15 +256,17 @@ impl<T> DataWriter<T> {
 
     /// Like [`Self::dispose`], with the source timestamp given.
     pub fn dispose_w_timestamp(&self, instance: &T, timestamp: Time) -> Result<()> {
-        self.shared.write(
-            self.guid,
-            self.samples.instance_of(instance)?,
-            WriteOp::Lifecycle {
-                dispose: true,
-                unregister: false,
-            },
-            timestamp,
-        )
+        self.shared
+            .write(
+                self.guid,
+                self.samples.instance_of(instance)?,
+                WriteOp::Lifecycle {
+                    dispose: true,
+                    unregister: false,
+                },
+                timestamp,
+            )
+            .map(|_| ())
     }
 
     /// The handle of the instance of `instance` if it is registered
@@ -452,4 +486,15 @@ mod tests {
             assert_eq!(p, [0x00, to, 0x00, 0x00]);
         }
     }
+}
+
+/// The parameters of [`DataWriter::write_w_params`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteParams {
+    /// The source timestamp; `None` for now.
+    pub source_timestamp: Option<Time>,
+    /// The sample this one answers, sent with it in-line
+    /// (`PID_RELATED_SAMPLE_IDENTITY`, DDS-RPC 1.0, 7.8.2), which the
+    /// readers find in [`SampleInfo::related_sample_identity`](crate::SampleInfo::related_sample_identity).
+    pub related_sample_identity: Option<SampleIdentity>,
 }

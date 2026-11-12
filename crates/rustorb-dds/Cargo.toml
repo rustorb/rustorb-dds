@@ -16,6 +16,11 @@ rustorb-rtps.workspace = true
 rustorb-xtypes.workspace = true
 rustorb-typesupport.workspace = true
 
+[features]
+default = ["shm"]
+# The shared memory transport between participants of one host.
+shm = ["rustorb-rtps/shm"]
+
 [dev-dependencies]
 rustorb-typesupport.workspace = true
 

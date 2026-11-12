@@ -2,6 +2,7 @@
 //! data for it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -21,8 +22,8 @@ use rustorb_rtps::typelookup::{TypeLookup, TypeLookupReplied};
 use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
 use rustorb_rtps::wlp::{self, Wlp};
 use rustorb_rtps::{
-    EntityId, Guid, GuidPrefix, Locator, Parameter, ParameterList, PayloadKind, SequenceNumber,
-    SerializedPayload, Submessage, Time, VendorId,
+    Endianness, EntityId, Guid, GuidPrefix, Locator, Parameter, ParameterList, PayloadKind,
+    SampleIdentity, SequenceNumber, SerializedPayload, Submessage, Time, VendorId,
 };
 use rustorb_typesupport::TopicType;
 use rustorb_xtypes::dynamic::{ContentFilter, DynamicData, DynamicType, DynamicTypeBuilderFactory};
@@ -74,6 +75,10 @@ pub struct ParticipantConfig {
     /// to the other participants with SPDP. Empty by default. ROS 2
     /// announces `enclave=/;` here.
     pub user_data: Vec<u8>,
+    /// Whether to exchange messages with the participants of rustorb-dds
+    /// on this host through shared memory rather than UDP (feature `shm`;
+    /// true by default). Others are reached by UDP either way.
+    pub shared_memory: bool,
 }
 
 impl ParticipantConfig {
@@ -96,6 +101,7 @@ impl ParticipantConfig {
             reader: ReaderConfig::default(),
             drop_one_in: None,
             user_data: Vec::new(),
+            shared_memory: true,
         }
     }
 
@@ -393,9 +399,16 @@ impl ReaderState {
     fn incoming(&self, c: Change) -> Option<Incoming> {
         let mut key_hash = None;
         let mut status = 0u8;
+        let mut related_sample_identity = None;
         if let Some(q) = &c.inline_qos {
             for p in &q.parameters {
-                if p.id == pid::KEY_HASH && p.value.len() >= 16 {
+                if p.id == pid::RELATED_SAMPLE_IDENTITY {
+                    related_sample_identity = SampleIdentity::from_bytes(
+                        &p.value,
+                        q.endianness().unwrap_or(Endianness::NATIVE),
+                    )
+                    .ok();
+                } else if p.id == pid::KEY_HASH && p.value.len() >= 16 {
                     key_hash = Some(InstanceHandle(p.value[..16].try_into().expect("16 octets")));
                 } else if p.id == pid::STATUS_INFO && p.value.len() >= 4 {
                     // An octet array: the flags are in the last octet.
@@ -435,6 +448,7 @@ impl ReaderState {
             writer: c.writer,
             sequence_number: c.sequence_number,
             source_timestamp: c.timestamp,
+            related_sample_identity,
             instance,
             change,
         })
@@ -451,8 +465,9 @@ pub(crate) struct WriterInstance {
 /// What a writer does to an instance.
 #[derive(Debug)]
 pub(crate) enum WriteOp {
-    /// `write`: a value payload.
-    Value(Vec<u8>),
+    /// `write`: a value payload, and the sample it answers (sent in-line
+    /// as `PID_RELATED_SAMPLE_IDENTITY`).
+    Value(Vec<u8>, Option<SampleIdentity>),
     /// `dispose` and/or `unregister_instance`.
     Lifecycle { dispose: bool, unregister: bool },
 }
@@ -661,13 +676,22 @@ impl WriterState {
             q.push(Parameter::new(pid::KEY_HASH, h.0));
         }
         let (payload, change) = match op {
-            WriteOp::Value(v) => (
-                Some(SerializedPayload {
-                    kind: PayloadKind::Data,
-                    bytes: v.clone(),
-                }),
-                instance::Change::Write(v),
-            ),
+            WriteOp::Value(v, related) => {
+                if let Some(id) = related {
+                    // In the byte order the message is sent in.
+                    q.push(Parameter::new(
+                        pid::RELATED_SAMPLE_IDENTITY,
+                        id.to_bytes(Endianness::NATIVE),
+                    ));
+                }
+                (
+                    Some(SerializedPayload {
+                        kind: PayloadKind::Data,
+                        bytes: v.clone(),
+                    }),
+                    instance::Change::Write(v),
+                )
+            }
             WriteOp::Lifecycle {
                 dispose,
                 unregister,
@@ -694,6 +718,12 @@ impl WriterState {
                 )
             }
         };
+        // Cyclone DDS 0.10 drops a DATA with in-line QoS but no key hash,
+        // even on a keyless topic (whose key hash is zero): a keyless
+        // writer sends it whenever it sends in-line QoS.
+        if !self.keyed && !q.parameters.is_empty() {
+            q.parameters.insert(0, Parameter::new(pid::KEY_HASH, h.0));
+        }
         let inline_qos = (!q.parameters.is_empty()).then_some(q);
         if payload.is_some() {
             self.deadlines.renew(h, Instant::now());
@@ -895,6 +925,9 @@ pub(crate) struct Shared {
     /// to wake when a status changes.
     pub(crate) waitsets: Mutex<Vec<Weak<Waker>>>,
     pub(crate) transport: UdpTransport,
+    /// The shared memory transport, if it is on.
+    #[cfg(feature = "shm")]
+    shm: Option<rustorb_rtps::shm::ShmTransport>,
     pub(crate) prefix: GuidPrefix,
     domain_id: u32,
     inner: Mutex<Inner>,
@@ -909,6 +942,45 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Sends a message to one destination, given by its locators:
+    /// through shared memory if the peer has a locator of it that can be
+    /// used, else to its other locators. Whether some send went, and the
+    /// last error.
+    pub(crate) fn send(&self, bytes: &[u8], locators: &[Locator]) -> (bool, Option<io::Error>) {
+        let mut sent = false;
+        let mut last_err = None;
+        #[cfg(feature = "shm")]
+        if let Some(shm) = &self.shm {
+            for l in shm.select(locators) {
+                let r = if l.kind == Locator::KIND_SHM {
+                    shm.send(bytes, l)
+                } else {
+                    self.transport.send(bytes, l)
+                };
+                match r {
+                    Ok(()) => sent = true,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return (sent, last_err);
+        }
+        for l in locators.iter().filter(|l| l.kind != Locator::KIND_SHM) {
+            match self.transport.send(bytes, l) {
+                Ok(()) => sent = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        (sent, last_err)
+    }
+
+    /// The vendor of a discovered participant.
+    pub(crate) fn vendor_of(&self, prefix: &GuidPrefix) -> Option<VendorId> {
+        self.lock_any()
+            .spdp
+            .participant(prefix)
+            .map(|p| p.vendor_id)
+    }
+
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Inner>> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.deleted {
@@ -1305,8 +1377,13 @@ impl Shared {
         h: InstanceHandle,
         op: WriteOp,
         timestamp: Time,
-    ) -> Result<()> {
+    ) -> Result<SequenceNumber> {
         let out;
+        let related = match &op {
+            WriteOp::Value(_, r) => *r,
+            WriteOp::Lifecycle { .. } => None,
+        };
+        let sn;
         {
             let mut g = self.lock()?;
             let Some(blocking) = g
@@ -1314,12 +1391,12 @@ impl Shared {
                 .get(&writer)
                 .map(|w| w.qos.reliability.max_blocking_time)
             else {
-                return Ok(());
+                return Err(Error::AlreadyDeleted);
             };
             let deadline = Instant::now() + blocking;
             loop {
                 let Some(w) = g.writers.get_mut(&writer) else {
-                    return Ok(());
+                    return Err(Error::AlreadyDeleted);
                 };
                 if !w.is_full(&h) {
                     break;
@@ -1338,7 +1415,8 @@ impl Shared {
             }
             let inner = &mut *g;
             let w = inner.writers.get_mut(&writer).expect("checked above");
-            let (sn, change) = w.add(h, op, timestamp)?;
+            let change;
+            (sn, change) = w.add(h, op, timestamp)?;
             let now = Instant::now();
             out = w.rtps.poll(now);
             w.trim();
@@ -1354,6 +1432,7 @@ impl Shared {
                         writer,
                         sequence_number: sn,
                         source_timestamp: Some(timestamp),
+                        related_sample_identity: related,
                         instance: h,
                         change: change.clone(),
                     };
@@ -1369,17 +1448,55 @@ impl Shared {
         let mut last_err = None;
         let mut sent = false;
         for o in &out {
-            for l in &o.locators {
-                match self.transport.send(&o.bytes, l) {
-                    Ok(()) => sent = true,
-                    Err(e) => last_err = Some(e),
-                }
+            let (ok, err) = self.send(&o.bytes, &o.locators);
+            sent |= ok;
+            if err.is_some() {
+                last_err = err;
             }
         }
         match last_err {
             Some(e) if !sent => Err(e.into()),
-            _ => Ok(()),
+            _ => Ok(sn),
         }
+    }
+
+    /// The discovery data of a writer or reader, local or remote.
+    pub(crate) fn endpoint_data(&self, guid: &Guid) -> Option<EndpointData> {
+        let g = self.lock_any();
+        g.writers
+            .get(guid)
+            .map(|w| &w.data)
+            .or_else(|| g.readers.get(guid).map(|r| &r.data))
+            .or_else(|| g.sedp.remote_writer(guid))
+            .or_else(|| g.sedp.remote_reader(guid))
+            .cloned()
+    }
+
+    /// Changes the discovery data of a local writer or reader with `f`,
+    /// and announces it again.
+    pub(crate) fn update_endpoint(
+        &self,
+        guid: &Guid,
+        f: impl FnOnce(&mut EndpointData),
+    ) -> Result<()> {
+        {
+            let mut g = self.lock()?;
+            let inner = &mut *g;
+            let events = if let Some(w) = inner.writers.get_mut(guid) {
+                f(&mut w.data);
+                let data = w.data.clone();
+                inner.sedp.add_writer(data)
+            } else if let Some(r) = inner.readers.get_mut(guid) {
+                f(&mut r.data);
+                let data = r.data.clone();
+                inner.sedp.add_reader(data)
+            } else {
+                return Err(Error::AlreadyDeleted);
+            };
+            apply_sedp_events(inner, events, Instant::now());
+        }
+        self.flush();
+        Ok(())
     }
 
     /// `assert_liveliness` of a local writer. A MANUAL_BY_TOPIC writer
@@ -1407,9 +1524,7 @@ impl Shared {
         // sent (to a locator kind not supported here, say) is not an
         // error of the call.
         for o in &out {
-            for l in &o.locators {
-                let _ = self.transport.send(&o.bytes, l);
-            }
+            let _ = self.send(&o.bytes, &o.locators);
         }
         Ok(())
     }
@@ -1706,6 +1821,24 @@ impl DomainParticipant {
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
         data.default_multicast_locators = transport.user_multicast_locators();
+        #[cfg(feature = "shm")]
+        let shm = if config.shared_memory {
+            // Without shared memory (no /dev/shm, say), UDP alone.
+            rustorb_rtps::shm::ShmTransport::open(
+                &rustorb_rtps::shm::ShmConfig::default(),
+                prefix,
+                transport.injector(),
+            )
+            .ok()
+        } else {
+            None
+        };
+        #[cfg(feature = "shm")]
+        if let Some(shm) = &shm {
+            data.metatraffic_unicast_locators
+                .push(shm.metatraffic_locator());
+            data.default_unicast_locators.push(shm.user_locator());
+        }
         data.lease_duration = rustorb_rtps::Duration::from_std(config.lease_duration);
         data.user_data = config.user_data.clone();
         let mut spdp_config = SpdpConfig::new(domain_id, transport.discovery_multicast_locators());
@@ -1746,6 +1879,8 @@ impl DomainParticipant {
             this: this.clone(),
             waitsets: Mutex::new(Vec::new()),
             transport,
+            #[cfg(feature = "shm")]
+            shm,
             prefix,
             domain_id,
             inner: Mutex::new(inner),
@@ -1984,9 +2119,7 @@ impl Drop for DomainParticipant {
         let (bytes, to) = g.spdp.dispose();
         let to = to.to_vec();
         drop(g);
-        for l in &to {
-            let _ = self.shared.transport.send(&bytes, l);
-        }
+        let _ = self.shared.send(&bytes, &to);
         self.shared.data_arrived.notify_all();
         self.shared.acknowledged.notify_all();
         self.shared.wake_waitsets();
@@ -2102,11 +2235,9 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         }
     }
     for (bytes, to) in out {
-        for l in &to {
-            // Discovery and reliable traffic are repeated, so a datagram
-            // that cannot be sent now is sent again later.
-            let _ = shared.transport.send(&bytes, l);
-        }
+        // Discovery and reliable traffic are repeated, so a datagram
+        // that cannot be sent now is sent again later.
+        let _ = shared.send(&bytes, &to);
     }
     shared.flush();
 }

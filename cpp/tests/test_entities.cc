@@ -376,4 +376,31 @@ TEST(content_filtered_topic) {
   CHECK(threw);
 }
 
+TEST(requester_and_replier) {
+  auto dp = participant(81);
+  dds::rpc::ReplierParams rp(dp);
+  rp.service_name("Echo").instance_name("echo");
+  dds::rpc::Replier<HelloWorld::Greeting, HelloWorld::Greeting> replier(rp);
+  dds::rpc::Requester<HelloWorld::Greeting, HelloWorld::Greeting> requester(
+      dds::rpc::RequesterParams(dp).service_name("Echo"));
+  CHECK(requester.wait_for_service(Duration(5)));
+  std::thread server([&] {
+    for (int i = 0; i < 2; i++) {
+      HelloWorld::Greeting g;
+      dds::rpc::SampleIdentity id;
+      if (!replier.receive_request(g, id, Duration(5))) return;
+      replier.send_reply(HelloWorld::Greeting(g.index() * 10, "re: " + g.message()), id);
+    }
+  });
+  auto first = requester.send_request(HelloWorld::Greeting(1, "one"));
+  auto second = requester.request(HelloWorld::Greeting(2, "two"), Duration(5));
+  CHECK(second.index() == 20);
+  CHECK(second.message() == "re: two");
+  HelloWorld::Greeting g;
+  CHECK(requester.receive_reply(g, first, Duration(5)));
+  CHECK(g.index() == 10);
+  CHECK(!requester.receive_reply(g, first, Duration(0, 100000000)));
+  server.join();
+}
+
 int main() { return check::run_all(); }

@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::error::DecodeError;
-use crate::wire::{Reader, Writer};
+use crate::wire::{Endianness, Reader, Writer};
 
 /// The 12-octet prefix shared by the GUIDs of all entities of one
 /// participant (DDSI-RTPS 2.5, 9.3.1.1).
@@ -226,6 +226,16 @@ impl Guid {
         out[12..].copy_from_slice(&self.entity_id.to_bytes());
         out
     }
+
+    /// From the 16 octets of [`to_bytes`](Self::to_bytes).
+    pub fn from_bytes(b: [u8; 16]) -> Self {
+        let mut prefix = [0u8; 12];
+        prefix.copy_from_slice(&b[..12]);
+        Guid::new(
+            GuidPrefix(prefix),
+            EntityId::from_bytes([b[12], b[13], b[14], b[15]]),
+        )
+    }
 }
 
 /// The vendor of an RTPS implementation (DDSI-RTPS 2.5, 8.3.3.1.3).
@@ -306,6 +316,46 @@ impl SequenceNumber {
     pub(crate) fn write(&self, w: &mut Writer<'_>) {
         w.i32((self.0 >> 32) as i32);
         w.u32(self.0 as u32);
+    }
+}
+
+/// The identity of a sample: its writer and its sequence number
+/// (`SampleIdentity`, DDS-RPC 1.0, 7.5.1.1.1). A reply carries that of
+/// its request in-line, as `PID_RELATED_SAMPLE_IDENTITY` (7.8.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SampleIdentity {
+    /// `writer_guid`.
+    pub writer_guid: Guid,
+    /// `sequence_number`.
+    pub sequence_number: SequenceNumber,
+}
+
+impl SampleIdentity {
+    /// `RELATED_SAMPLE_IDENTITY_INVALID`: `GUID_UNKNOWN` and
+    /// `SEQUENCENUMBER_UNKNOWN`.
+    pub const INVALID: SampleIdentity = SampleIdentity {
+        writer_guid: Guid::UNKNOWN,
+        sequence_number: SequenceNumber::UNKNOWN,
+    };
+
+    /// The CDR serialization (24 octets) in `endianness`.
+    pub fn to_bytes(&self, endianness: Endianness) -> Vec<u8> {
+        let mut out = Vec::with_capacity(24);
+        let mut w = Writer::new(&mut out, endianness);
+        w.bytes(&self.writer_guid.to_bytes());
+        self.sequence_number.write(&mut w);
+        out
+    }
+
+    /// Reads the CDR serialization in `endianness`.
+    pub fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes, endianness);
+        let prefix = GuidPrefix::read(&mut r)?;
+        let entity_id = EntityId::read(&mut r)?;
+        Ok(SampleIdentity {
+            writer_guid: Guid::new(prefix, entity_id),
+            sequence_number: SequenceNumber::read(&mut r)?,
+        })
     }
 }
 
@@ -658,6 +708,10 @@ impl Locator {
     pub const KIND_UDPV4: i32 = 1;
     /// `LOCATOR_KIND_UDPv6`.
     pub const KIND_UDPV6: i32 = 2;
+    /// The shared memory transport of rustorb-dds (a vendor kind, "RD"
+    /// and 1): the address holds the host and the segment, the port the
+    /// traffic (see the module `shm`).
+    pub const KIND_SHM: i32 = 0x5244_0001;
     /// `LOCATOR_PORT_INVALID`.
     pub const PORT_INVALID: u32 = 0;
     /// `LOCATOR_ADDRESS_INVALID`.
@@ -858,5 +912,31 @@ impl BuiltinEndpointSet {
     /// Whether all the given bits are set.
     pub const fn contains(self, bits: u32) -> bool {
         self.0 & bits == bits
+    }
+}
+
+#[cfg(test)]
+mod sample_identity_tests {
+    use super::*;
+
+    #[test]
+    fn sample_identity_round_trip() {
+        let id = SampleIdentity {
+            writer_guid: Guid::new(GuidPrefix([1; 12]), EntityId::PARTICIPANT),
+            sequence_number: SequenceNumber((2 << 32) | 3),
+        };
+        let le = id.to_bytes(Endianness::Little);
+        assert_eq!(&le[16..], &[2, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(
+            SampleIdentity::from_bytes(&le, Endianness::Little).unwrap(),
+            id
+        );
+        let be = id.to_bytes(Endianness::Big);
+        assert_eq!(&be[16..], &[0, 0, 0, 2, 0, 0, 0, 3]);
+        assert_eq!(
+            SampleIdentity::from_bytes(&be, Endianness::Big).unwrap(),
+            id
+        );
+        assert!(SampleIdentity::from_bytes(&be[..20], Endianness::Big).is_err());
     }
 }

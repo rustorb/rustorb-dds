@@ -25,6 +25,7 @@ use rustorb_dds::{
 
 use crate::types::PyDynamicType;
 use crate::value::{from_py, to_py};
+use rustorb_dds::rpc::{Replier, Requester, RpcConfig};
 
 fn dds_err(e: rustorb_dds::Error) -> PyErr {
     match e {
@@ -581,6 +582,44 @@ impl PyParticipant {
         Ok(PyContentFilteredTopic {
             topic: Arc::new(topic),
             ty: related.ty.clone(),
+        })
+    }
+
+    /// A requester sending requests on `request` and getting the replies
+    /// on `reply`.
+    #[pyo3(signature = (request, reply, writer_qos = None, reader_qos = None))]
+    fn create_requester(
+        &self,
+        request: &PyTopic,
+        reply: &PyTopic,
+        writer_qos: Option<&Bound<'_, PyDict>>,
+        reader_qos: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRequester> {
+        let c = rpc_config(writer_qos, reader_qos, None)?;
+        let inner = Requester::with_topics(&self.inner, &request.topic, &reply.topic, &c)
+            .map_err(dds_err)?;
+        Ok(PyRequester {
+            inner,
+            request: request.ty.clone(),
+        })
+    }
+
+    /// A replier taking requests on `request` and answering on `reply`.
+    #[pyo3(signature = (request, reply, writer_qos = None, reader_qos = None, instance_name = None))]
+    fn create_replier(
+        &self,
+        request: &PyTopic,
+        reply: &PyTopic,
+        writer_qos: Option<&Bound<'_, PyDict>>,
+        reader_qos: Option<&Bound<'_, PyDict>>,
+        instance_name: Option<String>,
+    ) -> PyResult<PyReplier> {
+        let c = rpc_config(writer_qos, reader_qos, instance_name)?;
+        let inner =
+            Replier::with_topics(&self.inner, &request.topic, &reply.topic, &c).map_err(dds_err)?;
+        Ok(PyReplier {
+            inner,
+            reply: reply.ty.clone(),
         })
     }
 
@@ -1298,5 +1337,126 @@ impl PyWaitSet {
             .filter(|(_, c)| active.contains(c))
             .map(|(i, _)| i)
             .collect())
+    }
+}
+
+// ---------- requests and replies -----------------------------------------
+
+fn parse_guid(s: &str) -> PyResult<Guid> {
+    let h =
+        parse_handle(s).map_err(|_| PyValueError::new_err("a GUID is 32 hexadecimal digits"))?;
+    Ok(Guid::from_bytes(h.0))
+}
+
+/// A sample identity as `(writer_guid, sequence_number)`.
+type Identity = (String, i64);
+
+fn identity(id: rustorb_dds::SampleIdentity) -> Identity {
+    (guid(id.writer_guid), id.sequence_number.0)
+}
+
+fn parse_identity(id: Identity) -> PyResult<rustorb_dds::SampleIdentity> {
+    Ok(rustorb_dds::SampleIdentity {
+        writer_guid: parse_guid(&id.0)?,
+        sequence_number: rustorb_dds::SequenceNumber(id.1),
+    })
+}
+
+/// The QoS of a requester or replier: RELIABLE and KEEP_ALL for those not
+/// given.
+fn rpc_config(
+    writer: Option<&Bound<'_, PyDict>>,
+    reader: Option<&Bound<'_, PyDict>>,
+    instance_name: Option<String>,
+) -> PyResult<RpcConfig> {
+    let mut c = RpcConfig::with_topics("", "");
+    if writer.is_some() {
+        c.writer_qos = writer_qos(writer)?;
+    }
+    if reader.is_some() {
+        c.reader_qos = reader_qos(reader)?;
+    }
+    c.service_instance_name = instance_name;
+    Ok(c)
+}
+
+/// `Requester`.
+#[pyclass(name = "Requester", module = "rustorb_dds._native")]
+#[derive(Debug)]
+pub struct PyRequester {
+    inner: Requester<DynamicData, DynamicData>,
+    request: PyDynamicType,
+}
+
+#[pymethods]
+impl PyRequester {
+    /// Whether a replier is matched, waiting up to `timeout` seconds.
+    fn wait_for_service(&self, py: Python<'_>, timeout: f64) -> PyResult<bool> {
+        let t = secs(timeout)?;
+        Ok(py.detach(|| self.inner.wait_for_service(t)))
+    }
+
+    /// Sends a request; returns its identity.
+    fn send_request(&self, py: Python<'_>, sample: &Bound<'_, PyAny>) -> PyResult<Identity> {
+        let d = from_py(&self.request.ty, sample)?;
+        py.detach(|| self.inner.send_request(&d))
+            .map(identity)
+            .map_err(dds_err)
+    }
+
+    /// Waits up to `timeout` seconds for a reply to `request`;
+    /// TimeoutError if none comes.
+    fn receive_reply<'py>(
+        &self,
+        py: Python<'py>,
+        request: Identity,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let id = parse_identity(request)?;
+        let t = secs(timeout)?;
+        let d = py
+            .detach(|| self.inner.receive_reply(&id, t))
+            .map_err(dds_err)?;
+        to_py(py, &d)
+    }
+}
+
+/// `Replier`.
+#[pyclass(name = "Replier", module = "rustorb_dds._native")]
+#[derive(Debug)]
+pub struct PyReplier {
+    inner: Replier<DynamicData, DynamicData>,
+    reply: PyDynamicType,
+}
+
+#[pymethods]
+impl PyReplier {
+    /// Waits up to `timeout` seconds for requests and takes them, as
+    /// `(sample, identity)` pairs; an empty list if none comes.
+    fn receive_requests<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: f64,
+    ) -> PyResult<Vec<(Bound<'py, PyAny>, Identity)>> {
+        let t = secs(timeout)?;
+        let v = py
+            .detach(|| self.inner.receive_requests(t))
+            .map_err(dds_err)?;
+        v.into_iter()
+            .map(|r| Ok((to_py(py, &r.data)?, identity(r.id))))
+            .collect()
+    }
+
+    /// Sends `sample` as a reply to the request `request`.
+    fn send_reply(
+        &self,
+        py: Python<'_>,
+        sample: &Bound<'_, PyAny>,
+        request: Identity,
+    ) -> PyResult<()> {
+        let d = from_py(&self.reply.ty, sample)?;
+        let id = parse_identity(request)?;
+        py.detach(|| self.inner.send_reply(&d, &id))
+            .map_err(dds_err)
     }
 }

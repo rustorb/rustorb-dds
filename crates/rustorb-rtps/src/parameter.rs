@@ -53,10 +53,28 @@ impl Parameter {
 /// `PID_PAD` entries are dropped when reading and never written. The
 /// sentinel is not stored: it is written by [`ParameterList::encode`] when
 /// asked for.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default)]
 pub struct ParameterList {
     /// The parameters in wire order. An id may appear more than once.
     pub parameters: Vec<Parameter>,
+    /// The byte order of the values, for a list that was read: that of
+    /// its submessage or encapsulation. Lists compare by their
+    /// parameters alone.
+    endianness: Option<Endianness>,
+}
+
+impl PartialEq for ParameterList {
+    fn eq(&self, other: &Self) -> bool {
+        self.parameters == other.parameters
+    }
+}
+
+impl Eq for ParameterList {}
+
+impl std::hash::Hash for ParameterList {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parameters.hash(state)
+    }
 }
 
 impl ParameterList {
@@ -124,7 +142,16 @@ impl ParameterList {
                 parameters.push(Parameter::new(id, value));
             }
         }
-        Ok(ParameterList { parameters })
+        Ok(ParameterList {
+            parameters,
+            endianness: Some(r.endianness()),
+        })
+    }
+
+    /// The byte order of the values of a list that was read, `None` for
+    /// one that was built.
+    pub fn endianness(&self) -> Option<Endianness> {
+        self.endianness
     }
 
     /// Writes the list to the end of `out`.

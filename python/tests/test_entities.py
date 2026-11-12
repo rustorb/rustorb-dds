@@ -190,3 +190,31 @@ def test_content_filtered_topic():
         cft.set_expression_parameters([])
     with pytest.raises(ValueError):
         p.create_contentfilteredtopic("Bad", topic, "nope = 1")
+
+
+def test_requester_and_replier():
+    p = dds.DomainParticipant(29, localhost=True)
+    requests = p.create_topic("Double_Request", Shape)
+    replies = p.create_topic("Double_Reply", Shape)
+    replier = dds.Replier(p, requests, replies, instance_name="double")
+    requester = dds.Requester(p, requests, replies)
+    assert requester.wait_for_service(5.0)
+
+    def serve():
+        done = 0
+        while done < 2:
+            for req, ident in replier.receive_requests(5.0):
+                replier.send_reply(Shape(req.id, req.index * 2, "re"), ident)
+                done += 1
+
+    server = threading.Thread(target=serve)
+    server.start()
+    first = requester.send_request(Shape(1, 1, "one"))
+    assert isinstance(first, dds.SampleIdentity)
+    assert len(first.writer_guid) == 32
+    assert requester.request(Shape(2, 2, "two"), 5.0).index == 4
+    reply = requester.receive_reply(first, 5.0)
+    assert (reply.index, reply.message) == (2, "re")
+    with pytest.raises(TimeoutError):
+        requester.receive_reply(first, 0.1)
+    server.join()

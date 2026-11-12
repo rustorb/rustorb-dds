@@ -56,6 +56,8 @@ pub mod qos;
 pub mod receiver;
 pub mod reliable;
 pub mod sedp;
+#[cfg(feature = "shm")]
+pub mod shm;
 pub mod spdp;
 mod submessage;
 pub mod typelookup;
@@ -74,7 +76,7 @@ pub use submessage::{
 };
 pub use types::{
     BuiltinEndpointSet, ChangeCount, Count, Duration, EntityId, FragmentNumber, FragmentNumberSet,
-    GroupDigest, Guid, GuidPrefix, Locator, LocatorUdpV4, ProtocolVersion, SequenceNumber,
-    SequenceNumberSet, Time, VendorId, entity_kind,
+    GroupDigest, Guid, GuidPrefix, Locator, LocatorUdpV4, ProtocolVersion, SampleIdentity,
+    SequenceNumber, SequenceNumberSet, Time, VendorId, entity_kind,
 };
 pub use wire::Endianness;

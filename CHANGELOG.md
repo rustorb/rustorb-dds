@@ -8,6 +8,23 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- A shared memory transport between participants of rustorb-dds on one
+  host (feature `shm`, on by default; Linux, macOS and Windows): a ring
+  buffer in a mapped file of `/dev/shm` (else the temporary directory)
+  per participant and a loopback UDP port to wake it, announced in SPDP with locators of a vendor kind; UDP with other
+  implementations and other hosts. `ParticipantConfig::shared_memory`
+  turns it off (docs/shm.md, #58).
+- Requests and replies over DDS (DDS-RPC 1.0, the request/reply style):
+  `rpc::Requester` and `rpc::Replier`, with the related sample identity
+  sent in-line (`PID_RELATED_SAMPLE_IDENTITY`, also in
+  `SampleInfo::related_sample_identity` and `DataWriter::write_w_params`),
+  the writer and reader of each side announced as a pair in SEDP
+  (`PID_RELATED_ENTITY_GUID`, `PID_SERVICE_INSTANCE_NAME`), and the
+  enhanced service discovery rules (7.6.2.2). They work with ROS 2
+  services (rmw_fastrtps_cpp) both ways: the example `ros2_service` and
+  the new cases of `interop/ros2.sh`. In the C ABI (`rdds_requester`,
+  `rdds_replier`), C++ (`dds::rpc`), Java (`Requester`, `Replier`) and
+  Python too (docs/rpc.md, #57).
 - Content filtered topics (DDS 1.4, 2.2.2.3.3): the filter expressions
   of DDS 1.4, Annex B (`ContentFilter` in `rustorb-xtypes`, on
   DynamicData), `DomainParticipant::create_contentfilteredtopic`,

@@ -23,6 +23,7 @@ A topic's type is a class declared with :func:`struct` (see
             print(s.data)
 """
 
+import collections as _collections
 import dataclasses
 import enum as _enum
 import threading
@@ -41,6 +42,7 @@ __all__ = _types_all + [
     "DataReader", "Qos", "Sample", "SampleInfo", "StatusMask",
     "DataWriterListener", "DataReaderListener", "Condition",
     "GuardCondition", "StatusCondition", "ReadCondition", "WaitSet",
+    "SampleIdentity", "Requester", "Replier",
 ]
 
 
@@ -615,3 +617,72 @@ class WaitSet:
         """Waits until a condition is true; returns those that are, or
         raises ``TimeoutError`` after ``timeout`` seconds."""
         return [self._conditions[i] for i in self._native.wait(timeout)]
+
+
+class SampleIdentity(_collections.namedtuple("SampleIdentity",
+                                             "writer_guid sequence_number")):
+    """The identity of a sample: its writer's GUID (32 hexadecimal digits)
+    and its sequence number. A request's identity is what its replies
+    name."""
+
+
+class Requester:
+    """The client side of a service (DDS-RPC 1.0): sends requests on
+    ``request_topic`` and gets the replies to them on ``reply_topic``,
+    whose QoS are ``writer_qos`` and ``reader_qos`` (a :class:`Qos` or
+    dict; RELIABLE and KEEP_ALL by default)."""
+
+    def __init__(self, participant, request_topic, reply_topic,
+                 writer_qos=None, reader_qos=None):
+        self._native = participant._native.create_requester(
+            request_topic._native, reply_topic._native, _qos(writer_qos),
+            _qos(reader_qos))
+        self._encode = request_topic._spec.encode
+        self._decode = reply_topic._spec.decode
+        self.participant = participant
+
+    def wait_for_service(self, timeout):
+        """Whether a replier is matched (both of its endpoints), waiting
+        up to ``timeout`` seconds."""
+        return self._native.wait_for_service(timeout)
+
+    def send_request(self, sample):
+        """Sends a request; returns its :class:`SampleIdentity`."""
+        return SampleIdentity(*self._native.send_request(self._encode(sample)))
+
+    def receive_reply(self, request, timeout):
+        """Waits up to ``timeout`` seconds for a reply to ``request`` (a
+        :class:`SampleIdentity`) and takes it; ``TimeoutError`` if none
+        comes."""
+        return self._decode(self._native.receive_reply(tuple(request), timeout))
+
+    def request(self, sample, timeout):
+        """Sends a request and waits for its reply."""
+        return self.receive_reply(self.send_request(sample), timeout)
+
+
+class Replier:
+    """The service side (DDS-RPC 1.0): takes requests on ``request_topic``
+    and answers each on ``reply_topic``; the QoS as for
+    :class:`Requester`, and ``instance_name`` the service instance name it
+    announces."""
+
+    def __init__(self, participant, request_topic, reply_topic,
+                 writer_qos=None, reader_qos=None, instance_name=None):
+        self._native = participant._native.create_replier(
+            request_topic._native, reply_topic._native, _qos(writer_qos),
+            _qos(reader_qos), instance_name)
+        self._decode = request_topic._spec.decode
+        self._encode = reply_topic._spec.encode
+        self.participant = participant
+
+    def receive_requests(self, timeout):
+        """Waits up to ``timeout`` seconds for requests and takes them, as
+        ``(sample, identity)`` pairs; an empty list if none comes."""
+        return [(self._decode(d), SampleIdentity(*i))
+                for d, i in self._native.receive_requests(timeout)]
+
+    def send_reply(self, sample, request):
+        """Sends ``sample`` as the reply to ``request`` (the
+        :class:`SampleIdentity` of a request)."""
+        self._native.send_reply(self._encode(sample), tuple(request))
