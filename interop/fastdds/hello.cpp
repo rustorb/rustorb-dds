@@ -35,6 +35,7 @@
 
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <fastdds/dds/log/Log.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
 #include <fastdds/dds/subscriber/DataReader.hpp>
@@ -188,6 +189,11 @@ static int subscribe(DomainParticipant* pp, Topic* topic, int count, int timeout
 
 int main(int argc, char** argv)
 {
+    // FASTDDS_LOG=warning or info shows more of what Fast DDS logs.
+    if (const char* v = std::getenv("FASTDDS_LOG")) {
+        using eprosima::fastdds::dds::Log;
+        Log::SetVerbosity(std::string(v) == "info" ? Log::Info : Log::Warning);
+    }
     if (argc < 5 || argc > 7) {
         std::fprintf(stderr,
                      "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable|transient_local [size]]\n",

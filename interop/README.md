@@ -120,6 +120,19 @@ instances id 1, 2, 3 in turn, then disposes id 2 and unregisters id 3
 instance's in order, then see id 2 NOT_ALIVE_DISPOSED and id 3
 NOT_ALIVE_NO_WRITERS.
 
+The `-secure` cases (rustorb-dds#59) are the best-effort hello world with
+DDS Security on both sides: authentication (PKI-DH), access control and
+the AES-GCM-GMAC cryptography of DDS Security 1.2. `security/gen.sh`
+makes, with openssl, an identity CA and an EC P-256 certificate for each
+side, and a permissions CA that signs the governance (every topic with
+discovery, liveliness, metadata and data encrypted) and the permissions
+(both subjects may publish and subscribe everything); and each side's
+configuration: `RUSTORB_DDS_SECURITY` for the `hello_world` example,
+`CYCLONEDDS_URI` for Cyclone DDS, `FASTRTPS_DEFAULT_PROFILES_FILE` for
+Fast DDS. The `-secure-rtps-reliable` cases are the reliable ones with
+the same and whole RTPS messages encrypted too (`rtps_protection_kind`
+ENCRYPT). `SECURITY=0` skips them.
+
 Results go to `target/interop` (or `$OUT`):
 
 - `versions.txt`: the versions of rustc and of the peers' packages
@@ -147,8 +160,23 @@ as an artifact.
 | 2026-11-04 | rustorb-dds#33 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 50 cases pass |
 | 2026-11-04 | rustorb-dds#34 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 58 cases pass |
 | 2026-11-04 | rustorb-dds#35 (Python binding) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 74 cases pass (16 Python) |
+| 2026-11-12 | rustorb-dds#59 (DDS Security) | 0.10.4 | 2.11.2 | the 8 `-secure` cases pass (also with RTPS protection SIGN, by hand) |
 
 Found on the way:
+
+- DDS Security (rustorb-dds#59): Cyclone DDS 0.10.4 starts no handshake
+  with a participant that does not announce the secure SPDP endpoints
+  (`BUILTIN_PARTICIPANT_SECURE_WRITER`/`READER`), and sends its handshake
+  messages as DATA_FRAG (with fragments of 1344 octets). Fast DDS 2.11
+  compares `c.dsign_algo` and `c.kagree_algo` octet by octet, so they go
+  without a NUL; it compares the subject names and algorithms of the
+  identity and permissions tokens with its own, written
+  `/C=JP/O=rustorb/CN=...` and `ECDSA-SHA256`; and it takes the
+  participant crypto tokens only when there is exactly one, so one of
+  kind NONE goes when RTPS messages are not protected. With an RSA
+  certificate signed by an EC CA, Fast DDS announced `ECDSA-SHA256` as
+  its `c.dsign_algo` and the handshake failed, so the cases use EC keys
+  only.
 
 - Fast DDS 2.11 sends its first ACKNACK with `readerSNState.base = 0`
   and no bits, which 8.3.5.5 calls invalid. rustorb-rtps used to drop
