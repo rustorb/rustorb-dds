@@ -332,11 +332,15 @@ impl<Req, Rep> Requester<Req, Rep> {
         let writers = self.reader.matched_publications();
         self.writer.matched_subscriptions().iter().any(|r| {
             writers.iter().any(|w| {
-                // Cyclone DDS does not answer a request that came
-                // before its reply writer matched our reply reader,
-                // so wait until that writer has sent us something
-                // (its first HEARTBEAT).
-                paired(shared, r, w) && (!is_cyclone(shared, w) || self.reader.heard_from(w))
+                // Cyclone DDS drops a request that comes before it
+                // knows the reply reader with the request writer's
+                // clientid, so wait until it has acknowledged the
+                // latest announcements of both.
+                paired(shared, r, w)
+                    && (!is_cyclone(shared, w)
+                        || [self.writer.guid, self.reader.guid]
+                            .iter()
+                            .all(|g| shared.is_announced_to(g, &w.prefix)))
             })
         })
     }

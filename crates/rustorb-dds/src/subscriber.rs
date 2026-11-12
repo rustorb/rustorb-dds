@@ -461,15 +461,6 @@ impl<T> DataReader<T> {
             .unwrap_or_default()
     }
 
-    /// Whether matched `writer` has sent anything to this reader yet;
-    /// always true for a BEST_EFFORT reader, which does not keep track.
-    pub(crate) fn heard_from(&self, writer: &Guid) -> bool {
-        let g = self.shared.lock_any();
-        g.readers.get(&self.guid).is_some_and(|r| {
-            r.matched.contains(writer) && r.rtps.as_ref().is_none_or(|p| p.heard_from(writer))
-        })
-    }
-
     /// The REQUESTED_INCOMPATIBLE_QOS status: writers of the same topic,
     /// type and partition that this reader did not match because of
     /// their QoS. Reading it resets `total_count_change`.

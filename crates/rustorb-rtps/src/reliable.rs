@@ -460,6 +460,17 @@ impl ReliableWriter {
         self.readers.values().all(|r| r.acked >= sn)
     }
 
+    /// Whether the matched readers of participant `prefix` have
+    /// acknowledged `sn`; false if it has none.
+    pub fn is_acked_by_participant(&self, prefix: &GuidPrefix, sn: SequenceNumber) -> bool {
+        let mut readers = self
+            .readers
+            .iter()
+            .filter(|(g, _)| g.prefix == *prefix)
+            .peekable();
+        readers.peek().is_some() && readers.all(|(_, r)| r.acked >= sn)
+    }
+
     /// Whether every matched reliable reader has acknowledged every
     /// change written so far (what `wait_for_acknowledgments` waits for).
     pub fn is_all_acked(&self) -> bool {
@@ -918,17 +929,6 @@ impl ReliableReader {
     /// The matched writers.
     pub fn writers(&self) -> impl Iterator<Item = &Guid> {
         self.writers.keys()
-    }
-
-    /// Whether matched `writer` has sent anything to this reader yet (a
-    /// HEARTBEAT, a GAP or a change): then it has matched this reader
-    /// too.
-    pub fn heard_from(&self, writer: &Guid) -> bool {
-        self.writers.get(writer).is_some_and(|p| {
-            p.last_heartbeat.is_some()
-                || p.next_expected > SequenceNumber(1)
-                || !p.pending.is_empty()
-        })
     }
 
     /// Handles a DATA from `writer` (8.4.12.2.8) and returns the changes

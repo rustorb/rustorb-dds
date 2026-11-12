@@ -1591,6 +1591,12 @@ impl Shared {
             .cloned()
     }
 
+    /// Whether participant `prefix` has acknowledged the latest SEDP
+    /// announcement of local writer or reader `local`.
+    pub(crate) fn is_announced_to(&self, local: &Guid, prefix: &GuidPrefix) -> bool {
+        self.lock_any().sedp.is_announced_to(local, prefix)
+    }
+
     /// Changes the discovery data of a local writer or reader with `f`,
     /// and announces it again.
     pub(crate) fn update_endpoint(

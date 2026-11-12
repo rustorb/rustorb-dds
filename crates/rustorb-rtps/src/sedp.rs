@@ -902,6 +902,27 @@ impl Sedp {
         self.remove_local(Kind::Reader, guid)
     }
 
+    /// Whether participant `prefix` has acknowledged the latest
+    /// announcement of local writer or reader `local`: then it knows the
+    /// endpoint's current data.
+    pub fn is_announced_to(&self, local: &Guid, prefix: &GuidPrefix) -> bool {
+        let (l, writer) = match (self.local_writers.get(local), self.local_readers.get(local)) {
+            (Some(l), _) => (l, true),
+            (None, Some(l)) => (l, false),
+            (None, None) => return false,
+        };
+        let set = match (l.secure, self.secure.as_ref()) {
+            (true, Some(s)) => s,
+            _ => &self.plain,
+        };
+        let w = if writer {
+            &set.pub_writer
+        } else {
+            &set.sub_writer
+        };
+        w.is_acked_by_participant(prefix, l.sn)
+    }
+
     /// The remote writers known.
     pub fn remote_writers(&self) -> impl Iterator<Item = &EndpointData> {
         self.remote_writers.values()
