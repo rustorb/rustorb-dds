@@ -920,6 +920,17 @@ impl ReliableReader {
         self.writers.keys()
     }
 
+    /// Whether matched `writer` has sent anything to this reader yet (a
+    /// HEARTBEAT, a GAP or a change): then it has matched this reader
+    /// too.
+    pub fn heard_from(&self, writer: &Guid) -> bool {
+        self.writers.get(writer).is_some_and(|p| {
+            p.last_heartbeat.is_some()
+                || p.next_expected > SequenceNumber(1)
+                || !p.pending.is_empty()
+        })
+    }
+
     /// Handles a DATA from `writer` (8.4.12.2.8) and returns the changes
     /// that can now be delivered. DATA from unmatched writers and
     /// duplicates are ignored.

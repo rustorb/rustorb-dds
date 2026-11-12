@@ -330,10 +330,15 @@ impl<Req, Rep> Requester<Req, Rep> {
     pub fn is_service_matched(&self) -> bool {
         let shared = &self.writer.shared;
         let writers = self.reader.matched_publications();
-        self.writer
-            .matched_subscriptions()
-            .iter()
-            .any(|r| writers.iter().any(|w| paired(shared, r, w)))
+        self.writer.matched_subscriptions().iter().any(|r| {
+            writers.iter().any(|w| {
+                // Cyclone DDS does not answer a request that came
+                // before its reply writer matched our reply reader,
+                // so wait until that writer has sent us something
+                // (its first HEARTBEAT).
+                paired(shared, r, w) && (!is_cyclone(shared, w) || self.reader.heard_from(w))
+            })
+        })
     }
 
     /// Waits until [`is_service_matched`](Self::is_service_matched), or

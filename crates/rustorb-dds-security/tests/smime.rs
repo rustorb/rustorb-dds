@@ -20,6 +20,7 @@ fn signed_documents_verify() {
             xml.replace("\r\n", "\n").trim_end(),
             String::from_utf8(read(&format!("{f}.xml")))
                 .unwrap()
+                .replace("\r\n", "\n")
                 .trim_end()
         );
     }
