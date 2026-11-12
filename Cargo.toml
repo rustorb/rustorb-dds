@@ -7,6 +7,7 @@ members = [
     "crates/rustorb-dds-python",
     "crates/rustorb-dds-ffi",
     "crates/rustorb-dds-corba",
+    "crates/rustorb-dds-security",
 ]
 exclude = ["fuzz"]
 
@@ -23,6 +24,7 @@ categories = ["network-programming"]
 [workspace.dependencies]
 rustorb-xtypes = { path = "crates/rustorb-xtypes" }
 rustorb-rtps = { path = "crates/rustorb-rtps", default-features = false }
+rustorb-dds-security = { path = "crates/rustorb-dds-security" }
 # Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
 # MIT OR Apache-2.0.
 socket2 = { version = "0.6", features = ["all"] }

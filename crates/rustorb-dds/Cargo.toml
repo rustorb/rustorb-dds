@@ -15,11 +15,15 @@ publish = false
 rustorb-rtps.workspace = true
 rustorb-xtypes.workspace = true
 rustorb-typesupport.workspace = true
+rustorb-dds-security = { workspace = true, optional = true }
 
 [features]
 default = ["shm"]
 # The shared memory transport between participants of one host.
 shm = ["rustorb-rtps/shm"]
+# DDS Security 1.2: authentication, access control and cryptography with
+# the builtin plugins (rustorb-dds-security, on RustCrypto).
+security = ["dep:rustorb-dds-security"]
 
 [dev-dependencies]
 rustorb-typesupport.workspace = true

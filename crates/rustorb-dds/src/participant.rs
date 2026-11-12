@@ -38,6 +38,8 @@ use crate::error::{Error, Result};
 use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
+#[cfg(feature = "security")]
+use crate::security::{PeerEvent, Security, SecurityConfig};
 use crate::status::{
     DeadlineMissedStatus, Deadlines, IncompatibleQosStatus, InconsistentTopicStatus,
     LivelinessChangedStatus, LivelinessLostStatus, MatchedStatus, SampleLostStatus,
@@ -79,6 +81,11 @@ pub struct ParticipantConfig {
     /// on this host through shared memory rather than UDP (feature `shm`;
     /// true by default). Others are reached by UDP either way.
     pub shared_memory: bool,
+    /// DDS Security (feature `security`): the participant's identity,
+    /// governance and permissions. `None`, the default, joins without
+    /// security.
+    #[cfg(feature = "security")]
+    pub security: Option<SecurityConfig>,
 }
 
 impl ParticipantConfig {
@@ -102,6 +109,8 @@ impl ParticipantConfig {
             drop_one_in: None,
             user_data: Vec::new(),
             shared_memory: true,
+            #[cfg(feature = "security")]
+            security: None,
         }
     }
 
@@ -181,6 +190,10 @@ pub(crate) struct ReaderState {
     /// The filter of a reader of a content filtered topic: the samples
     /// that do not pass it are dropped as they come.
     pub(crate) filter: Option<ContentFilter>,
+    /// The security of the participant, when the reader's topic has its
+    /// payloads protected: to decode them.
+    #[cfg(feature = "security")]
+    pub(crate) payload_security: Option<Arc<Security>>,
 }
 
 /// What a reader knows of the liveliness of a matched writer.
@@ -220,6 +233,8 @@ impl ReaderState {
             enabled: StatusMask::ALL,
             listener: None,
             filter: None,
+            #[cfg(feature = "security")]
+            payload_security: None,
         }
     }
 
@@ -417,7 +432,12 @@ impl ReaderState {
             }
         }
         let lifecycle = status & (STATUS_DISPOSED | STATUS_UNREGISTERED) != 0;
-        let payload = c.payload;
+        #[allow(unused_mut)]
+        let mut payload = c.payload;
+        #[cfg(feature = "security")]
+        if let (Some(sec), Some(p)) = (&self.payload_security, payload.as_mut()) {
+            p.bytes = sec.decode_payload(&c.writer, &p.bytes)?;
+        }
         let change = if lifecycle {
             instance::Change::Lifecycle {
                 disposed: status & STATUS_DISPOSED != 0,
@@ -505,6 +525,9 @@ pub(crate) struct WriterState {
     pub(crate) enabled: StatusMask,
     /// The listener and the statuses it is called for.
     pub(crate) listener: Option<(WriterListener, StatusMask)>,
+    /// Encodes the payloads, when the topic has them protected.
+    #[cfg(feature = "security")]
+    pub(crate) payload_encoder: Option<Arc<rustorb_dds_security::crypto::Encoder>>,
 }
 
 impl WriterState {
@@ -684,10 +707,17 @@ impl WriterState {
                         id.to_bytes(Endianness::NATIVE),
                     ));
                 }
+                #[cfg(feature = "security")]
+                let bytes = match &self.payload_encoder {
+                    Some(e) => e.encode_payload(&v),
+                    None => v.clone(),
+                };
+                #[cfg(not(feature = "security"))]
+                let bytes = v.clone();
                 (
                     Some(SerializedPayload {
                         kind: PayloadKind::Data,
-                        bytes: v.clone(),
+                        bytes,
                     }),
                     instance::Change::Write(v),
                 )
@@ -752,6 +782,9 @@ pub(crate) struct Inner {
     spdp: Spdp,
     pub(crate) sedp: Sedp,
     wlp: Wlp,
+    /// The secure liveliness endpoints, under DDS Security liveliness
+    /// protection.
+    wlp_secure: Option<Wlp>,
     typelookup: TypeLookup,
     /// The TypeObjects asked for, and the participant asked: each is
     /// asked for once from each participant.
@@ -784,12 +817,50 @@ pub(crate) struct Inner {
     dynamic_types: HashMap<String, DynamicType>,
     /// INCONSISTENT_TOPIC, by topic name.
     pub(crate) inconsistent_topics: HashMap<String, InconsistentTopicStatus>,
+    /// DDS Security, when it is on.
+    #[cfg(feature = "security")]
+    pub(crate) security: Option<Arc<Security>>,
+}
+
+/// Writes a liveliness message on the plain and the secure endpoints.
+fn assert_wlp(wlp: &mut Wlp, secure: &mut Option<Wlp>, kind: [u8; 4]) {
+    wlp.assert_liveliness(kind);
+    if let Some(w) = secure.as_mut() {
+        w.assert_liveliness(kind);
+    }
 }
 
 /// The shortest interval between two liveliness messages of a kind.
 const MIN_LIVELINESS_PERIOD: Duration = Duration::from_millis(10);
 
 impl Inner {
+    /// Announces a local writer, on the secure SEDP endpoints if its
+    /// topic has discovery protection.
+    fn sedp_add_writer(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        #[cfg(feature = "security")]
+        if self
+            .security
+            .as_ref()
+            .is_some_and(|s| s.topic_discovery_protected(&data.topic_name))
+        {
+            return self.sedp.add_writer_secure(data);
+        }
+        self.sedp.add_writer(data)
+    }
+
+    /// Announces a local reader, like [`Self::sedp_add_writer`].
+    fn sedp_add_reader(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        #[cfg(feature = "security")]
+        if self
+            .security
+            .as_ref()
+            .is_some_and(|s| s.topic_discovery_protected(&data.topic_name))
+        {
+            return self.sedp.add_reader_secure(data);
+        }
+        self.sedp.add_reader(data)
+    }
+
     /// Notes that the statuses `k` of the local writer or reader `g`
     /// changed.
     fn changed(&mut self, g: Guid, k: StatusMask) {
@@ -898,8 +969,11 @@ impl Inner {
             None => self.next_automatic = None,
             Some(lease) => {
                 if self.next_automatic.is_none_or(|t| t <= now) {
-                    self.wlp
-                        .assert_liveliness(wlp::kind::AUTOMATIC_LIVELINESS_UPDATE);
+                    assert_wlp(
+                        &mut self.wlp,
+                        &mut self.wlp_secure,
+                        wlp::kind::AUTOMATIC_LIVELINESS_UPDATE,
+                    );
                     self.next_automatic = Some(now + (lease / 3).max(MIN_LIVELINESS_PERIOD));
                 }
             }
@@ -908,8 +982,11 @@ impl Inner {
         // at most once a third of the shortest lease.
         if self.manual_pending && now >= self.next_manual {
             self.manual_pending = false;
-            self.wlp
-                .assert_liveliness(wlp::kind::MANUAL_LIVELINESS_UPDATE);
+            assert_wlp(
+                &mut self.wlp,
+                &mut self.wlp_secure,
+                wlp::kind::MANUAL_LIVELINESS_UPDATE,
+            );
             let period = min_lease(LivelinessKind::ManualByParticipant)
                 .map_or(Duration::from_secs(1), |l| l / 3);
             self.next_manual = now + period.max(MIN_LIVELINESS_PERIOD);
@@ -937,6 +1014,9 @@ pub(crate) struct Shared {
     pub(crate) acknowledged: Condvar,
     stop: AtomicBool,
     drop_one_in: Option<u32>,
+    /// DDS Security, when it is on.
+    #[cfg(feature = "security")]
+    pub(crate) security: Option<Arc<Security>>,
     /// The state of the generator that picks the datagrams to drop.
     drop_state: AtomicU64,
 }
@@ -947,6 +1027,19 @@ impl Shared {
     /// used, else to its other locators. Whether some send went, and the
     /// last error.
     pub(crate) fn send(&self, bytes: &[u8], locators: &[Locator]) -> (bool, Option<io::Error>) {
+        #[cfg(feature = "security")]
+        let encoded;
+        #[cfg(feature = "security")]
+        let bytes: &[u8] = match &self.security {
+            Some(sec) => match sec.encode(bytes) {
+                Some(b) => {
+                    encoded = b;
+                    &encoded
+                }
+                None => return (false, None),
+            },
+            None => bytes,
+        };
         let mut sent = false;
         let mut last_err = None;
         #[cfg(feature = "shm")]
@@ -1116,7 +1209,7 @@ impl Shared {
     /// readers.
     pub(crate) fn add_writer(
         &self,
-        data: EndpointData,
+        #[allow(unused_mut)] mut data: EndpointData,
         qos: DataWriterQos,
         keyed: bool,
         listener: Option<(WriterListener, StatusMask)>,
@@ -1126,6 +1219,11 @@ impl Shared {
             let inner = &mut *g;
             let guid = data.guid;
             let now = Instant::now();
+            #[cfg(feature = "security")]
+            let payload_encoder = match &inner.security {
+                Some(sec) => sec.local_endpoint(&mut data, true)?,
+                None => None,
+            };
             let rtps = ReliableWriter::new(guid, VENDOR_ID, inner.writer_config.clone());
             let liveliness_kind = qos.liveliness.kind;
             let deadline = qos.deadline;
@@ -1146,6 +1244,8 @@ impl Shared {
                 changes: StatusMask::NONE,
                 enabled: StatusMask::ALL,
                 listener,
+                #[cfg(feature = "security")]
+                payload_encoder,
             };
             let lease = w.local_lease();
             let mut changes = StatusMask::NONE;
@@ -1180,7 +1280,7 @@ impl Shared {
             }
             inner.writers.insert(guid, w);
             inner.changed(guid, changes);
-            let events = inner.sedp.add_writer(data);
+            let events = inner.sedp_add_writer(data);
             apply_sedp_events(inner, events, now);
         }
         self.flush();
@@ -1191,7 +1291,7 @@ impl Shared {
     /// writers.
     pub(crate) fn add_reader(
         &self,
-        data: EndpointData,
+        #[allow(unused_mut)] mut data: EndpointData,
         qos: DataReaderQos,
         keys: Arc<dyn KeyOps>,
         listener: Option<(ReaderListener, StatusMask)>,
@@ -1202,7 +1302,18 @@ impl Shared {
             let inner = &mut *g;
             let guid = data.guid;
             let now = Instant::now();
+            #[cfg(feature = "security")]
+            if let Some(sec) = &inner.security {
+                sec.local_endpoint(&mut data, false)?;
+            }
             let mut r = ReaderState::new(data.clone(), &qos, keys, &inner.reader_config);
+            #[cfg(feature = "security")]
+            {
+                r.payload_security = inner
+                    .security
+                    .clone()
+                    .filter(|s| s.payload_protected(&data.topic_name));
+            }
             r.listener = listener;
             r.filter = filter;
             let mut changes = StatusMask::NONE;
@@ -1242,7 +1353,7 @@ impl Shared {
             }
             inner.readers.insert(guid, r);
             inner.changed(guid, changes);
-            let events = inner.sedp.add_reader(data);
+            let events = inner.sedp_add_reader(data);
             apply_sedp_events(inner, events, now);
         }
         self.flush();
@@ -1277,7 +1388,7 @@ impl Shared {
                     cf.expression_parameters = parameters.to_vec();
                 }
                 let data = r.data.clone();
-                let events = inner.sedp.add_reader(data);
+                let events = inner.sedp_add_reader(data);
                 apply_sedp_events(inner, events, now);
             }
         }
@@ -1311,6 +1422,10 @@ impl Shared {
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
+            #[cfg(feature = "security")]
+            if let Some(sec) = &inner.security {
+                sec.remove_local_endpoint(guid);
+            }
             if inner.writers.remove(guid).is_none() {
                 return;
             }
@@ -1350,6 +1465,10 @@ impl Shared {
             let inner = &mut *g;
             if inner.readers.remove(guid).is_none() {
                 return;
+            }
+            #[cfg(feature = "security")]
+            if let Some(sec) = &inner.security {
+                sec.remove_local_endpoint(guid);
             }
             for (wg, w) in inner.writers.iter_mut() {
                 if w.remove_match(guid) {
@@ -1472,6 +1591,12 @@ impl Shared {
             .cloned()
     }
 
+    /// Whether participant `prefix` has acknowledged the latest SEDP
+    /// announcement of local writer or reader `local`.
+    pub(crate) fn is_announced_to(&self, local: &Guid, prefix: &GuidPrefix) -> bool {
+        self.lock_any().sedp.is_announced_to(local, prefix)
+    }
+
     /// Changes the discovery data of a local writer or reader with `f`,
     /// and announces it again.
     pub(crate) fn update_endpoint(
@@ -1485,11 +1610,11 @@ impl Shared {
             let events = if let Some(w) = inner.writers.get_mut(guid) {
                 f(&mut w.data);
                 let data = w.data.clone();
-                inner.sedp.add_writer(data)
+                inner.sedp_add_writer(data)
             } else if let Some(r) = inner.readers.get_mut(guid) {
                 f(&mut r.data);
                 let data = r.data.clone();
-                inner.sedp.add_reader(data)
+                inner.sedp_add_reader(data)
             } else {
                 return Err(Error::AlreadyDeleted);
             };
@@ -1562,6 +1687,21 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
     for e in events {
         match e {
             SedpEvent::Matched { local, remote } => {
+                #[cfg(feature = "security")]
+                if let Some(sec) = &inner.security {
+                    if remote.prefix != local.prefix {
+                        let writer = inner.writers.contains_key(&local);
+                        let data = if writer {
+                            inner.sedp.remote_reader(&remote)
+                        } else {
+                            inner.sedp.remote_writer(&remote)
+                        };
+                        if !data.is_some_and(|d| sec.remote_allowed(d, !writer)) {
+                            continue;
+                        }
+                        sec.matched(local, remote, writer);
+                    }
+                }
                 if let Some(w) = inner.writers.get_mut(&local) {
                     if w.add_match(remote) {
                         inner.pending.push((local, StatusMask::PUBLICATION_MATCHED));
@@ -1611,6 +1751,10 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                 }
             }
             SedpEvent::Unmatched { local, remote } => {
+                #[cfg(feature = "security")]
+                if let Some(sec) = &inner.security {
+                    sec.unmatched(local, remote);
+                }
                 if let Some(w) = inner.writers.get_mut(&local) {
                     if w.remove_match(&remote) {
                         inner.pending.push((local, StatusMask::PUBLICATION_MATCHED));
@@ -1812,7 +1956,23 @@ impl DomainParticipant {
     pub fn with_config(config: ParticipantConfig) -> Result<Self> {
         let domain_id = config.udp.domain_id;
         let (transport, incoming) = UdpTransport::open(&config.udp)?;
-        let prefix = GuidPrefix::generate(VENDOR_ID);
+        #[allow(unused_mut)]
+        let mut prefix = GuidPrefix::generate(VENDOR_ID);
+        #[cfg(feature = "security")]
+        let security = match &config.security {
+            Some(c) => {
+                let s = Security::new(
+                    c,
+                    domain_id,
+                    prefix,
+                    SedpConfig::default().writer,
+                    SedpConfig::default().reader,
+                )?;
+                prefix = s.prefix();
+                Some(Arc::new(s))
+            }
+            None => None,
+        };
         let mut data = ParticipantData::new(prefix, VENDOR_ID);
         data.domain_id = Some(domain_id);
         data.available_builtin_endpoints.0 |=
@@ -1841,6 +2001,10 @@ impl DomainParticipant {
         }
         data.lease_duration = rustorb_rtps::Duration::from_std(config.lease_duration);
         data.user_data = config.user_data.clone();
+        #[cfg(feature = "security")]
+        if let Some(s) = &security {
+            s.announce(&mut data);
+        }
         let mut spdp_config = SpdpConfig::new(domain_id, transport.discovery_multicast_locators());
         spdp_config.announce_period = config.announce_period;
         let inner = Inner {
@@ -1852,6 +2016,7 @@ impl DomainParticipant {
                 SedpConfig::default().writer,
                 SedpConfig::default().reader,
             ),
+            wlp_secure: None,
             typelookup: TypeLookup::new(
                 prefix,
                 VENDOR_ID,
@@ -1874,6 +2039,26 @@ impl DomainParticipant {
             types: HashMap::new(),
             dynamic_types: HashMap::new(),
             inconsistent_topics: HashMap::new(),
+            #[cfg(feature = "security")]
+            security: security.clone(),
+        };
+        #[cfg(feature = "security")]
+        let inner = {
+            let mut inner = inner;
+            if let Some(s) = &inner.security {
+                if s.discovery_protected() {
+                    inner.sedp.enable_secure();
+                }
+                if s.liveliness_protected() {
+                    inner.wlp_secure = Some(Wlp::new_secure(
+                        prefix,
+                        VENDOR_ID,
+                        SedpConfig::default().writer,
+                        SedpConfig::default().reader,
+                    ));
+                }
+            }
+            inner
         };
         let shared = Arc::new_cyclic(|this| Shared {
             this: this.clone(),
@@ -1888,6 +2073,8 @@ impl DomainParticipant {
             acknowledged: Condvar::new(),
             stop: AtomicBool::new(false),
             drop_one_in: config.drop_one_in.filter(|n| *n > 0),
+            #[cfg(feature = "security")]
+            security,
             drop_state: AtomicU64::new(
                 u64::from_le_bytes(prefix.0[4..12].try_into().expect("8 bytes")) | 1,
             ),
@@ -2138,9 +2325,12 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
                 g.spdp.next_deadline(),
                 g.sedp.next_deadline(),
                 g.wlp.next_deadline(),
+                g.wlp_secure.as_ref().and_then(Wlp::next_deadline),
                 g.typelookup.next_deadline(),
                 g.next_automatic,
                 manual,
+                #[cfg(feature = "security")]
+                g.security.as_ref().and_then(|s| s.next_deadline()),
             ]
             .into_iter()
             .chain(g.writers.values().map(|w| w.rtps.next_deadline()))
@@ -2175,6 +2365,23 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         let inner = &mut *g;
         let mut acked = false;
         for d in datagrams {
+            #[cfg(feature = "security")]
+            let d = match &inner.security {
+                Some(sec) => match sec.decode(&d.data) {
+                    Some(b) => {
+                        let b = b.into_owned();
+                        if matches!(
+                            d.channel,
+                            Channel::DiscoveryMulticast | Channel::DiscoveryUnicast
+                        ) {
+                            sec.handle_discovery(&b, now);
+                        }
+                        Datagram { data: b, ..d }
+                    }
+                    None => continue,
+                },
+                None => d,
+            };
             match d.channel {
                 Channel::DiscoveryMulticast | Channel::DiscoveryUnicast => {
                     for e in inner.spdp.handle_message(&d.data, now) {
@@ -2184,6 +2391,11 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                     apply_sedp_events(inner, events, now);
                     for a in inner.wlp.handle_message(&d.data, now) {
                         inner.remote_participant_asserted(a.participant, a.kind, now);
+                    }
+                    if let Some(w) = inner.wlp_secure.as_mut() {
+                        for a in w.handle_message(&d.data, now) {
+                            inner.remote_participant_asserted(a.participant, a.kind, now);
+                        }
                     }
                     let replies =
                         inner
@@ -2214,8 +2426,23 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         for o in inner.wlp.poll(now) {
             out.push((o.bytes, o.locators));
         }
+        if let Some(w) = inner.wlp_secure.as_mut() {
+            for o in w.poll(now) {
+                out.push((o.bytes, o.locators));
+            }
+        }
         for o in inner.typelookup.poll(now) {
             out.push((o.bytes, o.locators));
+        }
+        #[cfg(feature = "security")]
+        if let Some(sec) = inner.security.clone() {
+            let (o, events) = sec.poll(now);
+            out.extend(o.into_iter().map(|o| (o.bytes, o.locators)));
+            for e in events {
+                match e {
+                    PeerEvent::Ready(p) => participant_ready(inner, &p, now),
+                }
+            }
         }
         for w in inner.writers.values_mut() {
             for o in w.rtps.poll(now) {
@@ -2245,18 +2472,40 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
 fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
     match e {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
-            inner.sedp.add_participant(&p, now);
-            inner.wlp.add_participant(&p, now);
-            inner.typelookup.add_participant(&p, now);
+            #[cfg(feature = "security")]
+            if let Some(sec) = &inner.security {
+                if !sec.participant_discovered(&p, now) {
+                    return;
+                }
+            }
+            participant_ready(inner, &p, now);
         }
         ParticipantEvent::Removed(prefix, _) => {
+            #[cfg(feature = "security")]
+            if let Some(sec) = &inner.security {
+                sec.participant_removed(&prefix);
+            }
             inner.wlp.remove_participant(&prefix);
+            if let Some(w) = inner.wlp_secure.as_mut() {
+                w.remove_participant(&prefix);
+            }
             inner.typelookup.remove_participant(&prefix);
             inner.type_requests.retain(|(_, p)| *p != prefix);
             let events = inner.sedp.remove_participant(&prefix);
             apply_sedp_events(inner, events, now);
         }
     }
+}
+
+/// Discovery goes on with a participant (after authentication, with
+/// security).
+fn participant_ready(inner: &mut Inner, p: &ParticipantData, now: Instant) {
+    inner.sedp.add_participant(p, now);
+    inner.wlp.add_participant(p, now);
+    if let Some(w) = inner.wlp_secure.as_mut() {
+        w.add_participant(p, now);
+    }
+    inner.typelookup.add_participant(p, now);
 }
 
 /// Handles a user-traffic message: DATA, DATA_FRAG, GAP, HEARTBEAT and

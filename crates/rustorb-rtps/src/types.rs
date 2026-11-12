@@ -155,6 +155,38 @@ impl EntityId {
     pub const TL_SVC_REPLY_WRITER: EntityId = EntityId::new([0, 3, 1], 0xc3);
     /// `ENTITYID_TL_SVC_REPLY_READER`.
     pub const TL_SVC_REPLY_READER: EntityId = EntityId::new([0, 3, 1], 0xc4);
+    /// SEDPbuiltinPublicationsSecureWriter (DDS Security 1.2, Table 9).
+    pub const SEDP_BUILTIN_PUBLICATIONS_SECURE_WRITER: EntityId = EntityId::new([0xff, 0, 3], 0xc2);
+    /// SEDPbuiltinPublicationsSecureReader.
+    pub const SEDP_BUILTIN_PUBLICATIONS_SECURE_READER: EntityId = EntityId::new([0xff, 0, 3], 0xc7);
+    /// SEDPbuiltinSubscriptionsSecureWriter.
+    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 0, 4], 0xc2);
+    /// SEDPbuiltinSubscriptionsSecureReader.
+    pub const SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER: EntityId =
+        EntityId::new([0xff, 0, 4], 0xc7);
+    /// BuiltinParticipantMessageSecureWriter.
+    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 2, 0], 0xc2);
+    /// BuiltinParticipantMessageSecureReader.
+    pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER: EntityId =
+        EntityId::new([0xff, 2, 0], 0xc7);
+    /// BuiltinParticipantStatelessMessageWriter.
+    pub const P2P_BUILTIN_PARTICIPANT_STATELESS_WRITER: EntityId = EntityId::new([0, 2, 1], 0xc3);
+    /// BuiltinParticipantStatelessMessageReader.
+    pub const P2P_BUILTIN_PARTICIPANT_STATELESS_READER: EntityId = EntityId::new([0, 2, 1], 0xc4);
+    /// BuiltinParticipantVolatileMessageSecureWriter.
+    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 2, 2], 0xc3);
+    /// BuiltinParticipantVolatileMessageSecureReader.
+    pub const P2P_BUILTIN_PARTICIPANT_VOLATILE_SECURE_READER: EntityId =
+        EntityId::new([0xff, 2, 2], 0xc4);
+    /// SPDPbuiltinParticipantsSecureWriter.
+    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_WRITER: EntityId =
+        EntityId::new([0xff, 1, 1], 0xc2);
+    /// SPDPbuiltinParticipantsSecureReader.
+    pub const SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_READER: EntityId =
+        EntityId::new([0xff, 1, 1], 0xc7);
 
     /// Makes a user-defined entity id from a key and a kind.
     pub const fn user(entity_key: [u8; 3], entity_kind: u8) -> Self {
@@ -905,6 +937,31 @@ impl BuiltinEndpointSet {
     /// TypeLookupServiceReplyDataReader.
     pub const TYPE_LOOKUP_REPLY_READER: u32 = 1 << 15;
     /// `DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER`.
+    /// SEDPbuiltinPublicationsSecureWriter (DDS Security 1.2, Table 11).
+    pub const PUBLICATIONS_SECURE_WRITER: u32 = 1 << 16;
+    /// SEDPbuiltinPublicationsSecureReader.
+    pub const PUBLICATIONS_SECURE_READER: u32 = 1 << 17;
+    /// SEDPbuiltinSubscriptionsSecureWriter.
+    pub const SUBSCRIPTIONS_SECURE_WRITER: u32 = 1 << 18;
+    /// SEDPbuiltinSubscriptionsSecureReader.
+    pub const SUBSCRIPTIONS_SECURE_READER: u32 = 1 << 19;
+    /// BuiltinParticipantMessageSecureWriter.
+    pub const PARTICIPANT_MESSAGE_SECURE_WRITER: u32 = 1 << 20;
+    /// BuiltinParticipantMessageSecureReader.
+    pub const PARTICIPANT_MESSAGE_SECURE_READER: u32 = 1 << 21;
+    /// BuiltinParticipantStatelessMessageWriter.
+    pub const PARTICIPANT_STATELESS_MESSAGE_WRITER: u32 = 1 << 22;
+    /// BuiltinParticipantStatelessMessageReader.
+    pub const PARTICIPANT_STATELESS_MESSAGE_READER: u32 = 1 << 23;
+    /// BuiltinParticipantVolatileMessageSecureWriter.
+    pub const PARTICIPANT_VOLATILE_MESSAGE_SECURE_WRITER: u32 = 1 << 24;
+    /// BuiltinParticipantVolatileMessageSecureReader.
+    pub const PARTICIPANT_VOLATILE_MESSAGE_SECURE_READER: u32 = 1 << 25;
+    /// SPDPbuiltinParticipantsSecureWriter.
+    pub const PARTICIPANT_SECURE_WRITER: u32 = 1 << 26;
+    /// SPDPbuiltinParticipantsSecureReader.
+    pub const PARTICIPANT_SECURE_READER: u32 = 1 << 27;
+    /// TOPICS_ANNOUNCER.
     pub const TOPICS_ANNOUNCER: u32 = 1 << 28;
     /// `DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR`.
     pub const TOPICS_DETECTOR: u32 = 1 << 29;

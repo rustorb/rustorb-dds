@@ -48,6 +48,59 @@ impl Parameter {
     }
 }
 
+/// The parameters of DDS Security in a discovery parameter list (ids
+/// `0x1000..=0x1fff` and `0x5000..=0x5fff`, DDS Security 1.2, 7.5.1.3),
+/// kept as octets for the security plugins. Their values depend on the
+/// byte order of the list, so each order has its own copy: a list read
+/// fills the one of its order; a list to write uses the one of its order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SecurityParameters {
+    /// The parameters with little-endian values.
+    pub little: Vec<Parameter>,
+    /// The parameters with big-endian values.
+    pub big: Vec<Parameter>,
+}
+
+impl SecurityParameters {
+    /// Whether `id` is one of DDS Security's.
+    pub const fn is_security(id: ParameterId) -> bool {
+        matches!(id.0, 0x1000..=0x1fff | 0x5000..=0x5fff)
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.little.is_empty() && self.big.is_empty()
+    }
+
+    /// The parameters in `e` order.
+    pub fn of(&self, e: Endianness) -> &[Parameter] {
+        match e {
+            Endianness::Little => &self.little,
+            Endianness::Big => &self.big,
+        }
+    }
+
+    /// The parameters in either order, and that order: what a list read
+    /// had.
+    pub fn any(&self) -> Option<(&[Parameter], Endianness)> {
+        if !self.little.is_empty() {
+            Some((&self.little, Endianness::Little))
+        } else if !self.big.is_empty() {
+            Some((&self.big, Endianness::Big))
+        } else {
+            None
+        }
+    }
+
+    /// Keeps `p`, read in `e` order.
+    pub fn push(&mut self, p: Parameter, e: Endianness) {
+        match e {
+            Endianness::Little => self.little.push(p),
+            Endianness::Big => self.big.push(p),
+        }
+    }
+}
+
 /// A list of parameters.
 ///
 /// `PID_PAD` entries are dropped when reading and never written. The

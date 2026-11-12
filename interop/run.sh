@@ -32,6 +32,8 @@
 #   PYTHON     the Python with the rustorb_dds package installed, for
 #              the Python cases (default python3; they are skipped when
 #              it cannot import rustorb_dds)
+#   SECURITY   0 to skip the DDS Security cases (default 1; they need
+#              openssl, and peers built with their security plugins)
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -83,8 +85,8 @@ cat "$OUT/versions.txt"
 # --- build -----------------------------------------------------------------
 
 log "building rustorb-dds hello_world, keyed, liveliness, evolve and dynamic"
-cargo build --quiet --example hello_world --example keyed --example liveliness \
-  --example evolve --example dynamic || exit 1
+cargo build --quiet --features rustorb-dds/security --example hello_world --example keyed \
+  --example liveliness --example evolve --example dynamic || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
 RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
@@ -135,6 +137,30 @@ else
   HAVE_PYTHON=0
   log "no rustorb_dds in $PYTHON: skipping the Python cases (pip install ./python)"
 fi
+
+# DDS Security: certificates, governance and permissions, and each side's
+# configuration (interop/security/gen.sh), with RTPS protection NONE and
+# ENCRYPT.
+SECURITY=${SECURITY:-1}
+if [ "$SECURITY" = 1 ] && ! command -v openssl >/dev/null; then
+  log "no openssl: skipping the DDS Security cases"
+  SECURITY=0
+fi
+if [ "$SECURITY" = 1 ]; then
+  for k in NONE ENCRYPT; do
+    "$ROOT/interop/security/gen.sh" "$OUT/security-$k" "$k" || exit 1
+  done
+fi
+# Prefixes that run a command with DDS Security on.
+secure_env() {
+  echo "RUSTORB_DDS_SECURITY=$1/rustorb.properties"
+  echo "CYCLONEDDS_URI=file://$1/cyclonedds.xml"
+  echo "FASTRTPS_DEFAULT_PROFILES_FILE=$1/fastdds.xml"
+}
+mapfile -t SECURE < <(secure_env "$OUT/security-NONE")
+SECURE=(env "${SECURE[@]}")
+mapfile -t SECURE_RTPS < <(secure_env "$OUT/security-ENCRYPT")
+SECURE_RTPS=(env "${SECURE_RTPS[@]}")
 
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
@@ -219,6 +245,23 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer" \
     "$RUST" pub @D@ "$SEND" "$INTERVAL" -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+  if [ "$SECURITY" = 1 ]; then
+    # DDS Security: authentication, access control, and discovery,
+    # liveliness and data encrypted; then reliable with whole RTPS
+    # messages encrypted too.
+    run_case "$peer-to-rustorb-secure" \
+      "${SECURE[@]}" "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+      "${SECURE[@]}" timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "rustorb-to-$peer-secure" \
+      "${SECURE[@]}" "$RUST" pub @D@ "$SEND" "$INTERVAL" -- \
+      "${SECURE[@]}" timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "$peer-to-rustorb-secure-rtps-reliable" \
+      "${SECURE_RTPS[@]}" "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      "${SECURE_RTPS[@]}" timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "rustorb-to-$peer-secure-rtps-reliable" \
+      "${SECURE_RTPS[@]}" "$RUST" pub @D@ "$RELIABLE" 20 reliable -- \
+      "${SECURE_RTPS[@]}" timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  fi
   # Reliable: every sample, in order, with losses on the rustorb side.
   run_case "$peer-to-rustorb-reliable" \
     "$P" pub @D@ "$RELIABLE" 20 reliable -- \

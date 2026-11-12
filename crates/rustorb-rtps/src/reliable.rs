@@ -460,6 +460,17 @@ impl ReliableWriter {
         self.readers.values().all(|r| r.acked >= sn)
     }
 
+    /// Whether the matched readers of participant `prefix` have
+    /// acknowledged `sn`; false if it has none.
+    pub fn is_acked_by_participant(&self, prefix: &GuidPrefix, sn: SequenceNumber) -> bool {
+        let mut readers = self
+            .readers
+            .iter()
+            .filter(|(g, _)| g.prefix == *prefix)
+            .peekable();
+        readers.peek().is_some() && readers.all(|(_, r)| r.acked >= sn)
+    }
+
     /// Whether every matched reliable reader has acknowledged every
     /// change written so far (what `wait_for_acknowledgments` waits for).
     pub fn is_all_acked(&self) -> bool {

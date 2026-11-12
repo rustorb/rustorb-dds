@@ -8,6 +8,15 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security 1.2 (feature `security`, off by default; docs/security.md,
+  #59): the builtin plugins written from the specification with RustCrypto
+  in the new crate `rustorb-dds-security`: authentication (DDS:Auth:PKI-DH,
+  EC P-256 and RSA certificates, DH and ECDH), access control
+  (DDS:Access:Permissions, signed governance and permissions documents)
+  and cryptography (DDS:Crypto:AES-GCM-GMAC), with the secure SEDP and WLP
+  endpoints. `ParticipantConfig::security` takes a `SecurityConfig`. It
+  works with Cyclone DDS 0.10 and Fast DDS 2.11 with their security on
+  (the `-secure` cases of `interop/run.sh`).
 - A shared memory transport between participants of rustorb-dds on one
   host (feature `shm`, on by default; Linux, macOS and Windows): a ring
   buffer in a mapped file of `/dev/shm` (else the temporary directory)

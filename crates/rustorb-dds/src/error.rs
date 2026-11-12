@@ -27,6 +27,9 @@ pub enum Error {
     /// The QoS asks for something not implemented: TRANSIENT or
     /// PERSISTENT durability.
     Unsupported(&'static str),
+    /// DDS Security refused: the security documents could not be loaded
+    /// or verified, or the permissions do not allow the operation.
+    Security(String),
 }
 
 impl fmt::Display for Error {
@@ -40,6 +43,7 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("timed out"),
             Error::PreconditionNotMet => f.write_str("the instance is not registered"),
             Error::Unsupported(what) => write!(f, "not supported: {what}"),
+            Error::Security(what) => write!(f, "security: {what}"),
         }
     }
 }

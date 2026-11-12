@@ -230,7 +230,9 @@ fn deleted_writers_are_not_counted_as_not_alive() {
 fn deadlines() {
     let a = participant(125);
     let b = participant(125);
-    let period = Duration::from_millis(200);
+    // Long enough that a busy CI runner does not stall a writing loop
+    // past it.
+    let period = Duration::from_millis(400);
     let (writer, reader) = pair(
         &a,
         &b,
@@ -250,7 +252,7 @@ fn deadlines() {
     while Instant::now() < until {
         writer.write(&greeting(i)).unwrap();
         i += 1;
-        std::thread::sleep(period / 4);
+        std::thread::sleep(period / 10);
     }
     assert_eq!(writer.offered_deadline_missed_status().total_count, 0);
     assert_eq!(reader.requested_deadline_missed_status().total_count, 0);

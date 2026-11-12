@@ -79,6 +79,18 @@ pub mod pid {
     pub const TOPIC_ALIASES: ParameterId = ParameterId(0x0082);
     /// `PID_RELATED_SAMPLE_IDENTITY`, in-line (DDS-RPC 1.0, 7.8.2).
     pub const RELATED_SAMPLE_IDENTITY: ParameterId = ParameterId(0x0083);
+    /// `PID_IDENTITY_TOKEN` (DDS Security 1.2, 7.5.1.4).
+    pub const IDENTITY_TOKEN: ParameterId = ParameterId(0x1001);
+    /// `PID_PERMISSIONS_TOKEN` (DDS Security 1.2, 7.5.1.4).
+    pub const PERMISSIONS_TOKEN: ParameterId = ParameterId(0x1002);
+    /// `PID_DATA_TAGS` (DDS Security 1.2, 7.5.1.7).
+    pub const DATA_TAGS: ParameterId = ParameterId(0x1003);
+    /// `PID_ENDPOINT_SECURITY_INFO` (DDS Security 1.2, 7.5.1.5).
+    pub const ENDPOINT_SECURITY_INFO: ParameterId = ParameterId(0x1004);
+    /// `PID_PARTICIPANT_SECURITY_INFO` (DDS Security 1.2, 7.5.1.4).
+    pub const PARTICIPANT_SECURITY_INFO: ParameterId = ParameterId(0x1005);
+    /// `PID_IDENTITY_STATUS_TOKEN` (DDS Security 1.2, 7.5.1.6).
+    pub const IDENTITY_STATUS_TOKEN: ParameterId = ParameterId(0x1006);
     /// `PID_METATRAFFIC_MULTICAST_LOCATOR`.
     pub const METATRAFFIC_MULTICAST_LOCATOR: ParameterId = ParameterId(0x0033);
     /// `PID_PARTICIPANT_MANUAL_LIVELINESS_COUNT`.

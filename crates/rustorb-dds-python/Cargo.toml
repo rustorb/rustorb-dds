@@ -31,3 +31,9 @@ pyo3 = { version = "0.30", features = ["abi3-py39"] }
 
 [build-dependencies]
 pyo3-build-config = "0.30"
+
+# Never built (no target matches `cfg(any())`): it only puts the crate,
+# an optional dependency of rustorb-dds (feature `security`) whose manifest
+# Cargo reads all the same, in the graph maturin copies into the sdist.
+[target.'cfg(any())'.dependencies]
+rustorb-dds-security.workspace = true

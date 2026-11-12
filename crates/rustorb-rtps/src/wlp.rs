@@ -133,6 +133,9 @@ pub struct LivelinessAsserted {
 #[derive(Debug)]
 pub struct Wlp {
     prefix: GuidPrefix,
+    /// The entity ids of the writer and the reader, and their bits.
+    ids: (EntityId, EntityId),
+    bits: (u32, u32),
     writer: ReliableWriter,
     reader: ReliableReader,
     /// The change in the history for each kind (KEEP_LAST 1).
@@ -145,6 +148,10 @@ impl Wlp {
     pub const BUILTIN_ENDPOINTS: u32 = BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_WRITER
         | BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_READER;
 
+    /// The bits of the secure endpoints (DDS Security 1.2, 7.4.7.1).
+    pub const BUILTIN_ENDPOINTS_SECURE: u32 = BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_WRITER
+        | BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_READER;
+
     /// The endpoints of the participant `prefix`.
     pub fn new(
         prefix: GuidPrefix,
@@ -152,18 +159,61 @@ impl Wlp {
         writer: WriterConfig,
         reader: ReaderConfig,
     ) -> Self {
+        Self::with_ids(
+            prefix,
+            vendor_id,
+            writer,
+            reader,
+            (
+                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
+                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
+            ),
+            (
+                BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_WRITER,
+                BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_READER,
+            ),
+        )
+    }
+
+    /// The secure endpoints of the participant `prefix`
+    /// (BuiltinParticipantMessageSecureWriter and Reader, DDS Security
+    /// 1.2, 7.4.5), whose messages DDS Security protects.
+    pub fn new_secure(
+        prefix: GuidPrefix,
+        vendor_id: VendorId,
+        writer: WriterConfig,
+        reader: ReaderConfig,
+    ) -> Self {
+        Self::with_ids(
+            prefix,
+            vendor_id,
+            writer,
+            reader,
+            (
+                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER,
+                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER,
+            ),
+            (
+                BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_WRITER,
+                BuiltinEndpointSet::PARTICIPANT_MESSAGE_SECURE_READER,
+            ),
+        )
+    }
+
+    fn with_ids(
+        prefix: GuidPrefix,
+        vendor_id: VendorId,
+        writer: WriterConfig,
+        reader: ReaderConfig,
+        ids: (EntityId, EntityId),
+        bits: (u32, u32),
+    ) -> Self {
         Wlp {
             prefix,
-            writer: ReliableWriter::new(
-                Guid::new(prefix, EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER),
-                vendor_id,
-                writer,
-            ),
-            reader: ReliableReader::new(
-                Guid::new(prefix, EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER),
-                vendor_id,
-                reader,
-            ),
+            ids,
+            bits,
+            writer: ReliableWriter::new(Guid::new(prefix, ids.0), vendor_id, writer),
+            reader: ReliableReader::new(Guid::new(prefix, ids.1), vendor_id, reader),
             last: HashMap::new(),
         }
     }
@@ -179,15 +229,12 @@ impl Wlp {
         let set = p.available_builtin_endpoints;
         let uc = p.metatraffic_unicast_locators.clone();
         let mc = p.metatraffic_multicast_locators.clone();
-        if set.contains(BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_READER) {
+        if set.contains(self.bits.1) {
             let best_effort = p
                 .builtin_endpoint_qos
                 .is_some_and(|q| q & BEST_EFFORT_PARTICIPANT_MESSAGE_DATA_READER != 0);
             self.writer.add_matched_reader(
-                Guid::new(
-                    p.guid_prefix,
-                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
-                ),
+                Guid::new(p.guid_prefix, self.ids.1),
                 MatchedReader {
                     unicast: uc.clone(),
                     multicast: mc.clone(),
@@ -196,16 +243,9 @@ impl Wlp {
                 },
             );
         }
-        if set.contains(BuiltinEndpointSet::PARTICIPANT_MESSAGE_DATA_WRITER) {
-            self.reader.add_writer(
-                Guid::new(
-                    p.guid_prefix,
-                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
-                ),
-                uc,
-                mc,
-                now,
-            );
+        if set.contains(self.bits.0) {
+            self.reader
+                .add_writer(Guid::new(p.guid_prefix, self.ids.0), uc, mc, now);
         }
     }
 
@@ -244,36 +284,36 @@ impl Wlp {
         let Some((_, received)) = receive(bytes, self.prefix) else {
             return out;
         };
-        const W: EntityId = EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER;
+        let w = self.ids.0;
         for r in received {
             let src = r.source_prefix;
             let changes = match r.submessage {
-                Submessage::Data(d) if d.writer_id == W => {
+                Submessage::Data(d) if d.writer_id == w => {
                     self.reader
                         .handle_data(Guid::new(src, d.writer_id), &d, r.timestamp)
                 }
-                Submessage::DataFrag(d) if d.writer_id == W => {
+                Submessage::DataFrag(d) if d.writer_id == w => {
                     self.reader
                         .handle_data_frag(Guid::new(src, d.writer_id), &d, r.timestamp)
                 }
-                Submessage::Gap(g) if g.writer_id == W => {
+                Submessage::Gap(g) if g.writer_id == w => {
                     self.reader.handle_gap(Guid::new(src, g.writer_id), &g)
                 }
-                Submessage::Heartbeat(h) if h.writer_id == W => {
+                Submessage::Heartbeat(h) if h.writer_id == w => {
                     self.reader
                         .handle_heartbeat(Guid::new(src, h.writer_id), &h, now)
                 }
-                Submessage::HeartbeatFrag(h) if h.writer_id == W => {
+                Submessage::HeartbeatFrag(h) if h.writer_id == w => {
                     self.reader
                         .handle_heartbeat_frag(Guid::new(src, h.writer_id), &h, now);
                     Vec::new()
                 }
-                Submessage::AckNack(a) if a.writer_id == W => {
+                Submessage::AckNack(a) if a.writer_id == w => {
                     self.writer
                         .handle_acknack(Guid::new(src, a.reader_id), &a, now);
                     Vec::new()
                 }
-                Submessage::NackFrag(n) if n.writer_id == W => {
+                Submessage::NackFrag(n) if n.writer_id == w => {
                     self.writer
                         .handle_nackfrag(Guid::new(src, n.reader_id), &n, now);
                     Vec::new()

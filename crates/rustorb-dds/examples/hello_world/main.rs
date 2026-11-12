@@ -41,6 +41,11 @@
 //! Setting `RUSTORB_DROP_ONE_IN=n` drops one in `n` user datagrams
 //! received, at random, to test that reliable delivery repairs losses.
 //!
+//! With the feature `security`, `RUSTORB_DDS_SECURITY=<file>` turns on DDS
+//! Security: the file holds the `dds.sec.*` properties of
+//! [`SecurityConfig::from_properties`](rustorb_dds::SecurityConfig), one
+//! `name=value` per line.
+//!
 //! Both sides register the type with its DDS-XTypes description, so they
 //! announce its TypeInformation. `RUSTORB_NO_TYPE_INFORMATION=1` leaves
 //! that out (matching by type name only), and `RUSTORB_XCDR2=1` makes the
@@ -94,6 +99,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = ParticipantConfig::new(domain);
     if let Ok(n) = std::env::var("RUSTORB_DROP_ONE_IN") {
         config.drop_one_in = Some(n.parse()?);
+    }
+    #[cfg(feature = "security")]
+    if let Some(path) = std::env::var_os("RUSTORB_DDS_SECURITY") {
+        let text = std::fs::read_to_string(path)?;
+        let props = text
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.trim(), v.trim()));
+        config.security = Some(
+            rustorb_dds::SecurityConfig::from_properties(props)
+                .ok_or("RUSTORB_DDS_SECURITY: a dds.sec property is missing")?,
+        );
     }
     let participant = DomainParticipant::with_config(config)?;
     // A content filter needs the type's description.

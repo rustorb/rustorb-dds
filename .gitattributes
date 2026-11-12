@@ -1,0 +1,3 @@
+# Signed documents, certificates and keys are compared and verified as
+# they are: no line-ending conversion on checkout (Windows).
+crates/rustorb-dds-security/tests/certs/** -text

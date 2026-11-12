@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use crate::error::DecodeError;
-use crate::parameter::{Parameter, ParameterList};
+use crate::parameter::{Parameter, ParameterList, SecurityParameters};
 use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
 use crate::qos::{
     DurabilityKind, Liveliness, QosPolicyId, Reliability, RxO, incompatible_policies,
@@ -116,6 +116,9 @@ pub struct EndpointData {
     /// `service_instance_name` (`PID_SERVICE_INSTANCE_NAME`, DDS-RPC 1.0,
     /// 7.6.2.1), of the endpoints of a service.
     pub service_instance_name: Option<String>,
+    /// The parameters of DDS Security, such as the endpoint security
+    /// info.
+    pub security: SecurityParameters,
 }
 
 /// `ContentFilterProperty_t` (DDSI-RTPS 2.5, 8.7.3.1, Table 8.86): the
@@ -187,6 +190,7 @@ impl EndpointData {
             content_filter: None,
             related_entity_guid: None,
             service_instance_name: None,
+            security: SecurityParameters::default(),
         }
     }
 
@@ -308,6 +312,9 @@ impl EndpointData {
                 l.push(Parameter::new(pid::TYPE_INFORMATION, v));
             }
         }
+        for p in self.security.of(endianness) {
+            l.push(p.clone());
+        }
         l
     }
 
@@ -377,6 +384,7 @@ impl EndpointData {
                 // DDS-RPC's extensions are optional too.
                 pid::RELATED_ENTITY_GUID => d.related_entity_guid = v.guid(p).ok(),
                 pid::SERVICE_INSTANCE_NAME => d.service_instance_name = v.string(p).ok(),
+                id if SecurityParameters::is_security(id) => d.security.push(p.clone(), endianness),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
                 }
@@ -603,6 +611,151 @@ const STATUS_UNREGISTERED: u8 = 0x02;
 struct Local {
     data: EndpointData,
     sn: SequenceNumber,
+    /// Announced on the secure endpoints.
+    secure: bool,
+}
+
+/// The four SEDP endpoints, plain or secure.
+#[derive(Debug)]
+struct Endpoints {
+    secure: bool,
+    pub_writer: ReliableWriter,
+    pub_reader: ReliableReader,
+    sub_writer: ReliableWriter,
+    sub_reader: ReliableReader,
+}
+
+impl Endpoints {
+    /// The entity ids: publications writer and reader, subscriptions
+    /// writer and reader.
+    fn ids(secure: bool) -> [EntityId; 4] {
+        if secure {
+            [
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_WRITER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_READER,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_WRITER,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_SECURE_READER,
+            ]
+        } else {
+            [
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_DETECTOR,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR,
+            ]
+        }
+    }
+
+    /// The `availableBuiltinEndpoints` bits, in the order of `ids`.
+    fn bits(secure: bool) -> [u32; 4] {
+        if secure {
+            [
+                BuiltinEndpointSet::PUBLICATIONS_SECURE_WRITER,
+                BuiltinEndpointSet::PUBLICATIONS_SECURE_READER,
+                BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_WRITER,
+                BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_READER,
+            ]
+        } else {
+            [
+                BuiltinEndpointSet::PUBLICATIONS_ANNOUNCER,
+                BuiltinEndpointSet::PUBLICATIONS_DETECTOR,
+                BuiltinEndpointSet::SUBSCRIPTIONS_ANNOUNCER,
+                BuiltinEndpointSet::SUBSCRIPTIONS_DETECTOR,
+            ]
+        }
+    }
+
+    fn new(prefix: GuidPrefix, vendor_id: VendorId, config: &SedpConfig, secure: bool) -> Self {
+        let [pw, pr, sw, sr] = Self::ids(secure);
+        let g = |e| Guid::new(prefix, e);
+        Endpoints {
+            secure,
+            pub_writer: ReliableWriter::new(g(pw), vendor_id, config.writer.clone()),
+            pub_reader: ReliableReader::new(g(pr), vendor_id, config.reader.clone()),
+            sub_writer: ReliableWriter::new(g(sw), vendor_id, config.writer.clone()),
+            sub_reader: ReliableReader::new(g(sr), vendor_id, config.reader.clone()),
+        }
+    }
+
+    /// The set a submessage of the SEDP writer `writer_id` belongs to,
+    /// and the kind of endpoints the writer announces.
+    fn find<'a>(
+        plain: &'a mut Endpoints,
+        secure: Option<&'a mut Endpoints>,
+        writer_id: EntityId,
+    ) -> Option<(&'a mut Endpoints, Kind)> {
+        let set = if Self::ids(false).contains(&writer_id) {
+            plain
+        } else if Self::ids(true).contains(&writer_id) {
+            secure?
+        } else {
+            return None;
+        };
+        let [pw, _, sw, _] = Self::ids(set.secure);
+        if writer_id == pw {
+            Some((set, Kind::Writer))
+        } else if writer_id == sw {
+            Some((set, Kind::Reader))
+        } else {
+            None
+        }
+    }
+
+    fn writer(&mut self, kind: Kind) -> &mut ReliableWriter {
+        match kind {
+            Kind::Writer => &mut self.pub_writer,
+            Kind::Reader => &mut self.sub_writer,
+        }
+    }
+
+    fn add_participant(&mut self, p: &ParticipantData, now: Instant) {
+        let set = p.available_builtin_endpoints;
+        let uc = p.metatraffic_unicast_locators.clone();
+        let mc = p.metatraffic_multicast_locators.clone();
+        let g = |e| Guid::new(p.guid_prefix, e);
+        let [pw, pr, sw, sr] = Self::ids(self.secure);
+        let [bpw, bpr, bsw, bsr] = Self::bits(self.secure);
+        if set.contains(bpr) {
+            self.pub_writer.add_reader(g(pr), uc.clone(), mc.clone());
+        }
+        if set.contains(bpw) {
+            self.pub_reader
+                .add_writer(g(pw), uc.clone(), mc.clone(), now);
+        }
+        if set.contains(bsr) {
+            self.sub_writer.add_reader(g(sr), uc.clone(), mc.clone());
+        }
+        if set.contains(bsw) {
+            self.sub_reader.add_writer(g(sw), uc, mc, now);
+        }
+    }
+
+    fn remove_participant(&mut self, prefix: &GuidPrefix) {
+        self.pub_writer.remove_readers_of(prefix);
+        self.pub_reader.remove_writers_of(prefix);
+        self.sub_writer.remove_readers_of(prefix);
+        self.sub_reader.remove_writers_of(prefix);
+    }
+
+    fn poll(&mut self, now: Instant) -> Vec<Outgoing> {
+        let mut out = self.pub_writer.poll(now);
+        out.extend(self.sub_writer.poll(now));
+        out.extend(self.pub_reader.poll(now));
+        out.extend(self.sub_reader.poll(now));
+        out
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.pub_writer.next_deadline(),
+            self.sub_writer.next_deadline(),
+            self.pub_reader.next_deadline(),
+            self.sub_reader.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -616,10 +769,11 @@ enum Kind {
 #[derive(Debug)]
 pub struct Sedp {
     prefix: GuidPrefix,
-    pub_writer: ReliableWriter,
-    pub_reader: ReliableReader,
-    sub_writer: ReliableWriter,
-    sub_reader: ReliableReader,
+    vendor_id: VendorId,
+    config: SedpConfig,
+    plain: Endpoints,
+    /// The secure endpoints (DDS Security 1.2, 7.4.1.4), when enabled.
+    secure: Option<Endpoints>,
     /// Default locators of the remote participants.
     participants: HashMap<GuidPrefix, (Vec<Locator>, Vec<Locator>)>,
     local_writers: BTreeMap<Guid, Local>,
@@ -647,31 +801,21 @@ impl Sedp {
         | BuiltinEndpointSet::SUBSCRIPTIONS_ANNOUNCER
         | BuiltinEndpointSet::SUBSCRIPTIONS_DETECTOR;
 
+    /// The bits of the secure SEDP endpoints (DDS Security 1.2,
+    /// 7.4.7.1), for a participant that enabled them.
+    pub const BUILTIN_ENDPOINTS_SECURE: u32 = BuiltinEndpointSet::PUBLICATIONS_SECURE_WRITER
+        | BuiltinEndpointSet::PUBLICATIONS_SECURE_READER
+        | BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_WRITER
+        | BuiltinEndpointSet::SUBSCRIPTIONS_SECURE_READER;
+
     /// The SEDP endpoints of the participant `prefix`.
     pub fn new(prefix: GuidPrefix, vendor_id: VendorId, config: SedpConfig) -> Self {
-        let g = |e| Guid::new(prefix, e);
         Sedp {
             prefix,
-            pub_writer: ReliableWriter::new(
-                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER),
-                vendor_id,
-                config.writer.clone(),
-            ),
-            pub_reader: ReliableReader::new(
-                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
-                vendor_id,
-                config.reader.clone(),
-            ),
-            sub_writer: ReliableWriter::new(
-                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER),
-                vendor_id,
-                config.writer,
-            ),
-            sub_reader: ReliableReader::new(
-                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
-                vendor_id,
-                config.reader,
-            ),
+            vendor_id,
+            plain: Endpoints::new(prefix, vendor_id, &config, false),
+            secure: None,
+            config,
             participants: HashMap::new(),
             local_writers: BTreeMap::new(),
             local_readers: BTreeMap::new(),
@@ -693,39 +837,9 @@ impl Sedp {
         if p.guid_prefix == self.prefix {
             return;
         }
-        let set = p.available_builtin_endpoints;
-        let uc = p.metatraffic_unicast_locators.clone();
-        let mc = p.metatraffic_multicast_locators.clone();
-        let g = |e| Guid::new(p.guid_prefix, e);
-        if set.contains(BuiltinEndpointSet::PUBLICATIONS_DETECTOR) {
-            self.pub_writer.add_reader(
-                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
-                uc.clone(),
-                mc.clone(),
-            );
-        }
-        if set.contains(BuiltinEndpointSet::PUBLICATIONS_ANNOUNCER) {
-            self.pub_reader.add_writer(
-                g(EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER),
-                uc.clone(),
-                mc.clone(),
-                now,
-            );
-        }
-        if set.contains(BuiltinEndpointSet::SUBSCRIPTIONS_DETECTOR) {
-            self.sub_writer.add_reader(
-                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
-                uc.clone(),
-                mc.clone(),
-            );
-        }
-        if set.contains(BuiltinEndpointSet::SUBSCRIPTIONS_ANNOUNCER) {
-            self.sub_reader.add_writer(
-                g(EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER),
-                uc,
-                mc,
-                now,
-            );
+        self.plain.add_participant(p, now);
+        if let Some(s) = self.secure.as_mut() {
+            s.add_participant(p, now);
         }
         self.participants.insert(
             p.guid_prefix,
@@ -739,10 +853,10 @@ impl Sedp {
     /// Disconnects from a participant that is gone (8.5.5.2) and forgets
     /// its endpoints.
     pub fn remove_participant(&mut self, prefix: &GuidPrefix) -> Vec<SedpEvent> {
-        self.pub_writer.remove_readers_of(prefix);
-        self.pub_reader.remove_writers_of(prefix);
-        self.sub_writer.remove_readers_of(prefix);
-        self.sub_reader.remove_writers_of(prefix);
+        self.plain.remove_participant(prefix);
+        if let Some(s) = self.secure.as_mut() {
+            s.remove_participant(prefix);
+        }
         self.participants.remove(prefix);
         let mut events = Vec::new();
         let writers: Vec<Guid> = self
@@ -786,6 +900,27 @@ impl Sedp {
     /// Announces that a local reader is gone.
     pub fn remove_reader(&mut self, guid: &Guid) -> Vec<SedpEvent> {
         self.remove_local(Kind::Reader, guid)
+    }
+
+    /// Whether participant `prefix` has acknowledged the latest
+    /// announcement of local writer or reader `local`: then it knows the
+    /// endpoint's current data.
+    pub fn is_announced_to(&self, local: &Guid, prefix: &GuidPrefix) -> bool {
+        let (l, writer) = match (self.local_writers.get(local), self.local_readers.get(local)) {
+            (Some(l), _) => (l, true),
+            (None, Some(l)) => (l, false),
+            (None, None) => return false,
+        };
+        let set = match (l.secure, self.secure.as_ref()) {
+            (true, Some(s)) => s,
+            _ => &self.plain,
+        };
+        let w = if writer {
+            &set.pub_writer
+        } else {
+            &set.sub_writer
+        };
+        w.is_acked_by_participant(prefix, l.sn)
     }
 
     /// The remote writers known.
@@ -862,86 +997,58 @@ impl Sedp {
         let Some((_, received)) = receive(bytes, self.prefix) else {
             return Vec::new();
         };
-        let mut events = Vec::new();
+        let mut changes: Vec<(Kind, Change)> = Vec::new();
         for r in received {
             let src = r.source_prefix;
-            match r.submessage {
-                Submessage::Data(d) => {
-                    let w = Guid::new(src, d.writer_id);
-                    if d.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        for c in self.pub_reader.handle_data(w, &d, r.timestamp) {
-                            self.apply(Kind::Writer, &c, &mut events);
-                        }
-                    } else if d.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        for c in self.sub_reader.handle_data(w, &d, r.timestamp) {
-                            self.apply(Kind::Reader, &c, &mut events);
-                        }
-                    }
-                }
-                Submessage::DataFrag(d) => {
-                    let w = Guid::new(src, d.writer_id);
-                    if d.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        for c in self.pub_reader.handle_data_frag(w, &d, r.timestamp) {
-                            self.apply(Kind::Writer, &c, &mut events);
-                        }
-                    } else if d.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        for c in self.sub_reader.handle_data_frag(w, &d, r.timestamp) {
-                            self.apply(Kind::Reader, &c, &mut events);
-                        }
-                    }
-                }
-                Submessage::Gap(g) => {
-                    let w = Guid::new(src, g.writer_id);
-                    if g.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        for c in self.pub_reader.handle_gap(w, &g) {
-                            self.apply(Kind::Writer, &c, &mut events);
-                        }
-                    } else if g.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        for c in self.sub_reader.handle_gap(w, &g) {
-                            self.apply(Kind::Reader, &c, &mut events);
-                        }
-                    }
-                }
-                Submessage::Heartbeat(h) => {
-                    let w = Guid::new(src, h.writer_id);
-                    if h.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        for c in self.pub_reader.handle_heartbeat(w, &h, now) {
-                            self.apply(Kind::Writer, &c, &mut events);
-                        }
-                    } else if h.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        for c in self.sub_reader.handle_heartbeat(w, &h, now) {
-                            self.apply(Kind::Reader, &c, &mut events);
-                        }
-                    }
-                }
+            let writer_id = match &r.submessage {
+                Submessage::Data(d) => d.writer_id,
+                Submessage::DataFrag(d) => d.writer_id,
+                Submessage::Gap(g) => g.writer_id,
+                Submessage::Heartbeat(h) => h.writer_id,
+                Submessage::NackFrag(n) => n.writer_id,
+                Submessage::AckNack(a) => a.writer_id,
+                _ => continue,
+            };
+            let Some((set, kind)) =
+                Endpoints::find(&mut self.plain, self.secure.as_mut(), writer_id)
+            else {
+                continue;
+            };
+            let w = Guid::new(src, writer_id);
+            let (writer, reader) = match kind {
+                Kind::Writer => (&mut set.pub_writer, &mut set.pub_reader),
+                Kind::Reader => (&mut set.sub_writer, &mut set.sub_reader),
+            };
+            let got = match r.submessage {
+                Submessage::Data(d) => reader.handle_data(w, &d, r.timestamp),
+                Submessage::DataFrag(d) => reader.handle_data_frag(w, &d, r.timestamp),
+                Submessage::Gap(g) => reader.handle_gap(w, &g),
+                Submessage::Heartbeat(h) => reader.handle_heartbeat(w, &h, now),
                 Submessage::NackFrag(n) => {
-                    let reader = Guid::new(src, n.reader_id);
-                    if n.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        self.pub_writer.handle_nackfrag(reader, &n, now);
-                    } else if n.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        self.sub_writer.handle_nackfrag(reader, &n, now);
-                    }
+                    writer.handle_nackfrag(Guid::new(src, n.reader_id), &n, now);
+                    Vec::new()
                 }
                 Submessage::AckNack(a) => {
-                    let reader = Guid::new(src, a.reader_id);
-                    if a.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_ANNOUNCER {
-                        self.pub_writer.handle_acknack(reader, &a, now);
-                    } else if a.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_ANNOUNCER {
-                        self.sub_writer.handle_acknack(reader, &a, now);
-                    }
+                    writer.handle_acknack(Guid::new(src, a.reader_id), &a, now);
+                    Vec::new()
                 }
-                _ => {}
-            }
+                _ => Vec::new(),
+            };
+            changes.extend(got.into_iter().map(|c| (kind, c)));
+        }
+        let mut events = Vec::new();
+        for (kind, c) in changes {
+            self.apply(kind, &c, &mut events);
         }
         events
     }
 
     /// The datagrams due at `now`.
     pub fn poll(&mut self, now: Instant) -> Vec<Outgoing> {
-        let mut out = self.pub_writer.poll(now);
-        out.extend(self.sub_writer.poll(now));
-        out.extend(self.pub_reader.poll(now));
-        out.extend(self.sub_reader.poll(now));
+        let mut out = self.plain.poll(now);
+        if let Some(s) = self.secure.as_mut() {
+            out.extend(s.poll(now));
+        }
         out
     }
 
@@ -949,38 +1056,81 @@ impl Sedp {
     /// in before.
     pub fn next_deadline(&self) -> Option<Instant> {
         [
-            self.pub_writer.next_deadline(),
-            self.sub_writer.next_deadline(),
-            self.pub_reader.next_deadline(),
-            self.sub_reader.next_deadline(),
+            self.plain.next_deadline(),
+            self.secure.as_ref().and_then(Endpoints::next_deadline),
         ]
         .into_iter()
         .flatten()
         .min()
     }
 
+    /// Adds the secure SEDP endpoints (DDS Security 1.2, 7.4.1.4): the
+    /// local endpoints added with [`Sedp::add_writer_secure`] and
+    /// [`Sedp::add_reader_secure`] are announced on them, and they are
+    /// connected with those of the participants added after.
+    pub fn enable_secure(&mut self) {
+        if self.secure.is_none() {
+            self.secure = Some(Endpoints::new(
+                self.prefix,
+                self.vendor_id,
+                &self.config,
+                true,
+            ));
+        }
+    }
+
+    /// Like [`Sedp::add_writer`], on the secure endpoints if they are
+    /// enabled.
+    pub fn add_writer_secure(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        self.add_local_on(Kind::Writer, data, true)
+    }
+
+    /// Like [`Sedp::add_reader`], on the secure endpoints if they are
+    /// enabled.
+    pub fn add_reader_secure(&mut self, data: EndpointData) -> Vec<SedpEvent> {
+        self.add_local_on(Kind::Reader, data, true)
+    }
+
+    fn set(&mut self, secure: bool) -> &mut Endpoints {
+        match (secure, self.secure.as_mut()) {
+            (true, Some(s)) => s,
+            _ => &mut self.plain,
+        }
+    }
+
     fn add_local(&mut self, kind: Kind, data: EndpointData) -> Vec<SedpEvent> {
+        self.add_local_on(kind, data, false)
+    }
+
+    fn add_local_on(&mut self, kind: Kind, data: EndpointData, secure: bool) -> Vec<SedpEvent> {
+        let secure = secure && self.secure.is_some();
         let mut qos = ParameterList::new();
         qos.push(Parameter::new(pid::KEY_HASH, data.guid.to_bytes()));
         let payload = SerializedPayload {
             kind: PayloadKind::Data,
             bytes: data.to_payload(Endianness::NATIVE),
         };
-        let (writer, locals) = match kind {
-            Kind::Writer => (&mut self.pub_writer, &mut self.local_writers),
-            Kind::Reader => (&mut self.sub_writer, &mut self.local_readers),
+        let old = match kind {
+            Kind::Writer => self.local_writers.remove(&data.guid),
+            Kind::Reader => self.local_readers.remove(&data.guid),
         };
-        let sn = writer.add_change(Some(qos), Some(payload));
         // The history keeps one change per endpoint (8.5.4.4).
-        if let Some(old) = locals.insert(
-            data.guid,
-            Local {
-                data: data.clone(),
-                sn,
-            },
-        ) {
-            writer.remove_change(old.sn);
+        if let Some(old) = &old {
+            self.set(old.secure).writer(kind).remove_change(old.sn);
         }
+        let sn = self
+            .set(secure)
+            .writer(kind)
+            .add_change(Some(qos), Some(payload));
+        let local = Local {
+            data: data.clone(),
+            sn,
+            secure,
+        };
+        match kind {
+            Kind::Writer => self.local_writers.insert(data.guid, local),
+            Kind::Reader => self.local_readers.insert(data.guid, local),
+        };
         let mut events = Vec::new();
         let remotes: Vec<Guid> = match kind {
             Kind::Writer => self.remote_readers.keys().copied().collect(),
@@ -993,17 +1143,18 @@ impl Sedp {
     }
 
     fn remove_local(&mut self, kind: Kind, guid: &Guid) -> Vec<SedpEvent> {
-        let (writer, locals) = match kind {
-            Kind::Writer => (&mut self.pub_writer, &mut self.local_writers),
-            Kind::Reader => (&mut self.sub_writer, &mut self.local_readers),
+        let old = match kind {
+            Kind::Writer => self.local_writers.remove(guid),
+            Kind::Reader => self.local_readers.remove(guid),
         };
-        let Some(old) = locals.remove(guid) else {
+        let Some(old) = old else {
             return Vec::new();
         };
-        writer.remove_change(old.sn);
         self.incompatible.retain(|(l, _)| l != guid);
         self.inconsistent.retain(|(l, _)| l != guid);
         self.unresolved.retain(|(l, _), _| l != guid);
+        let writer = self.set(old.secure).writer(kind);
+        writer.remove_change(old.sn);
         // A dispose: the key in-line and as a key-only payload (9.6.3.2).
         let e = Endianness::NATIVE;
         let b = PlBuilder::new(e);
