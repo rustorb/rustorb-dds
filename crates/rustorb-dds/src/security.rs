@@ -34,6 +34,7 @@ use rustorb_dds_security::pki::{Cert, read_uri};
 use rustorb_dds_security::smime;
 use rustorb_dds_security::token::{BinaryProperty, DataHolder};
 use rustorb_dds_security::xml;
+use rustorb_rtps::frag::{Keep, Reassembler, ReassemblyLimits};
 use rustorb_rtps::pl::pid;
 use rustorb_rtps::receiver::receive;
 use rustorb_rtps::reliable::{
@@ -217,6 +218,10 @@ struct State {
     protected_remote: HashMap<Guid, bool>,
     out: Vec<Outgoing>,
     events: Vec<PeerEvent>,
+    /// The stateless messages of each peer coming as DATA_FRAG (a
+    /// handshake with certificates and permissions outgrows the fragment
+    /// size of some implementations).
+    stateless_frags: HashMap<GuidPrefix, Reassembler>,
 }
 
 /// The security of a participant.
@@ -377,6 +382,7 @@ impl Security {
                 protected_remote: HashMap::new(),
                 out: Vec::new(),
                 events: Vec::new(),
+                stateless_frags: HashMap::new(),
             }),
         })
     }
@@ -401,6 +407,10 @@ impl Security {
         if self.discovery_protected() {
             data.available_builtin_endpoints.0 |=
                 rustorb_rtps::sedp::Sedp::BUILTIN_ENDPOINTS_SECURE;
+            // Cyclone DDS starts no handshake with a participant that
+            // does not announce the secure SPDP endpoints (7.4.1.6).
+            data.available_builtin_endpoints.0 |= BuiltinEndpointSet::PARTICIPANT_SECURE_WRITER
+                | BuiltinEndpointSet::PARTICIPANT_SECURE_READER;
         }
         if self.liveliness_protected() {
             data.available_builtin_endpoints.0 |= rustorb_rtps::wlp::Wlp::BUILTIN_ENDPOINTS_SECURE;
@@ -485,6 +495,7 @@ impl Security {
     pub(crate) fn participant_removed(&self, prefix: &GuidPrefix) {
         let mut st = self.state();
         st.peers.remove(prefix);
+        st.stateless_frags.remove(prefix);
         st.decoders.retain(|g, _| g.prefix != *prefix);
         st.protected_remote.retain(|g, _| g.prefix != *prefix);
         for e in st.endpoints.values_mut() {
@@ -540,6 +551,55 @@ impl Security {
                         .and_then(|p| GenericMessage::from_payload(&p.bytes).ok())
                     {
                         self.stateless_received(src, m, now);
+                    }
+                }
+                Submessage::DataFrag(d) if d.writer_id == STATELESS_WRITER => {
+                    let change = {
+                        let mut st = self.state();
+                        if !st.peers.contains_key(&src) {
+                            continue;
+                        }
+                        st.stateless_frags
+                            .entry(src)
+                            .or_insert_with(|| {
+                                Reassembler::new(
+                                    ReassemblyLimits {
+                                        max_sample_size: 1 << 20,
+                                        max_samples: 4,
+                                    },
+                                    Keep::Highest,
+                                )
+                            })
+                            .add(Guid::new(src, d.writer_id), &d, r.timestamp)
+                    };
+                    if let Some(m) = change
+                        .as_ref()
+                        .and_then(|c| c.payload.as_ref())
+                        .and_then(|p| GenericMessage::from_payload(&p.bytes).ok())
+                    {
+                        self.stateless_received(src, m, now);
+                    }
+                }
+                Submessage::DataFrag(d) if d.writer_id == VOLATILE_WRITER => {
+                    let changes = {
+                        let mut st = self.state();
+                        let Some(reader) = st
+                            .peers
+                            .get_mut(&src)
+                            .and_then(|p| p.volatile_reader.as_mut())
+                        else {
+                            continue;
+                        };
+                        reader.handle_data_frag(Guid::new(src, d.writer_id), &d, r.timestamp)
+                    };
+                    for c in changes {
+                        if let Some(m) = c
+                            .payload
+                            .as_ref()
+                            .and_then(|p| GenericMessage::from_payload(&p.bytes).ok())
+                        {
+                            self.volatile_received(src, m, now);
+                        }
                     }
                 }
                 Submessage::Data(d) if d.writer_id == VOLATILE_WRITER => {
@@ -759,7 +819,9 @@ impl Security {
                 peer.participant_sent = Some(km);
                 t
             }
-            None => Vec::new(),
+            // Without RTPS protection, a key material of kind NONE: Fast
+            // DDS takes the participant's tokens only when there is one.
+            None => vec![crypto_token(&KeyMaterial::generate(TransformKind::None))],
         };
         self.volatile_send(st, src, gm::PARTICIPANT_CRYPTO_TOKENS, None, None, tokens);
         let set = st

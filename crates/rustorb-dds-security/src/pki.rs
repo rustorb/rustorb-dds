@@ -292,6 +292,22 @@ impl Cert {
         self.cert.tbs_certificate.subject.to_string()
     }
 
+    /// Its subject name in the form `/C=JP/O=Org/CN=Name`, its relative
+    /// names in certificate order: as the subject names of the tokens
+    /// are written by Fast DDS, which compares them octet by octet.
+    pub fn subject_slashed(&self) -> String {
+        self.cert
+            .tbs_certificate
+            .subject
+            .0
+            .iter()
+            .map(|rdn| {
+                let parts: Vec<String> = rdn.0.iter().map(|a| a.to_string()).collect();
+                format!("/{}", parts.join("+"))
+            })
+            .collect()
+    }
+
     /// The DER of its issuer name and its serial number, which name it
     /// in a CMS signer.
     pub fn issuer_and_serial(&self) -> (Vec<u8>, Vec<u8>) {

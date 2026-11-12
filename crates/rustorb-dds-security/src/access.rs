@@ -427,14 +427,8 @@ impl Permissions {
 /// The PermissionsToken (10.4.2.2).
 pub fn permissions_token(ca: &crate::pki::Cert) -> crate::token::DataHolder {
     crate::token::DataHolder::new("DDS:Access:Permissions:1.0")
-        .with_property("dds.perm_ca.sn", &ca.subject())
-        .with_property(
-            "dds.perm_ca.algo",
-            match ca.public_key().algorithm() {
-                crate::pki::SignatureAlgorithm::RsaPss => "RSA-2048",
-                crate::pki::SignatureAlgorithm::EcdsaP256 => "EC-prime256v1",
-            },
-        )
+        .with_property("dds.perm_ca.sn", &ca.subject_slashed())
+        .with_property("dds.perm_ca.algo", ca.public_key().algorithm().name())
 }
 
 #[cfg(test)]

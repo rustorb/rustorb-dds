@@ -1,7 +1,9 @@
-//! The builtin plugins of DDS Security 1.2 for rustorb-dds: the
-//! cryptographic plugin DDS:Crypto:AES-GCM-GMAC ([`crypto`]), with the
-//! authentication (DDS:Auth:PKI-DH) and access control
-//! (DDS:Access:Permissions) plugins to come.
+//! The builtin plugins of DDS Security 1.2 for rustorb-dds: authentication
+//! DDS:Auth:PKI-DH ([`auth`], with the certificates of [`pki`]), access
+//! control DDS:Access:Permissions ([`access`], with the documents of
+//! [`xml`] signed as [`smime`] says) and cryptography
+//! DDS:Crypto:AES-GCM-GMAC ([`crypto`]), and the messages and tokens they
+//! exchange ([`message`], [`token`]).
 //!
 //! Written from the OMG specification (DDS Security 1.2, formal/25-03-06)
 //! with RustCrypto.

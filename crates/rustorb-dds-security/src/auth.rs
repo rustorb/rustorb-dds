@@ -8,7 +8,7 @@ use rsa::BigUint;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
-use crate::pki::{Cert, PrivateKey, SignatureAlgorithm, read_uri};
+use crate::pki::{Cert, PrivateKey, read_uri};
 use crate::token::{BinaryProperty, DataHolder, binary_properties_cdr};
 
 /// The class of the plugin's tokens, without a version.
@@ -107,10 +107,10 @@ impl Identity {
         let algo = self.key.algorithm().name();
         let ca_algo = self.ca.public_key().algorithm().name();
         DataHolder::new(IDENTITY_TOKEN_CLASS)
-            .with_property("dds.cert.sn", &self.cert.subject())
-            .with_property("dds.cert.algo", algo_token_name(algo))
-            .with_property("dds.ca.sn", &self.ca.subject())
-            .with_property("dds.ca.algo", algo_token_name(ca_algo))
+            .with_property("dds.cert.sn", &self.cert.subject_slashed())
+            .with_property("dds.cert.algo", algo)
+            .with_property("dds.ca.sn", &self.ca.subject_slashed())
+            .with_property("dds.ca.algo", ca_algo)
     }
 
     /// Checks a peer's certificate against the identity CA.
@@ -118,14 +118,6 @@ impl Identity {
         let c = Cert::parse(cert)?;
         c.verify_signed_by(&self.ca)?;
         Ok(c)
-    }
-}
-
-/// The names in `dds.cert.algo`: "RSA-2048" or "EC-prime256v1" (1.1).
-fn algo_token_name(sign: &str) -> &'static str {
-    match SignatureAlgorithm::from_name(sign) {
-        Some(SignatureAlgorithm::RsaPss) => "RSA-2048",
-        _ => "EC-prime256v1",
     }
 }
 
@@ -329,8 +321,12 @@ fn c_properties(
         BinaryProperty::new("c.id", nul(id.cert.pem().as_bytes())),
         BinaryProperty::new("c.perm", permissions.to_vec()),
         BinaryProperty::new("c.pdata", pdata.to_vec()),
-        BinaryProperty::string("c.dsign_algo", id.key.algorithm().name()),
-        BinaryProperty::string("c.kagree_algo", kagree.name()),
+        // Without a NUL: Fast DDS 2.11 compares the names octet by octet.
+        BinaryProperty::new(
+            "c.dsign_algo",
+            id.key.algorithm().name().as_bytes().to_vec(),
+        ),
+        BinaryProperty::new("c.kagree_algo", kagree.name().as_bytes().to_vec()),
     ]
 }
 
