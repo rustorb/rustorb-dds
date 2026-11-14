@@ -17,6 +17,12 @@ workspace = true
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+default = ["security"]
+# DDS Security with the builtin plugins: the `dds.sec.*` properties of
+# rdds_participant_qos.
+security = ["rustorb-dds/security"]
+
 [dependencies]
 rustorb-dds = { path = "../rustorb-dds" }
 rustorb-xtypes.workspace = true

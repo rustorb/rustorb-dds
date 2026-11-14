@@ -8,8 +8,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +25,7 @@ import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.Partition;
 import org.omg.dds.core.policy.PolicyFactory;
+import org.omg.dds.core.policy.Property;
 import org.omg.dds.core.policy.QosPolicy;
 import org.omg.dds.core.policy.Reliability;
 import org.omg.dds.core.policy.ResourceLimits;
@@ -410,6 +413,48 @@ final class Policies {
         }
     }
 
+    static final class PropertyImpl extends Base implements Property {
+        private static final long serialVersionUID = 1L;
+        final Map<String, String> value;
+
+        PropertyImpl(ServiceEnvironment env, Map<String, String> value) {
+            super(env);
+            this.value = Collections.unmodifiableMap(new LinkedHashMap<>(value));
+        }
+
+        @Override
+        Class<? extends QosPolicy> id() {
+            return Property.class;
+        }
+
+        @Override
+        List<Object> state() {
+            return List.of(value);
+        }
+
+        @Override
+        public Map<String, String> getValue() {
+            return new LinkedHashMap<>(value);
+        }
+
+        @Override
+        public String get(String name) {
+            return value.get(name);
+        }
+
+        @Override
+        public Property withValue(Map<String, String> v) {
+            return new PropertyImpl(env, v);
+        }
+
+        @Override
+        public Property with(String name, String v) {
+            Map<String, String> m = new LinkedHashMap<>(value);
+            m.put(Objects.requireNonNull(name), Objects.requireNonNull(v));
+            return new PropertyImpl(env, m);
+        }
+    }
+
     static final class UserDataImpl extends Base implements UserData {
         private static final long serialVersionUID = 1L;
         final byte[] value;
@@ -552,6 +597,11 @@ final class Policies {
         @Override
         public UserData UserData() {
             return new UserDataImpl(env, new byte[0]);
+        }
+
+        @Override
+        public Property Property() {
+            return new PropertyImpl(env, Map.of());
         }
 
         @Override

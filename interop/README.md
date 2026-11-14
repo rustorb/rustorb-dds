@@ -146,7 +146,11 @@ configuration: `RUSTORB_DDS_SECURITY` for the `hello_world` example,
 `CYCLONEDDS_URI` for Cyclone DDS, `FASTRTPS_DEFAULT_PROFILES_FILE` for
 Fast DDS. The `-secure-rtps-reliable` cases are the reliable ones with
 the same and whole RTPS messages encrypted too (`rtps_protection_kind`
-ENCRYPT). `SECURITY=0` skips them.
+ENCRYPT). The Python and C++ `hello_world` examples take the same
+`RUSTORB_DDS_SECURITY` file and pass it as the PROPERTY of the
+participant QoS (rustorb-dds#69): `-to-python-secure`,
+`python-to-*-secure` and `*-cpp-secure-rtps-reliable`. `SECURITY=0`
+skips them.
 
 Results go to `target/interop` (or `$OUT`):
 
@@ -179,6 +183,7 @@ acknowledgments, SEDP and TypeLookup).
 | 2026-11-04 | rustorb-dds#34 | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 58 cases pass |
 | 2026-11-04 | rustorb-dds#35 (Python binding) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 74 cases pass (16 Python) |
 | 2026-11-12 | rustorb-dds#59 (DDS Security) | 0.10.4 | 2.11.2 | the 8 `-secure` cases pass (also with RTPS protection SIGN, by hand) |
+| 2026-11-14 | rustorb-dds#69 (security from Python and C++, secure SPDP) | 0.10.4 | 2.11.2 | the 16 `-secure` cases pass (8 from Python and C++) |
 
 | Date | rustorb-dds | OpenDDS | Result |
 |---|---|---|---|

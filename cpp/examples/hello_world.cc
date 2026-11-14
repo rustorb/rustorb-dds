@@ -11,7 +11,9 @@
 //
 // The subscriber exits once it has count samples (all of them, in order,
 // when reliable), with an error on timeout. With RUSTORB_DDS_LOCALHOST set,
-// only the loopback interface is used.
+// only the loopback interface is used. RUSTORB_DDS_SECURITY=<file> turns on
+// DDS Security, as in the Rust example: the file has the dds.sec.* properties
+// of the participant QoS, one name=value a line.
 //
 // HelloWorld_dds.hh is what `rustorb-idl -bc++11 -Wbdds_only` writes for
 // HelloWorld.idl.
@@ -22,6 +24,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -31,8 +34,20 @@ namespace {
 const char* const MESSAGE = "Hello, world!";
 
 dds::domain::DomainParticipant participant(uint32_t domain) {
-  if (std::getenv("RUSTORB_DDS_LOCALHOST")) return rustorb::dds::localhost_participant(domain);
-  return dds::domain::DomainParticipant(domain);
+  dds::domain::qos::DomainParticipantQos qos;
+  if (const char* path = std::getenv("RUSTORB_DDS_SECURITY")) {
+    std::ifstream in(path);
+    if (!in) throw dds::core::Error(std::string("cannot read ") + path);
+    dds::core::policy::Property props;
+    for (std::string line; std::getline(in, line);) {
+      auto eq = line.find('=');
+      if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+      props.set(line.substr(0, eq), line.substr(eq + 1));
+    }
+    qos << props;
+  }
+  if (std::getenv("RUSTORB_DDS_LOCALHOST")) return rustorb::dds::localhost_participant(domain, qos);
+  return dds::domain::DomainParticipant(domain, qos);
 }
 
 int fail(const std::string& why) {

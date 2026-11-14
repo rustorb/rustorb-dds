@@ -149,10 +149,18 @@ class Sample(typing.NamedTuple):
 
 class DomainParticipant:
     """A participant in the domain ``domain_id``. ``localhost`` keeps
-    its traffic on the loopback interface."""
+    its traffic on the loopback interface. ``properties`` (a dict, or
+    name and value pairs) are the PROPERTY of its QoS: the six
+    ``dds.sec.*`` properties of the builtin plugins (values ``file:`` or
+    ``data:,`` URIs) turn on DDS Security; other names are ignored."""
 
-    def __init__(self, domain_id=0, localhost=False):
-        self._native = _native.DomainParticipant(domain_id, localhost)
+    def __init__(self, domain_id=0, localhost=False, properties=None):
+        if properties is None:
+            properties = []
+        elif isinstance(properties, dict):
+            properties = list(properties.items())
+        self._native = _native.DomainParticipant(
+            domain_id, localhost, [(str(n), str(v)) for n, v in properties])
         # For the listeners: the writers and readers by GUID, the
         # subscribers and the topics by name.
         self._endpoints = _weakref.WeakValueDictionary()

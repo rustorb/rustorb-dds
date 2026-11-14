@@ -191,6 +191,47 @@ class UserData {
   ByteSeq value_;
 };
 
+// PROPERTY of a DomainParticipantQos (DDS Security 1.2, 7.2.5): name and
+// value pairs. The dds.sec.* properties of the builtin plugins turn on DDS
+// Security (all six are needed; values are file: or data:, URIs); others
+// are ignored.
+class Property {
+ public:
+  using Entry = std::pair<std::string, std::string>;
+  Property() = default;
+  Property(const std::string& name, const std::string& value) { set(name, value); }
+  explicit Property(const std::vector<Entry>& entries) : entries_(entries) {}
+  // Sets a property, replacing one of the same name.
+  Property& set(const std::string& name, const std::string& value) {
+    for (auto& e : entries_) {
+      if (e.first == name) {
+        e.second = value;
+        return *this;
+      }
+    }
+    entries_.emplace_back(name, value);
+    return *this;
+  }
+  // The value of a property; empty when it is not set.
+  std::string get(const std::string& name) const {
+    for (const auto& e : entries_) {
+      if (e.first == name) return e.second;
+    }
+    return std::string();
+  }
+  bool contains(const std::string& name) const {
+    for (const auto& e : entries_) {
+      if (e.first == name) return true;
+    }
+    return false;
+  }
+  const std::vector<Entry>& value() const { return entries_; }
+  friend bool operator==(const Property& a, const Property& b) { return a.entries_ == b.entries_; }
+
+ private:
+  std::vector<Entry> entries_;
+};
+
 class WriterDataLifecycle {
  public:
   explicit WriterDataLifecycle(bool autodispose = true) : autodispose_(autodispose) {}
@@ -341,7 +382,8 @@ class EntityQos {
 namespace domain {
 namespace qos {
 class DomainParticipantQos
-    : public ::dds::core::EntityQos<DomainParticipantQos, ::dds::core::policy::UserData> {};
+    : public ::dds::core::EntityQos<DomainParticipantQos, ::dds::core::policy::UserData,
+                                    ::dds::core::policy::Property> {};
 }  // namespace qos
 }  // namespace domain
 

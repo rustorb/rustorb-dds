@@ -69,7 +69,7 @@ done
 - `Topic`（`getName`、`getTypeName`、`getInconsistentTopicStatus`）、`TypeSupport`
 - `Publisher`、`DataWriter`（`write`、`registerInstance`、`unregisterInstance`、`dispose`、`getKeyValue`、`lookupInstance`、`waitForAcknowledgments`、状態の取得、`getMatchedSubscriptions`、`assertLiveliness`、listener）
 - `Subscriber`、`DataReader`（`read`、`take`、`select()` の `instance`・`nextInstance`・`dataState`・`maxSamples`、`getKeyValue`、`lookupInstance`、状態の取得、`getMatchedPublications`、listener）、`Sample`、`Sample.Iterator`、`SampleState`・`ViewState`・`InstanceState`、`Subscriber.DataState`
-- QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、WriterDataLifecycle、DataRepresentation。`withPolicy`、`withPolicies`、`get(Class)`、`PolicyFactory`
+- QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、Property（参加者。`dds.sec.*` で DDS Security、`docs/security.md`）、WriterDataLifecycle、DataRepresentation。`withPolicy`、`withPolicies`、`get(Class)`、`PolicyFactory`
 - 状態と event（`core.status`、`core.event`）、`DataWriterListener`・`DataReaderListener`・`PublisherListener`・`SubscriberListener`（`onDataOnReaders`）・`TopicListener`・`DomainParticipantListener` と Adapter。entity の listener が受けない状態は publisher・subscriber、次に参加者の listener へ（DDS 1.4 2.2.4.3）。`Subscriber.notifyDataReaders`
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`
 - `ContentFilteredTopic`（`DomainParticipant.createContentFilteredTopic`、`getFilterExpression`、`getExpressionParameters`、`setExpressionParameters`、`getRelatedTopic`）。`createDataReader` に渡せる

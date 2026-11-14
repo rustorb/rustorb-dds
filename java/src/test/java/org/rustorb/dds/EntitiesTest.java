@@ -28,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.omg.dds.core.AlreadyClosedException;
 import org.omg.dds.core.Condition;
+import org.omg.dds.core.DDSException;
 import org.omg.dds.core.Duration;
 import org.omg.dds.core.GuardCondition;
 import org.omg.dds.core.InstanceHandle;
@@ -47,6 +48,8 @@ import org.omg.dds.core.status.Status;
 import org.omg.dds.core.status.SubscriptionMatchedStatus;
 import org.omg.dds.domain.DomainParticipant;
 import org.omg.dds.domain.DomainParticipantAdapter;
+import org.omg.dds.domain.DomainParticipantFactory;
+import org.omg.dds.domain.DomainParticipantQos;
 import org.omg.dds.pub.DataWriter;
 import org.omg.dds.pub.DataWriterAdapter;
 import org.omg.dds.pub.DataWriterQos;
@@ -487,5 +490,54 @@ class EntitiesTest {
         dp.closeContainedEntities();
         assertThrows(AlreadyClosedException.class, reader::take);
         assertThrows(AlreadyClosedException.class, () -> pub.createDataWriter(topic));
+    }
+
+    private DomainParticipantQos secureQos(String who) {
+        String certs = "file:" + java.nio.file.Path.of("..", "crates", "rustorb-dds-security", "tests", "certs")
+                .toAbsolutePath().normalize() + "/";
+        return DomainParticipantFactory.getInstance(env).getDefaultParticipantQos().withPolicy(policy.Property()
+                .with("dds.sec.auth.identity_ca", certs + "identity_ca.pem")
+                .with("dds.sec.auth.identity_certificate", certs + who + "_cert.pem")
+                .with("dds.sec.auth.private_key", certs + who + "_key.pem")
+                .with("dds.sec.access.permissions_ca", certs + "permissions_ca.pem")
+                .with("dds.sec.access.governance", certs + "governance.p7s")
+                .with("dds.sec.access.permissions", certs + "permissions_" + who + ".p7s"));
+    }
+
+    @Test
+    void securityFromTheProperty() throws Exception {
+        int domain = DOMAIN.getAndIncrement();
+        // Some of the dds.sec properties only: refused.
+        DomainParticipantQos partial = DomainParticipantFactory.getInstance(env).getDefaultParticipantQos()
+                .withPolicy(policy.Property().with("dds.sec.auth.identity_ca", "file:/nowhere.pem"));
+        assertThrows(DDSException.class, () -> Rustorb.localhostParticipant(env, domain, partial));
+        assertEquals("file:/nowhere.pem", partial.getProperty().get("dds.sec.auth.identity_ca"));
+        // A protected topic (Square* in the governance) between two
+        // participants that authenticate each other.
+        DomainParticipant p1 = Rustorb.localhostParticipant(env, domain, secureQos("p1"));
+        DomainParticipant p2 = Rustorb.localhostParticipant(env, domain, secureQos("p2"));
+        try {
+            Publisher pub = p1.createPublisher();
+            DataWriter<Greeting> writer = pub.createDataWriter(p1.createTopic("Square_java", Greeting.class),
+                    reliableWriter(pub));
+            Subscriber sub = p2.createSubscriber();
+            DataReader<Greeting> reader = sub.createDataReader(p2.createTopic("Square_java", Greeting.class),
+                    reliableReader(sub));
+            Rustorb.waitForSubscriptions(writer, 1, tenSeconds);
+            writer.write(new Greeting(1, "secret"));
+            List<String> got = new ArrayList<>();
+            for (int i = 0; i < 200 && got.isEmpty(); i++) {
+                for (Sample<Greeting> s : takeAll(reader)) {
+                    if (s.getData() != null) {
+                        got.add(s.getData().message);
+                    }
+                }
+                Thread.sleep(50);
+            }
+            assertEquals(List.of("secret"), got);
+        } finally {
+            p1.close();
+            p2.close();
+        }
     }
 }

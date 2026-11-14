@@ -220,6 +220,16 @@ pub struct RddsGroupQos {
 pub struct RddsParticipantQos {
     pub user_data: *const u8,
     pub user_data_len: usize,
+    pub property: *const RddsProperty,
+    pub property_len: usize,
+}
+
+/// `rdds_property`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RddsProperty {
+    pub name: *const c_char,
+    pub value: *const c_char,
 }
 
 static XCDR_BOTH: [i16; 2] = [data_representation::XCDR, data_representation::XCDR2];
@@ -854,6 +864,13 @@ pub unsafe extern "C" fn rdds_participant_new(
         };
         if let Some(q) = unsafe { qos.as_ref() } {
             config.user_data = unsafe { slice(q.user_data, q.user_data_len) }?.to_vec();
+            let mut props = Vec::new();
+            for p in unsafe { slice(q.property, q.property_len) }? {
+                props.push((unsafe { cstr(p.name, "a property name") }?, unsafe {
+                    cstr(p.value, "a property value")
+                }?));
+            }
+            config.set_properties(props)?;
         }
         let p = DomainParticipant::with_config(config)?;
         unsafe { put(out, p) }

@@ -7,8 +7,8 @@
 //! messages and the time, sends what it asks to send, and gets back
 //! [`ParticipantEvent`]s.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::error::DecodeError;
@@ -284,6 +284,9 @@ pub struct Spdp {
     sequence_number: SequenceNumber,
     next_announce: Option<Instant>,
     remote: HashMap<GuidPrefix, Remote>,
+    /// The authenticated participants whose data comes on
+    /// DCPSParticipantsSecure (DDS Security 1.2, 7.5.1.6).
+    secured: HashSet<GuidPrefix>,
 }
 
 /// `StatusInfo_t` flags (9.6.4.9).
@@ -300,6 +303,7 @@ impl Spdp {
             sequence_number: SequenceNumber(1),
             next_announce: None,
             remote: HashMap::new(),
+            secured: HashSet::new(),
         }
     }
 
@@ -424,6 +428,7 @@ impl Spdp {
         gone.into_iter()
             .map(|k| {
                 self.remote.remove(&k);
+                self.secured.remove(&k);
                 ParticipantEvent::Removed(k, RemovalReason::LeaseExpired)
             })
             .collect()
@@ -471,6 +476,9 @@ impl Spdp {
             .unwrap_or(0);
         if status & (STATUS_DISPOSED | STATUS_UNREGISTERED) != 0 {
             let prefix = self.disposed_key(d)?;
+            if self.secured.contains(&prefix) {
+                return None;
+            }
             self.remote.remove(&prefix)?;
             return Some(ParticipantEvent::Removed(prefix, RemovalReason::Disposed));
         }
@@ -485,6 +493,48 @@ impl Spdp {
         {
             return None;
         }
+        if self.secured.contains(&data.guid_prefix) {
+            // Only its liveliness is taken from SPDP.
+            if let Some(r) = self.remote.get_mut(&data.guid_prefix) {
+                r.expires = r.data.lease_duration.to_std().map(|d| now + d);
+            }
+            return None;
+        }
+        self.update(data, now)
+    }
+
+    /// Takes in what an authenticated participant sent on
+    /// DCPSParticipantsSecure (DDS Security 1.2, 7.5.1.6). From then on
+    /// its data and its deletion are only taken from there: what SPDP
+    /// says of it only keeps it alive.
+    pub fn handle_secure(
+        &mut self,
+        event: crate::spdp_secure::SecureParticipantEvent,
+        now: Instant,
+    ) -> Option<ParticipantEvent> {
+        use crate::spdp_secure::SecureParticipantEvent as S;
+        match event {
+            S::Data(data) => {
+                let data = *data;
+                if data.guid_prefix == self.local.guid_prefix
+                    || data.domain_id.is_some_and(|id| id != self.config.domain_id)
+                    || data.domain_tag != self.local.domain_tag
+                {
+                    return None;
+                }
+                self.secured.insert(data.guid_prefix);
+                self.update(data, now)
+            }
+            S::Disposed(prefix) => {
+                self.secured.remove(&prefix);
+                self.remote.remove(&prefix)?;
+                Some(ParticipantEvent::Removed(prefix, RemovalReason::Disposed))
+            }
+        }
+    }
+
+    /// Records the data of a remote participant.
+    fn update(&mut self, data: ParticipantData, now: Instant) -> Option<ParticipantEvent> {
         let expires = data.lease_duration.to_std().map(|d| now + d);
         match self.remote.entry(data.guid_prefix) {
             Entry::Occupied(mut o) => {
@@ -742,6 +792,47 @@ mod tests {
                 RemovalReason::Disposed
             )]
         );
+    }
+
+    #[test]
+    fn secured_participants_change_only_through_the_secure_topic() {
+        use crate::spdp_secure::SecureParticipantEvent as S;
+        let mut a = spdp(1);
+        let mut b = spdp(2);
+        let t0 = Instant::now();
+        let (m, _) = b.poll_announce(t0).unwrap();
+        assert_eq!(a.handle_message(&m, t0).len(), 1);
+        // The same data on the secure topic changes nothing.
+        assert_eq!(a.handle_secure(S::Data(Box::new(data(2))), t0), None);
+        // A change on SPDP is ignored; it only keeps the lease.
+        let mut changed = data(2);
+        changed.user_data = vec![9];
+        b.set_local(changed.clone());
+        let t1 = t0 + StdDuration::from_secs(8);
+        let (m, _) = b.poll_announce(t1).unwrap();
+        assert!(a.handle_message(&m, t1).is_empty());
+        assert!(a.remove_expired(t0 + StdDuration::from_secs(11)).is_empty());
+        assert_eq!(a.participant(&GuidPrefix([2; 12])), Some(&data(2)));
+        // So is a dispose.
+        let (bytes, _) = b.dispose();
+        assert!(a.handle_message(&bytes, t1).is_empty());
+        // Both are taken from the secure topic.
+        assert_eq!(
+            a.handle_secure(S::Data(Box::new(changed.clone())), t1),
+            Some(ParticipantEvent::Updated(changed))
+        );
+        assert_eq!(
+            a.handle_secure(S::Disposed(GuidPrefix([2; 12])), t1),
+            Some(ParticipantEvent::Removed(
+                GuidPrefix([2; 12]),
+                RemovalReason::Disposed
+            ))
+        );
+        // Data of the local participant or another domain is ignored.
+        assert_eq!(a.handle_secure(S::Data(Box::new(data(1))), t1), None);
+        let mut other = data(3);
+        other.domain_id = Some(8);
+        assert_eq!(a.handle_secure(S::Data(Box::new(other)), t1), None);
     }
 
     #[test]

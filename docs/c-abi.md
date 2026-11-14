@@ -52,6 +52,7 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 ### QoS、状態、listener
 
 - QoS は値の構造体（`rdds_writer_qos`、`rdds_reader_qos`、`rdds_group_qos`、`rdds_participant_qos`）で渡す。`rdds_*_qos_default` で既定値を取り、変えたい所だけ書き換える。長さは DDS と同じく `RDDS_LENGTH_UNLIMITED`（-1）、期間は `Duration_t`（無限は `0x7fffffff` 秒・`0x7fffffff` ナノ秒）
+- `rdds_participant_qos` の `property` と `property_len` は PROPERTY（DDS Security 1.2、7.2.5）の `rdds_property`（`name`、`value`）の配列。`dds.sec.*` の 6 つで DDS Security を有効にする（`docs/security.md`）。ライブラリは既定で feature `security` 付き
 - 状態は構造体で返す。取得すると変化の数は 0 に戻る（DDS 1.4 どおり）。不整合 QoS の方針の一覧は固定長（32）の配列で、所有の受け渡しを避けた
 - listener は関数表と `self`。どの関数も NULL でよい。ライブラリのスレッドから呼ばれる。ただし同じ参加者の writer が書いたときは、その `rdds_writer_*` の呼び出しの中で、呼び出し側のスレッドから呼ばれる。ライブラリのロックは持たないので、listener からどの関数を呼んでもよい。`release` は listener が置き換えられたとき、または entity が削除されたときに一度だけ呼ばれる。C++ と Java はここで自分のオブジェクトの参照を手放す
 - 参加者・publisher・subscriber・topic の listener は一つの関数表 `rdds_listener`（`rdds_*_set_listener`）。writer と reader の状態では `rdds_endpoint_info`（GUID、トピック名、型名）を渡す。entity の listener が受けない状態は publisher・subscriber、次に参加者の listener へ（DDS 1.4 2.2.4.3）。`on_data_on_readers` に渡す subscriber は呼び出しの間だけ有効（残すなら `rdds_subscriber_clone`、比べるのは `rdds_subscriber_same`）。`rdds_subscriber_notify_datareaders` で reader の listener を呼ぶ

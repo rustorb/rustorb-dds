@@ -11,6 +11,8 @@
 //! together by [`frag`] (8.4.14.1, rustorb-dds#18). The Writer Liveliness
 //! Protocol (8.4.13, rustorb-dds#19) is in [`wlp`], and the endpoints of
 //! the DDS-XTypes TypeLookup service (rustorb-dds#33) in [`typelookup`].
+//! The secure participant discovery of DDS Security (DCPSParticipantsSecure,
+//! rustorb-dds#69) is in [`spdp_secure`].
 //!
 //! - [`Message`], [`Header`] and the [`Submessage`] kinds. All submessage
 //!   kinds of version 2.5 are handled; unknown and vendor-specific ones
@@ -59,6 +61,7 @@ pub mod sedp;
 #[cfg(feature = "shm")]
 pub mod shm;
 pub mod spdp;
+pub mod spdp_secure;
 mod submessage;
 pub mod typelookup;
 mod types;

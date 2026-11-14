@@ -136,3 +136,38 @@ fn unauthenticated_participants_are_ignored() {
     std::thread::sleep(Duration::from_secs(2));
     assert!(writer.matched_subscriptions().is_empty());
 }
+
+/// The participants send each other their data on
+/// DCPSParticipantsSecure, and the deletion of one goes there too: the
+/// other forgets it at once, not when its lease runs out.
+#[test]
+fn deletion_goes_on_the_secure_participant_topic() {
+    let p1 = participant(84, Some("p1")).unwrap();
+    let p2 = participant(84, Some("p2")).unwrap();
+    let t1 = p1.create_topic::<Greeting>("Circle").unwrap();
+    let t2 = p2.create_topic::<Greeting>("Circle").unwrap();
+    let writer = p1
+        .create_publisher()
+        .unwrap()
+        .create_datawriter(&t1)
+        .unwrap();
+    let _reader = p2
+        .create_subscriber()
+        .unwrap()
+        .create_datareader(&t2)
+        .unwrap();
+    assert!(
+        wait_until(|| !writer.matched_subscriptions().is_empty()),
+        "not matched"
+    );
+    // Room for the secure participant data to arrive.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(p2.discovered_participants().len(), 1);
+    let start = Instant::now();
+    drop(p1);
+    assert!(
+        wait_until(|| p2.discovered_participants().is_empty()),
+        "p1 still known"
+    );
+    assert!(start.elapsed() < Duration::from_secs(3));
+}

@@ -73,6 +73,18 @@ pub struct SecurityConfig {
 }
 
 impl SecurityConfig {
+    /// The standard names of the properties it is made of, those of the
+    /// builtin authentication and access control plugins (DDS Security
+    /// 1.2, clause 9).
+    pub const PROPERTIES: [&'static str; 6] = [
+        "dds.sec.auth.identity_ca",
+        "dds.sec.auth.identity_certificate",
+        "dds.sec.auth.private_key",
+        "dds.sec.access.permissions_ca",
+        "dds.sec.access.governance",
+        "dds.sec.access.permissions",
+    ];
+
     /// The configuration given by the standard property names (as a
     /// DomainParticipantQos PROPERTY would); `None` if one is missing.
     pub fn from_properties<'a>(
@@ -1035,6 +1047,20 @@ impl Security {
         let d = self.rule.discovery_protection_kind;
         if d.is_protected() {
             v.extend([
+                (
+                    EntityId::SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_WRITER,
+                    EntityId::SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_READER,
+                    true,
+                    BuiltinEndpointSet::PARTICIPANT_SECURE_READER,
+                    d,
+                ),
+                (
+                    EntityId::SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_READER,
+                    EntityId::SPDP_RELIABLE_BUILTIN_PARTICIPANT_SECURE_WRITER,
+                    false,
+                    BuiltinEndpointSet::PARTICIPANT_SECURE_WRITER,
+                    d,
+                ),
                 (
                     EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_WRITER,
                     EntityId::SEDP_BUILTIN_PUBLICATIONS_SECURE_READER,

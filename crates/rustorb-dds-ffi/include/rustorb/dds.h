@@ -412,9 +412,23 @@ typedef struct rdds_group_qos {
   size_t partition_len;
 } rdds_group_qos;
 
+/* A property of the PROPERTY QoS (DDS Security 1.2, 7.2.5). */
+typedef struct rdds_property {
+  const char *name;
+  const char *value;
+} rdds_property;
+
+/* property: the dds.sec.* properties of the builtin plugins
+   (dds.sec.auth.identity_ca, dds.sec.auth.identity_certificate,
+   dds.sec.auth.private_key, dds.sec.access.permissions_ca,
+   dds.sec.access.governance, dds.sec.access.permissions; values are
+   file: or data:, URIs) turn on DDS Security; all six are needed. Other
+   properties are ignored. */
 typedef struct rdds_participant_qos {
   const uint8_t *user_data;
   size_t user_data_len;
+  const rdds_property *property;
+  size_t property_len;
 } rdds_participant_qos;
 
 rdds_status rdds_writer_qos_default(rdds_writer_qos *out);

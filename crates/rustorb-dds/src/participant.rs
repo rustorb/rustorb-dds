@@ -18,6 +18,7 @@ use rustorb_rtps::reliable::{
 };
 use rustorb_rtps::sedp::{EndpointData, Match, Sedp, SedpConfig, SedpEvent, match_endpoints};
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
+use rustorb_rtps::spdp_secure::SpdpSecure;
 use rustorb_rtps::typelookup::{TypeLookup, TypeLookupReplied};
 use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
 use rustorb_rtps::wlp::{self, Wlp};
@@ -123,6 +124,50 @@ impl ParticipantConfig {
         let mut c = Self::new(domain_id);
         c.udp.interfaces = vec![Ipv4Addr::LOCALHOST];
         c
+    }
+
+    /// Takes the PROPERTY of a DomainParticipantQos (DDS Security 1.2,
+    /// 7.2.5), as the bindings for other languages give it: the
+    /// `dds.sec.*` properties turn on DDS Security with the builtin
+    /// plugins (`SecurityConfig::from_properties`); the others are
+    /// ignored.
+    ///
+    /// Fails with [`Error::Security`] when some but not all of the
+    /// `dds.sec.auth.*` and `dds.sec.access.*` properties are given, and
+    /// with [`Error::Unsupported`] when there are `dds.sec.*` properties
+    /// and the feature `security` is off.
+    #[cfg_attr(not(feature = "security"), allow(unused_mut))]
+    pub fn set_properties<'a>(
+        &mut self,
+        properties: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<()> {
+        let sec: Vec<(&str, &str)> = properties
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("dds.sec."))
+            .collect();
+        if sec.is_empty() {
+            return Ok(());
+        }
+        #[cfg(feature = "security")]
+        {
+            let missing: Vec<&str> = SecurityConfig::PROPERTIES
+                .iter()
+                .copied()
+                .filter(|n| !sec.iter().any(|(k, _)| k == n))
+                .collect();
+            if !missing.is_empty() {
+                return Err(Error::Security(format!(
+                    "missing properties: {}",
+                    missing.join(", ")
+                )));
+            }
+            self.security = SecurityConfig::from_properties(sec);
+            Ok(())
+        }
+        #[cfg(not(feature = "security"))]
+        Err(Error::Unsupported(
+            "DDS Security: rustorb-dds was built without the feature `security`",
+        ))
     }
 }
 
@@ -886,6 +931,9 @@ pub(crate) struct Inner {
     /// The secure liveliness endpoints, under DDS Security liveliness
     /// protection.
     wlp_secure: Option<Wlp>,
+    /// The DCPSParticipantsSecure endpoints, under DDS Security
+    /// discovery protection.
+    spdp_secure: Option<SpdpSecure>,
     typelookup: TypeLookup,
     /// The TypeObjects asked for, and the participant asked: each is
     /// asked for once from each participant.
@@ -2275,6 +2323,7 @@ impl DomainParticipant {
                 SedpConfig::default().reader,
             ),
             wlp_secure: None,
+            spdp_secure: None,
             typelookup: TypeLookup::new(
                 prefix,
                 VENDOR_ID,
@@ -2309,6 +2358,14 @@ impl DomainParticipant {
             if let Some(s) = &inner.security {
                 if s.discovery_protected() {
                     inner.sedp.enable_secure();
+                    let mut secure = SpdpSecure::new(
+                        prefix,
+                        VENDOR_ID,
+                        SedpConfig::default().writer,
+                        SedpConfig::default().reader,
+                    );
+                    secure.write(inner.spdp.local());
+                    inner.spdp_secure = Some(secure);
                 }
                 if s.liveliness_protected() {
                     inner.wlp_secure = Some(Wlp::new_secure(
@@ -2580,6 +2637,26 @@ impl DomainParticipant {
 
 impl Drop for DomainParticipant {
     fn drop(&mut self) {
+        // The authenticated participants take the deletion only from
+        // DCPSParticipantsSecure (DDS Security 1.2, 7.5.1.6): it is
+        // written there, and the thread is given a moment to deliver it.
+        let disposed = {
+            let mut g = self.shared.lock_any();
+            g.spdp_secure.as_mut().map(SpdpSecure::dispose)
+        };
+        if let Some(sn) = disposed {
+            let deadline = Instant::now() + SECURE_DISPOSE_WAIT;
+            while Instant::now() < deadline
+                && !self
+                    .shared
+                    .lock_any()
+                    .spdp_secure
+                    .as_ref()
+                    .is_none_or(|s| s.is_acked_by_all(sn))
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -2598,6 +2675,10 @@ impl Drop for DomainParticipant {
     }
 }
 
+/// How long deleting a participant waits for its dispose on
+/// DCPSParticipantsSecure to be acknowledged.
+const SECURE_DISPOSE_WAIT: Duration = Duration::from_millis(300);
+
 /// The longest the thread sleeps, so that it sees the stop flag.
 const MAX_WAIT: Duration = Duration::from_millis(50);
 
@@ -2611,6 +2692,7 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
                 g.sedp.next_deadline(),
                 g.wlp.next_deadline(),
                 g.wlp_secure.as_ref().and_then(Wlp::next_deadline),
+                g.spdp_secure.as_ref().and_then(SpdpSecure::next_deadline),
                 g.typelookup.next_deadline(),
                 g.next_automatic,
                 manual,
@@ -2682,6 +2764,13 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                             inner.remote_participant_asserted(a.participant, a.kind, now);
                         }
                     }
+                    if let Some(s) = inner.spdp_secure.as_mut() {
+                        for e in s.handle_message(&d.data, now) {
+                            if let Some(e) = inner.spdp.handle_secure(e, now) {
+                                participant_event(inner, e, now);
+                            }
+                        }
+                    }
                     let replies =
                         inner
                             .typelookup
@@ -2713,6 +2802,11 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         }
         if let Some(w) = inner.wlp_secure.as_mut() {
             for o in w.poll(now) {
+                out.push((o.bytes, o.locators));
+            }
+        }
+        if let Some(s) = inner.spdp_secure.as_mut() {
+            for o in s.poll(now) {
                 out.push((o.bytes, o.locators));
             }
         }
@@ -2774,6 +2868,9 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
             if let Some(w) = inner.wlp_secure.as_mut() {
                 w.remove_participant(&prefix);
             }
+            if let Some(s) = inner.spdp_secure.as_mut() {
+                s.remove_participant(&prefix);
+            }
             inner.typelookup.remove_participant(&prefix);
             inner.type_requests.retain(|(_, p)| *p != prefix);
             let events = inner.sedp.remove_participant(&prefix);
@@ -2789,6 +2886,9 @@ fn participant_ready(inner: &mut Inner, p: &ParticipantData, now: Instant) {
     inner.wlp.add_participant(p, now);
     if let Some(w) = inner.wlp_secure.as_mut() {
         w.add_participant(p, now);
+    }
+    if let Some(s) = inner.spdp_secure.as_mut() {
+        s.add_participant(p, now);
     }
     inner.typelookup.add_participant(p, now);
 }
@@ -2922,5 +3022,47 @@ mod padding_tests {
         q.extend_from_slice(b"Hello, world!\0\0\0");
         drop_missing_padding(&mut q);
         assert_eq!(q[3], 2);
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn properties_without_dds_sec_are_ignored() {
+        let mut c = ParticipantConfig::new(0);
+        c.set_properties([("some.vendor.thing", "1")]).unwrap();
+        #[cfg(feature = "security")]
+        assert!(c.security.is_none());
+    }
+
+    #[cfg(not(feature = "security"))]
+    #[test]
+    fn dds_sec_properties_need_the_feature() {
+        let mut c = ParticipantConfig::new(0);
+        let e = c
+            .set_properties([("dds.sec.auth.identity_ca", "file:ca.pem")])
+            .unwrap_err();
+        assert!(matches!(e, Error::Unsupported(_)));
+    }
+
+    #[cfg(feature = "security")]
+    #[test]
+    fn dds_sec_properties_make_the_security_config() {
+        let mut c = ParticipantConfig::new(0);
+        let e = c
+            .set_properties([("dds.sec.auth.identity_ca", "file:ca.pem")])
+            .unwrap_err();
+        assert!(e.to_string().contains("dds.sec.access.permissions"), "{e}");
+        let props: Vec<(&str, String)> = SecurityConfig::PROPERTIES
+            .iter()
+            .map(|n| (*n, format!("file:{n}")))
+            .collect();
+        c.set_properties(props.iter().map(|(n, v)| (*n, v.as_str())))
+            .unwrap();
+        let s = c.security.unwrap();
+        assert_eq!(s.identity_ca, "file:dds.sec.auth.identity_ca");
+        assert_eq!(s.permissions, "file:dds.sec.access.permissions");
     }
 }

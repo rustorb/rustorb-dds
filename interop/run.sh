@@ -431,6 +431,15 @@ for peer in "${PEERS[@]}"; do
     run_case "python-to-$peer-keyed" \
       "$PYTHON" "$PY/keyed.py" pub @D@ "$KEYED" 20 -- \
       timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+    # DDS Security, configured by the PROPERTY QoS of the participant.
+    if [ "$SECURITY" = 1 ] && [ "$peer" != opendds ]; then
+      run_case "$peer-to-python-secure" \
+        "${SECURE[@]}" "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+        "${SECURE[@]}" timeout $((TIMEOUT + 5)) "$PYTHON" "$PY/hello_world.py" sub @D@ "$COUNT" "$TIMEOUT"
+      run_case "python-to-$peer-secure" \
+        "${SECURE[@]}" "$PYTHON" "$PY/hello_world.py" pub @D@ "$SEND" "$INTERVAL" -- \
+        "${SECURE[@]}" timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    fi
     if [ "$peer" != fastdds ]; then
       for v in v1 v2; do
         run_case "$peer-$v-to-python-dynamic-mutable" \
@@ -462,6 +471,14 @@ for peer in "${PEERS[@]}"; do
   run_case "cpp-to-$peer-keyed" \
     "$CPP_KEYED" pub @D@ "$KEYED" 20 -- \
     timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+  if [ "$SECURITY" = 1 ] && [ "$peer" != opendds ]; then
+    run_case "$peer-to-cpp-secure-rtps-reliable" \
+      "${SECURE_RTPS[@]}" "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      "${SECURE_RTPS[@]}" timeout $((TIMEOUT + 5)) "$CPP" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "cpp-to-$peer-secure-rtps-reliable" \
+      "${SECURE_RTPS[@]}" "$CPP" pub @D@ "$RELIABLE" 20 reliable -- \
+      "${SECURE_RTPS[@]}" timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+  fi
   # The Java binding: the same.
   if [ "$HAVE_JAVA" = 1 ]; then
     run_case "$peer-to-java" \

@@ -1,9 +1,10 @@
 """Entities, QoS, instances, conditions and listeners.
 
-The Python tests use domains 20 to 37.
+The Python tests use domains 20 to 38.
 Domains above 166 have ports in the range Windows may reserve (49152 and
 up), where binding fails with WSAEACCES."""
 
+import os
 import threading
 
 import pytest
@@ -280,3 +281,40 @@ def test_group_listeners():
     assert len(r.take()) == 1
     p.set_listener(None)
     subscriber.set_listener(None)
+
+
+CERTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                     "crates", "rustorb-dds-security", "tests", "certs")
+
+
+def secure_properties(who):
+    f = lambda n: "file:" + os.path.normpath(os.path.join(CERTS, n))  # noqa: E731
+    return {
+        "dds.sec.auth.identity_ca": f("identity_ca.pem"),
+        "dds.sec.auth.identity_certificate": f(who + "_cert.pem"),
+        "dds.sec.auth.private_key": f(who + "_key.pem"),
+        "dds.sec.access.permissions_ca": f("permissions_ca.pem"),
+        "dds.sec.access.governance": f("governance.p7s"),
+        "dds.sec.access.permissions": f("permissions_%s.p7s" % who),
+    }
+
+
+def test_security_from_properties():
+    # Some of the dds.sec properties only: refused.
+    with pytest.raises(RuntimeError, match="dds.sec.access.permissions"):
+        dds.DomainParticipant(38, localhost=True,
+                              properties={"dds.sec.auth.identity_ca": "file:/x"})
+    # A protected topic (Square* in the governance) between two
+    # participants that authenticate each other.
+    p1 = dds.DomainParticipant(38, localhost=True,
+                               properties=secure_properties("p1"))
+    p2 = dds.DomainParticipant(38, localhost=True,
+                               properties=list(secure_properties("p2").items()))
+    w = p1.create_publisher().create_datawriter(
+        p1.create_topic("Square_py", Shape), RELIABLE)
+    r = p2.create_subscriber().create_datareader(
+        p2.create_topic("Square_py", Shape), RELIABLE)
+    assert w.wait_for_subscriptions(1, 10.0)
+    w.write(Shape(1, 1, "secret"))
+    assert r.wait_for_data(10.0)
+    assert [s.data.message for s in r.take()] == ["secret"]

@@ -26,6 +26,9 @@ public abstract class PolicyFactory implements DDSObject {
 
     public abstract UserData UserData();
 
+    /** An empty PROPERTY (rustorb-dds; see {@link Property}). */
+    public abstract Property Property();
+
     public abstract DataRepresentation Representation();
 
     public abstract Reliability Reliability();

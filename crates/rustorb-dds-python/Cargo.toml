@@ -23,7 +23,8 @@ test = false
 doctest = false
 
 [dependencies]
-rustorb-dds = { path = "../rustorb-dds" }
+# With DDS Security (the `dds.sec.*` properties of DomainParticipant).
+rustorb-dds = { path = "../rustorb-dds", features = ["security"] }
 rustorb-xtypes.workspace = true
 # The Python binding. MIT OR Apache-2.0. Only this crate depends on it,
 # not the DDS crates.
@@ -31,9 +32,3 @@ pyo3 = { version = "0.30", features = ["abi3-py39"] }
 
 [build-dependencies]
 pyo3-build-config = "0.30"
-
-# Never built (no target matches `cfg(any())`): it only puts the crate,
-# an optional dependency of rustorb-dds (feature `security`) whose manifest
-# Cargo reads all the same, in the graph maturin copies into the sdist.
-[target.'cfg(any())'.dependencies]
-rustorb-dds-security.workspace = true
