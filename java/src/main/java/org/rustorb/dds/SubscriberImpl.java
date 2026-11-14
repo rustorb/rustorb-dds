@@ -119,19 +119,28 @@ final class SubscriberImpl extends EntityBase<SubscriberListener, SubscriberQos>
         return new DataStateImpl(env);
     }
 
+    private volatile SubscriberListener listener;
+
     @Override
     public SubscriberListener getListener() {
-        return null;
+        return listener;
     }
 
     @Override
     public void setListener(SubscriberListener listener) {
-        ParticipantImpl.unsupportedListener(listener, "subscriber");
+        setListener(listener, null);
     }
 
     @Override
     public void setListener(SubscriberListener listener, Collection<Class<? extends Status>> statuses) {
-        ParticipantImpl.unsupportedListener(listener, "subscriber");
+        GroupListeners.set(participant, listener, null, StatusKinds.mask(statuses),
+                (t, m) -> (int) Ffi.rdds_subscriber_set_listener.invokeExact(handle(), t, m));
+        this.listener = listener;
+    }
+
+    @Override
+    public void notifyDataReaders() {
+        call(env, () -> (int) Ffi.rdds_subscriber_notify_datareaders.invokeExact(handle()));
     }
 
     @Override

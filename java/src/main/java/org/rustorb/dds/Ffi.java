@@ -177,6 +177,12 @@ final class Ffi {
     static final MethodHandle rdds_subscriber_create_filtered_reader = Library.fn("rdds_subscriber_create_filtered_reader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_subscriber_create_reader = Library.fn("rdds_subscriber_create_reader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_subscriber_release = Library.fn("rdds_subscriber_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_participant_set_listener = Library.fn("rdds_participant_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    static final MethodHandle rdds_publisher_set_listener = Library.fn("rdds_publisher_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    static final MethodHandle rdds_subscriber_set_listener = Library.fn("rdds_subscriber_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    static final MethodHandle rdds_topic_set_listener = Library.fn("rdds_topic_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    static final MethodHandle rdds_subscriber_notify_datareaders = Library.fn("rdds_subscriber_notify_datareaders", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    static final MethodHandle rdds_subscriber_same = Library.fn("rdds_subscriber_same", FunctionDescriptor.of(JAVA_BOOLEAN, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_topic_inconsistent_topic_status = Library.fn("rdds_topic_inconsistent_topic_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_topic_release = Library.fn("rdds_topic_release", FunctionDescriptor.ofVoid(JAVA_LONG));
     static final MethodHandle rdds_type_alias = Library.fn("rdds_type_alias", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));

@@ -6,6 +6,7 @@
 package org.omg.dds.sub;
 
 import org.omg.dds.core.event.DataAvailableEvent;
+import org.omg.dds.core.event.DataOnReadersEvent;
 import org.omg.dds.core.event.LivelinessChangedEvent;
 import org.omg.dds.core.event.RequestedDeadlineMissedEvent;
 import org.omg.dds.core.event.RequestedIncompatibleQosEvent;
@@ -15,6 +16,10 @@ import org.omg.dds.core.event.SubscriptionMatchedEvent;
 
 /** A SubscriberListener whose methods do nothing. */
 public class SubscriberAdapter implements SubscriberListener {
+    @Override
+    public void onDataOnReaders(DataOnReadersEvent status) {
+    }
+
     @Override
     public void onRequestedDeadlineMissed(RequestedDeadlineMissedEvent<?> status) {
     }

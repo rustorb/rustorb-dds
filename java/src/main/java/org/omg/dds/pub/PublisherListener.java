@@ -11,7 +11,7 @@ import org.omg.dds.core.event.OfferedDeadlineMissedEvent;
 import org.omg.dds.core.event.OfferedIncompatibleQosEvent;
 import org.omg.dds.core.event.PublicationMatchedEvent;
 
-/** The listener of a Publisher (not supported by rustorb-dds yet: setting one throws UnsupportedOperationException). */
+/** The listener of a Publisher: the statuses of its writers that their own listeners do not take. */
 public interface PublisherListener extends EventListener {
     public void onOfferedDeadlineMissed(OfferedDeadlineMissedEvent<?> status);
 

@@ -34,6 +34,9 @@ public interface Subscriber extends DomainEntity<SubscriberListener, SubscriberQ
 
     public void closeContainedEntities();
 
+    /** Calls onDataAvailable of the listeners of its readers that have new data (from onDataOnReaders). */
+    public void notifyDataReaders();
+
     public DataReaderQos getDefaultDataReaderQos();
 
     public void setDefaultDataReaderQos(DataReaderQos qos);

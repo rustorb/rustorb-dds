@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.omg.dds.core.status.DataAvailableStatus;
+import org.omg.dds.core.status.DataOnReadersStatus;
 import org.omg.dds.core.status.InconsistentTopicStatus;
 import org.omg.dds.core.status.LivelinessChangedStatus;
 import org.omg.dds.core.status.LivelinessLostStatus;
@@ -41,6 +42,7 @@ final class StatusKinds {
         BITS.put(RequestedIncompatibleQosStatus.class, 1 << 6);
         BITS.put(SampleLostStatus.class, 1 << 7);
         BITS.put(SampleRejectedStatus.class, 1 << 8);
+        BITS.put(DataOnReadersStatus.class, 1 << 9);
         BITS.put(DataAvailableStatus.class, 1 << 10);
         BITS.put(LivelinessLostStatus.class, 1 << 11);
         BITS.put(LivelinessChangedStatus.class, 1 << 12);

@@ -33,7 +33,7 @@ public final class Rustorb {
     public static DomainParticipant localhostParticipant(ServiceEnvironment env, int domainId,
             DomainParticipantQos qos) {
         ParticipantImpl.Factory f = (ParticipantImpl.Factory) env.getSPI().getParticipantFactory();
-        return f.create(domainId, qos, null, ParticipantImpl.LOCALHOST);
+        return f.create(domainId, qos, ParticipantImpl.LOCALHOST);
     }
 
     /** The number of other participants this one has discovered. */

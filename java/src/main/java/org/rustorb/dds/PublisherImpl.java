@@ -129,19 +129,23 @@ final class PublisherImpl extends EntityBase<PublisherListener, PublisherQos> im
         return participant;
     }
 
+    private volatile PublisherListener listener;
+
     @Override
     public PublisherListener getListener() {
-        return null;
+        return listener;
     }
 
     @Override
     public void setListener(PublisherListener listener) {
-        ParticipantImpl.unsupportedListener(listener, "publisher");
+        setListener(listener, null);
     }
 
     @Override
     public void setListener(PublisherListener listener, Collection<Class<? extends Status>> statuses) {
-        ParticipantImpl.unsupportedListener(listener, "publisher");
+        GroupListeners.set(participant, listener, null, StatusKinds.mask(statuses),
+                (t, m) -> (int) Ffi.rdds_publisher_set_listener.invokeExact(handle(), t, m));
+        this.listener = listener;
     }
 
     @Override

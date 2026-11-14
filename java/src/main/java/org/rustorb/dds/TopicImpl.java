@@ -86,19 +86,23 @@ final class TopicImpl<T> extends EntityBase<TopicListener<T>, TopicQos> implemen
         throw new UnsupportedOperationException("rustorb-dds has no status condition of a topic yet");
     }
 
+    private volatile TopicListener<T> listener;
+
     @Override
     public TopicListener<T> getListener() {
-        return null;
+        return listener;
     }
 
     @Override
     public void setListener(TopicListener<T> listener) {
-        ParticipantImpl.unsupportedListener(listener, "topic");
+        setListener(listener, null);
     }
 
     @Override
     public void setListener(TopicListener<T> listener, Collection<Class<? extends Status>> statuses) {
-        ParticipantImpl.unsupportedListener(listener, "topic");
+        GroupListeners.set(participant, listener, this, StatusKinds.mask(statuses),
+                (t, m) -> (int) Ffi.rdds_topic_set_listener.invokeExact(handle(), t, m));
+        this.listener = listener;
     }
 
     @Override
