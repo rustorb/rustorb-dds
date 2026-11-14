@@ -8,6 +8,13 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Listeners of participants, publishers, subscribers and topics (DDS 1.4,
+  2.2.4.3, #66): a status that an entity's own listener does not take
+  goes to its publisher's or subscriber's listener, then to the
+  participant's; new data goes first to `on_data_on_readers`, and
+  `Subscriber::notify_datareaders` hands it to the readers' listeners.
+  INCONSISTENT_TOPIC goes to the topic's listener, else the
+  participant's. In Rust, the C ABI, C++, Java and Python.
 - DDS Security 1.2 (feature `security`, off by default; docs/security.md,
   #59): the builtin plugins written from the specification with RustCrypto
   in the new crate `rustorb-dds-security`: authentication (DDS:Auth:PKI-DH,

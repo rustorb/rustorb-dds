@@ -37,7 +37,10 @@
 //! DEADLINE are kept and reported in statuses. A thread can wait for
 //! samples or status changes on a [`WaitSet`], with a [`StatusCondition`],
 //! a [`ReadCondition`] or a [`GuardCondition`], or have them handed to a
-//! [`DataReaderListener`] or [`DataWriterListener`]. A participant that is
+//! [`DataReaderListener`] or [`DataWriterListener`]; a status that the
+//! endpoint's listener does not take goes to the [`PublisherListener`] or
+//! [`SubscriberListener`] (with `on_data_on_readers` first), then to the
+//! [`DomainParticipantListener`] (DDS 1.4, 2.2.4.3). A participant that is
 //! deleted tells the others. Keyed types
 //! have instances: writers register, write, dispose and unregister them;
 //! readers keep a history per instance with its states (DDS 1.4,

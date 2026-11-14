@@ -1,6 +1,6 @@
 """Entities, QoS, instances, conditions and listeners.
 
-The Python tests use domains 20 to 36, which the Rust tests do not use.
+The Python tests use domains 20 to 37.
 Domains above 166 have ports in the range Windows may reserve (49152 and
 up), where binding fails with WSAEACCES."""
 
@@ -218,3 +218,56 @@ def test_requester_and_replier():
     with pytest.raises(TimeoutError):
         requester.receive_reply(first, 0.1)
     server.join()
+
+
+class GroupLogger(dds.DomainParticipantListener):
+    def __init__(self, name, log, notify=False):
+        self.name, self.log, self.notify = name, log, notify
+
+    def on_publication_matched(self, writer, status):
+        assert writer.topic.name == "Grouped"
+        self.log.append(f"{self.name}:publication_matched")
+
+    def on_data_on_readers(self, subscriber):
+        self.log.append(f"{self.name}:data_on_readers")
+        if self.notify:
+            subscriber.notify_datareaders()
+
+    def on_data_available(self, reader):
+        self.log.append(f"{self.name}:data_available")
+
+
+def wait_for(f, timeout=5.0):
+    import time
+    end = time.monotonic() + timeout
+    while not f():
+        assert time.monotonic() < end
+        time.sleep(0.01)
+
+
+def test_group_listeners():
+    p = dds.DomainParticipant(37, localhost=True)
+    log = []
+    p.set_listener(GroupLogger("participant", log),
+                   dds.StatusMask.PUBLICATION_MATCHED)
+    topic = p.create_topic("Grouped", Shape)
+    publisher = p.create_publisher()
+    publisher.set_listener(GroupLogger("publisher", log),
+                           dds.StatusMask.PUBLICATION_MATCHED)
+    w1 = publisher.create_datawriter(topic, RELIABLE)  # noqa: F841
+    w2 = p.create_publisher().create_datawriter(topic, RELIABLE)
+    subscriber = p.create_subscriber()
+    subscriber.set_listener(GroupLogger("subscriber", log, notify=True),
+                            dds.StatusMask.DATA_ON_READERS)
+    r = subscriber.create_datareader(
+        topic, RELIABLE, listener=GroupLogger("reader", log),
+        mask=dds.StatusMask.DATA_AVAILABLE)
+    wait_for(lambda: "publisher:publication_matched" in log
+             and "participant:publication_matched" in log)
+    w2.write(Shape(1, 1, "x"))
+    wait_for(lambda: "reader:data_available" in log)
+    i = log.index("subscriber:data_on_readers")
+    assert log.index("reader:data_available") > i
+    assert len(r.take()) == 1
+    p.set_listener(None)
+    subscriber.set_listener(None)

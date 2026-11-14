@@ -70,7 +70,7 @@ done
 - `Publisher`、`DataWriter`（`write`、`registerInstance`、`unregisterInstance`、`dispose`、`getKeyValue`、`lookupInstance`、`waitForAcknowledgments`、状態の取得、`getMatchedSubscriptions`、`assertLiveliness`、listener）
 - `Subscriber`、`DataReader`（`read`、`take`、`select()` の `instance`・`nextInstance`・`dataState`・`maxSamples`、`getKeyValue`、`lookupInstance`、状態の取得、`getMatchedPublications`、listener）、`Sample`、`Sample.Iterator`、`SampleState`・`ViewState`・`InstanceState`、`Subscriber.DataState`
 - QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、WriterDataLifecycle、DataRepresentation。`withPolicy`、`withPolicies`、`get(Class)`、`PolicyFactory`
-- 状態と event（`core.status`、`core.event`）、`DataWriterListener`・`DataReaderListener` と Adapter
+- 状態と event（`core.status`、`core.event`）、`DataWriterListener`・`DataReaderListener`・`PublisherListener`・`SubscriberListener`（`onDataOnReaders`）・`TopicListener`・`DomainParticipantListener` と Adapter。entity の listener が受けない状態は publisher・subscriber、次に参加者の listener へ（DDS 1.4 2.2.4.3）。`Subscriber.notifyDataReaders`
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`
 - `ContentFilteredTopic`（`DomainParticipant.createContentFilteredTopic`、`getFilterExpression`、`getExpressionParameters`、`setExpressionParameters`、`getRelatedTopic`）。`createDataReader` に渡せる
 - DDS-RPC の `org.rustorb.dds.Requester`、`Replier`、`SampleIdentity`（rustorb の API。要求と応答のトピックから作る）。[rpc.md](rpc.md)
@@ -80,7 +80,7 @@ done
 
 - 拡張は `org.rustorb.dds.Rustorb` に置く（`org.omg.dds` には足さない）：`localhostParticipant`（ループバックだけを使う参加者、試験用）、`waitForSubscriptions`、`waitForPublications`、`waitForData`、`discoveredParticipants`、`select(ReadCondition)`（条件のサンプルを読む Selector）、`XCDR2_DATA_REPRESENTATION`
 - 型は IDL の名前で登録する。`TypeSupport.newTypeSupport` に別の名前を渡すと `UnsupportedOperationException`（C ABI は型の名前で登録するため）
-- listener は `DataWriter` と `DataReader` だけ（参加者・publisher・subscriber・topic の listener は `UnsupportedOperationException`）。listener はライブラリのスレッドで呼ばれるか、同じ参加者の writer が書いたときはその `write` の中で呼ばれる
+- listener はライブラリのスレッドで呼ばれるか、同じ参加者の writer が書いたときはその `write` の中で呼ばれる
 - 状態の条件は writer と reader のもの
 - `DataWriter` の instance をハンドルで指す操作は、その writer の `registerInstance` か `lookupInstance` が返したハンドルだけを受ける（C++ と同じ）
 - `take` と `maxSamples` は一緒に使えない（`UnsupportedOperationException`）。`read` では使える
@@ -90,7 +90,6 @@ done
 
 ## まだないもの
 
-- `DATA_ON_READERS` と参加者・publisher・subscriber の listener（C ABI にまだない）
 - builtin topic、`find`、`ignore`、content-filtered topic、query、coherent access、DynamicData
 - IDL の struct の継承、`map`、再帰する型（rustorb-idl がまだ対応していない）
 - Maven Central への公開。いまは `librustorb_dds_ffi` を自分で作る

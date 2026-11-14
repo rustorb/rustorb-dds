@@ -56,7 +56,7 @@ Requests and replies (DDS-RPC): `Requester(participant, request_topic, reply_top
 
 `DataReader`: `take` / `read` (by state, or of an instance), `take_w_condition` / `read_w_condition`, `lookup_instance`, `get_key_value`, `wait_for_data`, `wait_for_publications`, statuses, `status_condition`, `create_readcondition`, `set_listener`.
 
-`Qos` (reliability, history, durability, deadline, liveliness, data_representation, user_data, resource limits), `WaitSet`, `GuardCondition`, `StatusCondition`, `ReadCondition`, `StatusMask`, `DataWriterListener`, `DataReaderListener`. Listeners are called on the participant's threads.
+`Qos` (reliability, history, durability, deadline, liveliness, data_representation, user_data, resource limits), `WaitSet`, `GuardCondition`, `StatusCondition`, `ReadCondition`, `StatusMask`, `DataWriterListener`, `DataReaderListener`, `PublisherListener`, `SubscriberListener` (`on_data_on_readers`), `TopicListener`, `DomainParticipantListener`. `set_listener(listener, mask)` on a participant, topic, publisher or subscriber takes the statuses that the listeners of its entities do not (DDS 1.4, 2.2.4.3); `Subscriber.notify_datareaders()`. Listeners are called on the participant's threads.
 
 ## Building
 
