@@ -7,8 +7,9 @@ set(IDL ${CMAKE_CURRENT_SOURCE_DIR}/../idl)
 # HelloWorld.idl and Keyed.idl have no extensibility annotation, and the
 # other implementations make them @final; OpenDDS's default is
 # @appendable. The IDL files have no @topic either: --no-default-nested
-# makes each struct a topic type.
-set(TOPIC --no-default-nested)
+# makes each struct a topic type. -Gxtypes-complete adds the COMPLETE
+# TypeObjects to the type information, which the dynamic cases look up.
+set(TOPIC --no-default-nested -Gxtypes-complete)
 set(FINAL ${TOPIC} --default-extensibility final)
 set(LIBS OpenDDS::Dcps OpenDDS::Rtps OpenDDS::Rtps_Udp)
 foreach(t hello keyed evolve_v1 evolve_v2)
