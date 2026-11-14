@@ -8,8 +8,9 @@ use rustorb_xtypes::dynamic::ContentFilter;
 use rustorb_xtypes::dynamic::filter::DDSSQL;
 
 use crate::error::Result;
+use crate::listener::TopicListener;
 use crate::participant::Shared;
-use crate::status::InconsistentTopicStatus;
+use crate::status::{InconsistentTopicStatus, StatusMask};
 use crate::typed::SampleType;
 
 /// A DDS topic (DDS 1.4, 2.2.2.3.2): a name and the type of its samples,
@@ -49,6 +50,21 @@ impl<T> Topic<T> {
             .get_mut(&self.name)
             .map(|s| s.take())
             .unwrap_or_default()
+    }
+
+    /// Sets the listener of the topic (`set_listener`), replacing any
+    /// earlier one: it is called for INCONSISTENT_TOPIC when `mask` has
+    /// it. The topics of one name in a participant share their listener.
+    pub fn set_listener(&self, listener: impl TopicListener + 'static, mask: StatusMask) {
+        self.shared
+            .lock_any()
+            .topic_listeners
+            .insert(self.name.clone(), (Arc::new(listener), mask));
+    }
+
+    /// Removes the listener of the topic.
+    pub fn clear_listener(&self) {
+        self.shared.lock_any().topic_listeners.remove(&self.name);
     }
 
     /// The type name: `T::TYPE_NAME` for a [`TopicType`](crate::TopicType),

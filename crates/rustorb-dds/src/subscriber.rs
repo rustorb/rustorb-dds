@@ -9,7 +9,7 @@ use rustorb_rtps::{Guid, entity_kind};
 use crate::condition::{ReadCondition, StatusCondition};
 use crate::error::{Error, Result};
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
-use crate::listener::DataReaderListener;
+use crate::listener::{DataReaderListener, SubscriberEntity, SubscriberListener};
 use crate::participant::{ReaderEvent, ReaderListener, ReaderState, Shared};
 use crate::qos::{DataReaderQos, SubscriberQos, TypeConsistency, duration_to_rtps};
 use crate::status::{
@@ -20,9 +20,10 @@ use crate::topic::TopicDescription;
 use crate::typed::SampleType;
 
 /// A DDS subscriber (DDS 1.4, 2.2.2.5.1): creates data readers.
+#[derive(Clone)]
 pub struct Subscriber {
     shared: Arc<Shared>,
-    qos: SubscriberQos,
+    entity: Arc<SubscriberEntity>,
 }
 
 impl std::fmt::Debug for Subscriber {
@@ -32,13 +33,46 @@ impl std::fmt::Debug for Subscriber {
 }
 
 impl Subscriber {
-    pub(crate) fn new(shared: Arc<Shared>, qos: SubscriberQos) -> Self {
-        Subscriber { shared, qos }
+    pub(crate) fn from_entity(shared: Arc<Shared>, entity: Arc<SubscriberEntity>) -> Self {
+        Subscriber { shared, entity }
     }
 
     /// The subscriber's QoS.
     pub fn qos(&self) -> &SubscriberQos {
-        &self.qos
+        &self.entity.qos
+    }
+
+    /// Sets the subscriber's listener (`set_listener`), replacing any
+    /// earlier one: it is called for DATA_ON_READERS, and for the
+    /// statuses in `mask` of its readers that their own listeners do not
+    /// take (DDS 1.4, 2.2.4.3). See [`SubscriberListener`].
+    pub fn set_listener(&self, listener: impl SubscriberListener + 'static, mask: StatusMask) {
+        *self
+            .entity
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((Arc::new(listener), mask));
+    }
+
+    /// Removes the subscriber's listener.
+    pub fn clear_listener(&self) {
+        *self
+            .entity
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Calls `on_data_available` of the listeners of its readers that
+    /// have new data (`notify_datareaders`, DDS 1.4, 2.2.2.5.2.8): from
+    /// `on_data_on_readers`, to have each reader handle its own.
+    pub fn notify_datareaders(&self) {
+        self.shared.notify_datareaders(&self.entity);
+    }
+
+    /// Whether `self` and `other` are handles of the same subscriber.
+    pub fn same_as(&self, other: &Subscriber) -> bool {
+        Arc::ptr_eq(&self.entity, &other.entity)
     }
 
     /// Creates a reader for `topic` with the default QoS: BEST_EFFORT,
@@ -103,14 +137,20 @@ impl Subscriber {
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
-        data.partitions = self.qos.partition.clone();
+        data.partitions = self.entity.qos.partition.clone();
         let filter = cft.map(|c| {
             let (filter, property) = c.reader_filter();
             data.content_filter = Some(property);
             filter
         });
-        self.shared
-            .add_reader(data, qos, topic.samples.key_ops(), listener, filter)?;
+        self.shared.add_reader(
+            data,
+            qos,
+            topic.samples.key_ops(),
+            listener,
+            filter,
+            self.entity.clone(),
+        )?;
         if let Some(c) = cft {
             c.add_reader(guid);
         }

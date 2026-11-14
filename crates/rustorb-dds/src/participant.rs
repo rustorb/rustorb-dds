@@ -36,6 +36,10 @@ use rustorb_xtypes::types::{DescribeType, TypeObjects};
 use crate::condition::Waker;
 use crate::error::{Error, Result};
 use crate::instance::{self, Incoming, InstanceHandle, ReaderHistory};
+use crate::listener::{
+    AnyDataReader, AnyDataWriter, DomainParticipantListener, PublisherEntity, PublisherListener,
+    SubscriberEntity, SubscriberListener, TopicListener,
+};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
 #[cfg(feature = "security")]
@@ -150,6 +154,59 @@ pub(crate) type WriterListener = Arc<dyn Fn(&Arc<Shared>, Guid, WriterEvent) + S
 /// A listener call that [`Shared::flush`] makes after unlocking.
 type ListenerCall = Box<dyn FnOnce(&Arc<Shared>)>;
 
+/// Hands a writer's status change to the listener of its publisher or
+/// participant.
+fn writer_event<L: PublisherListener + ?Sized>(
+    l: &L,
+    shared: &Arc<Shared>,
+    guid: Guid,
+    ev: WriterEvent,
+) {
+    let w = AnyDataWriter {
+        shared: shared.clone(),
+        guid,
+    };
+    match ev {
+        WriterEvent::PublicationMatched(s) => l.on_publication_matched(&w, s),
+        WriterEvent::LivelinessLost(s) => l.on_liveliness_lost(&w, s),
+        WriterEvent::OfferedDeadlineMissed(s) => l.on_offered_deadline_missed(&w, s),
+        WriterEvent::OfferedIncompatibleQos(s) => l.on_offered_incompatible_qos(&w, s),
+    }
+}
+
+/// Calls `on_data_on_readers` of the listener of a subscriber or
+/// participant.
+fn data_on_readers<L: SubscriberListener + ?Sized>(
+    l: &L,
+    shared: &Arc<Shared>,
+    sub: Arc<SubscriberEntity>,
+) {
+    l.on_data_on_readers(&Subscriber::from_entity(shared.clone(), sub));
+}
+
+/// Hands a reader's status change to the listener of its subscriber or
+/// participant.
+fn reader_event<L: SubscriberListener + ?Sized>(
+    l: &L,
+    shared: &Arc<Shared>,
+    guid: Guid,
+    ev: ReaderEvent,
+) {
+    let r = AnyDataReader {
+        shared: shared.clone(),
+        guid,
+    };
+    match ev {
+        ReaderEvent::DataAvailable => l.on_data_available(&r),
+        ReaderEvent::SubscriptionMatched(s) => l.on_subscription_matched(&r, s),
+        ReaderEvent::LivelinessChanged(s) => l.on_liveliness_changed(&r, s),
+        ReaderEvent::RequestedDeadlineMissed(s) => l.on_requested_deadline_missed(&r, s),
+        ReaderEvent::RequestedIncompatibleQos(s) => l.on_requested_incompatible_qos(&r, s),
+        ReaderEvent::SampleRejected(s) => l.on_sample_rejected(&r, s),
+        ReaderEvent::SampleLost(s) => l.on_sample_lost(&r, s),
+    }
+}
+
 /// `StatusInfo_t` flags (DDSI-RTPS 2.5, 9.6.4.9).
 const STATUS_DISPOSED: u8 = 0x01;
 const STATUS_UNREGISTERED: u8 = 0x02;
@@ -187,6 +244,8 @@ pub(crate) struct ReaderState {
     pub(crate) enabled: StatusMask,
     /// The listener and the statuses it is called for.
     pub(crate) listener: Option<(ReaderListener, StatusMask)>,
+    /// The subscriber it was created by.
+    pub(crate) subscriber: Option<Arc<SubscriberEntity>>,
     /// The filter of a reader of a content filtered topic: the samples
     /// that do not pass it are dropped as they come.
     pub(crate) filter: Option<ContentFilter>,
@@ -232,6 +291,7 @@ impl ReaderState {
             changes: StatusMask::NONE,
             enabled: StatusMask::ALL,
             listener: None,
+            subscriber: None,
             filter: None,
             #[cfg(feature = "security")]
             payload_security: None,
@@ -525,6 +585,8 @@ pub(crate) struct WriterState {
     pub(crate) enabled: StatusMask,
     /// The listener and the statuses it is called for.
     pub(crate) listener: Option<(WriterListener, StatusMask)>,
+    /// The publisher it was created by.
+    pub(crate) publisher: Option<Arc<PublisherEntity>>,
     /// Encodes the payloads, when the topic has them protected.
     #[cfg(feature = "security")]
     pub(crate) payload_encoder: Option<Arc<rustorb_dds_security::crypto::Encoder>>,
@@ -817,6 +879,12 @@ pub(crate) struct Inner {
     dynamic_types: HashMap<String, DynamicType>,
     /// INCONSISTENT_TOPIC, by topic name.
     pub(crate) inconsistent_topics: HashMap<String, InconsistentTopicStatus>,
+    /// The topics whose INCONSISTENT_TOPIC changed, for [`Shared::flush`].
+    pending_topics: Vec<String>,
+    /// The listeners of the topics, by topic name.
+    pub(crate) topic_listeners: HashMap<String, (Arc<dyn TopicListener>, StatusMask)>,
+    /// The participant's listener.
+    pub(crate) listener: Option<(Arc<dyn DomainParticipantListener>, StatusMask)>,
     /// DDS Security, when it is on.
     #[cfg(feature = "security")]
     pub(crate) security: Option<Arc<Security>>,
@@ -1096,49 +1164,181 @@ impl Shared {
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
-            if inner.pending.is_empty() {
+            if inner.pending.is_empty() && inner.pending_topics.is_empty() {
                 return;
             }
+            let participant = inner.listener.clone();
+            let participant_for = |bit: StatusMask| {
+                participant
+                    .as_ref()
+                    .filter(|(_, m)| m.contains(bit))
+                    .map(|(l, _)| l.clone())
+            };
+            // The subscribers whose on_data_on_readers is called.
+            let mut on_readers: Vec<Arc<SubscriberEntity>> = Vec::new();
             for (guid, k) in std::mem::take(&mut inner.pending) {
                 any = true;
                 for bit in k.bits() {
                     if let Some(w) = inner.writers.get_mut(&guid) {
-                        let listener = w
+                        let own = w
                             .listener
                             .as_ref()
                             .filter(|(_, m)| m.contains(bit))
                             .map(|(l, _)| l.clone());
-                        match listener.and_then(|l| Some((l, w.take_event(bit)?))) {
-                            Some((l, ev)) => {
+                        if let Some(l) = own {
+                            if let Some(ev) = w.take_event(bit) {
                                 w.changes = w.changes & !bit;
                                 calls.push(Box::new(move |s| l(s, guid, ev)));
+                                continue;
+                            }
+                        }
+                        let group = w.publisher.as_ref().and_then(|p| p.listener_for(bit));
+                        let call: Option<ListenerCall> = if let Some(l) = group {
+                            w.take_event(bit).map(|ev| -> ListenerCall {
+                                Box::new(move |s| writer_event(&*l, s, guid, ev))
+                            })
+                        } else if let Some(l) = participant_for(bit) {
+                            w.take_event(bit).map(|ev| -> ListenerCall {
+                                Box::new(move |s| writer_event(&*l, s, guid, ev))
+                            })
+                        } else {
+                            None
+                        };
+                        match call {
+                            Some(c) => {
+                                w.changes = w.changes & !bit;
+                                calls.push(c);
                             }
                             None => w.changes |= bit,
                         }
                     } else if let Some(r) = inner.readers.get_mut(&guid) {
-                        let listener = r
+                        if bit == StatusMask::DATA_AVAILABLE {
+                            // 2.2.4.3.2: DATA_ON_READERS first, on the
+                            // subscriber's listener, else the
+                            // participant's. The reader keeps
+                            // DATA_AVAILABLE.
+                            let on = StatusMask::DATA_ON_READERS;
+                            if let Some(sub) = r.subscriber.clone() {
+                                let call: Option<ListenerCall> =
+                                    match (sub.listener_for(on), participant_for(on)) {
+                                        (Some(l), _) => {
+                                            let sub = sub.clone();
+                                            Some(Box::new(move |s| data_on_readers(&*l, s, sub)))
+                                        }
+                                        (None, Some(l)) => {
+                                            let sub = sub.clone();
+                                            Some(Box::new(move |s| data_on_readers(&*l, s, sub)))
+                                        }
+                                        (None, None) => None,
+                                    };
+                                if let Some(c) = call {
+                                    r.changes |= bit;
+                                    if !on_readers.iter().any(|s| Arc::ptr_eq(s, &sub)) {
+                                        on_readers.push(sub);
+                                        calls.push(c);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        let own = r
                             .listener
                             .as_ref()
                             .filter(|(_, m)| m.contains(bit))
                             .map(|(l, _)| l.clone());
-                        match listener.and_then(|l| Some((l, r.take_event(bit)?))) {
-                            Some((l, ev)) => {
+                        if let Some(l) = own {
+                            if let Some(ev) = r.take_event(bit) {
                                 r.changes = r.changes & !bit;
                                 calls.push(Box::new(move |s| l(s, guid, ev)));
+                                continue;
+                            }
+                        }
+                        let group = r.subscriber.as_ref().and_then(|p| p.listener_for(bit));
+                        let call: Option<ListenerCall> = if let Some(l) = group {
+                            r.take_event(bit).map(|ev| -> ListenerCall {
+                                Box::new(move |s| reader_event(&*l, s, guid, ev))
+                            })
+                        } else if let Some(l) = participant_for(bit) {
+                            r.take_event(bit).map(|ev| -> ListenerCall {
+                                Box::new(move |s| reader_event(&*l, s, guid, ev))
+                            })
+                        } else {
+                            None
+                        };
+                        match call {
+                            Some(c) => {
+                                r.changes = r.changes & !bit;
+                                calls.push(c);
                             }
                             None => r.changes |= bit,
                         }
                     }
                 }
             }
+            let bit = StatusMask::INCONSISTENT_TOPIC;
+            for topic in std::mem::take(&mut inner.pending_topics) {
+                let own = inner
+                    .topic_listeners
+                    .get(&topic)
+                    .filter(|(_, m)| m.contains(bit))
+                    .map(|(l, _)| l.clone());
+                let status = |inner: &mut Inner| {
+                    inner
+                        .inconsistent_topics
+                        .get_mut(&topic)
+                        .map(|s| s.take())
+                        .unwrap_or_default()
+                };
+                if let Some(l) = own {
+                    let status = status(inner);
+                    calls.push(Box::new(move |_| l.on_inconsistent_topic(&topic, status)));
+                } else if let Some(l) = participant_for(bit) {
+                    let status = status(inner);
+                    calls.push(Box::new(move |_| l.on_inconsistent_topic(&topic, status)));
+                }
+            }
         }
-        if !any {
-            return;
+        if any {
+            self.data_arrived.notify_all();
+            self.wake_waitsets();
         }
-        self.data_arrived.notify_all();
-        self.wake_waitsets();
         if calls.is_empty() {
             return;
+        }
+        if let Some(this) = self.this.upgrade() {
+            for c in calls {
+                c(&this);
+            }
+        }
+    }
+
+    /// Calls the listeners of the readers of `subscriber` that have
+    /// DATA_AVAILABLE (`notify_datareaders`, DDS 1.4, 2.2.2.5.2.8): their
+    /// own listeners, if they take it.
+    pub(crate) fn notify_datareaders(&self, subscriber: &Arc<SubscriberEntity>) {
+        let bit = StatusMask::DATA_AVAILABLE;
+        let mut calls: Vec<ListenerCall> = Vec::new();
+        {
+            let mut g = self.lock_any();
+            for (guid, r) in g.readers.iter_mut() {
+                let mine = r
+                    .subscriber
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, subscriber));
+                if !mine || !r.changes.contains(bit) {
+                    continue;
+                }
+                let own = r
+                    .listener
+                    .as_ref()
+                    .filter(|(_, m)| m.contains(bit))
+                    .map(|(l, _)| l.clone());
+                if let Some(l) = own {
+                    r.changes = r.changes & !bit;
+                    let guid = *guid;
+                    calls.push(Box::new(move |s| l(s, guid, ReaderEvent::DataAvailable)));
+                }
+            }
         }
         if let Some(this) = self.this.upgrade() {
             for c in calls {
@@ -1213,6 +1413,7 @@ impl Shared {
         qos: DataWriterQos,
         keyed: bool,
         listener: Option<(WriterListener, StatusMask)>,
+        publisher: Arc<PublisherEntity>,
     ) -> Result<()> {
         {
             let mut g = self.lock()?;
@@ -1244,6 +1445,7 @@ impl Shared {
                 changes: StatusMask::NONE,
                 enabled: StatusMask::ALL,
                 listener,
+                publisher: Some(publisher),
                 #[cfg(feature = "security")]
                 payload_encoder,
             };
@@ -1296,6 +1498,7 @@ impl Shared {
         keys: Arc<dyn KeyOps>,
         listener: Option<(ReaderListener, StatusMask)>,
         filter: Option<ContentFilter>,
+        subscriber: Arc<SubscriberEntity>,
     ) -> Result<()> {
         {
             let mut g = self.lock()?;
@@ -1315,6 +1518,7 @@ impl Shared {
                     .filter(|s| s.payload_protected(&data.topic_name));
             }
             r.listener = listener;
+            r.subscriber = Some(subscriber);
             r.filter = filter;
             let mut changes = StatusMask::NONE;
             // What TRANSIENT_LOCAL writers kept, for a TRANSIENT_LOCAL
@@ -1794,7 +1998,12 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                     inner.readers.get(&local).map(|r| r.data.topic_name.clone())
                 };
                 if let Some(topic) = topic {
-                    inner.inconsistent_topics.entry(topic).or_default().add();
+                    inner
+                        .inconsistent_topics
+                        .entry(topic.clone())
+                        .or_default()
+                        .add();
+                    inner.pending_topics.push(topic);
                 }
             }
             _ => {}
@@ -2039,6 +2248,9 @@ impl DomainParticipant {
             types: HashMap::new(),
             dynamic_types: HashMap::new(),
             inconsistent_topics: HashMap::new(),
+            pending_topics: Vec::new(),
+            topic_listeners: HashMap::new(),
+            listener: None,
             #[cfg(feature = "security")]
             security: security.clone(),
         };
@@ -2262,7 +2474,10 @@ impl DomainParticipant {
 
     /// Creates a publisher with the given QoS (its partitions).
     pub fn create_publisher_with_qos(&self, qos: PublisherQos) -> Result<Publisher> {
-        Ok(Publisher::new(self.shared.clone(), qos))
+        Ok(Publisher::new(
+            self.shared.clone(),
+            PublisherEntity::new(qos),
+        ))
     }
 
     /// Creates a subscriber in the default partition.
@@ -2272,7 +2487,28 @@ impl DomainParticipant {
 
     /// Creates a subscriber with the given QoS (its partitions).
     pub fn create_subscriber_with_qos(&self, qos: SubscriberQos) -> Result<Subscriber> {
-        Ok(Subscriber::new(self.shared.clone(), qos))
+        Ok(Subscriber::from_entity(
+            self.shared.clone(),
+            SubscriberEntity::new(qos),
+        ))
+    }
+
+    /// Sets the participant's listener (`set_listener`, DDS 1.4,
+    /// 2.2.2.1.1), replacing any earlier one: it is called for the
+    /// statuses in `mask` of its entities that their own listeners, and
+    /// those of their publishers, subscribers or topics, do not take
+    /// (2.2.4.3.1). See [`DomainParticipantListener`].
+    pub fn set_listener(
+        &self,
+        listener: impl DomainParticipantListener + 'static,
+        mask: StatusMask,
+    ) {
+        self.shared.lock_any().listener = Some((Arc::new(listener), mask));
+    }
+
+    /// Removes the participant's listener.
+    pub fn clear_listener(&self) {
+        self.shared.lock_any().listener = None;
     }
 
     /// Asserts the liveliness of the participant's MANUAL_BY_PARTICIPANT
