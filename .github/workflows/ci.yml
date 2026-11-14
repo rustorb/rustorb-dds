@@ -121,7 +121,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.9" }
+          # The oldest Python the package supports. ubuntu-latest became
+          # 26.04, for which setup-python has no 3.9.
+          - { os: ubuntu-24.04, python: "3.9" }
           - { os: ubuntu-latest, python: "3.13" }
           - { os: macos-latest, python: "3.13" }
           - { os: windows-latest, python: "3.13" }
