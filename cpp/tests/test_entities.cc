@@ -468,4 +468,54 @@ TEST(requester_and_replier) {
   server.join();
 }
 
+// DDS Security from the PROPERTY of the DomainParticipantQos: the two
+// participants authenticate each other, and a protected topic (Square*
+// in the governance) goes encrypted.
+dds::domain::qos::DomainParticipantQos secure_qos(const std::string& who) {
+  const std::string certs = std::string("file:") + RUSTORB_DDS_CERTS + "/";
+  dds::domain::qos::DomainParticipantQos q;
+  policy::Property p;
+  p.set("dds.sec.auth.identity_ca", certs + "identity_ca.pem")
+      .set("dds.sec.auth.identity_certificate", certs + who + "_cert.pem")
+      .set("dds.sec.auth.private_key", certs + who + "_key.pem")
+      .set("dds.sec.access.permissions_ca", certs + "permissions_ca.pem")
+      .set("dds.sec.access.governance", certs + "governance.p7s")
+      .set("dds.sec.access.permissions", certs + "permissions_" + who + ".p7s");
+  q << p;
+  return q;
+}
+
+TEST(security_from_property) {
+  // Not all of the dds.sec properties: refused.
+  auto partial = secure_qos("p1");
+  policy::Property p;
+  p.set("dds.sec.auth.identity_ca", "file:/nowhere.pem");
+  partial << p;
+  CHECK_THROWS(rustorb::dds::localhost_participant(82, partial), dds::core::Error);
+
+  auto p1 = rustorb::dds::localhost_participant(82, secure_qos("p1"));
+  auto p2 = rustorb::dds::localhost_participant(82, secure_qos("p2"));
+  dds::topic::Topic<HelloWorld::Greeting> t1(p1, "Square_cpp");
+  dds::topic::Topic<HelloWorld::Greeting> t2(p2, "Square_cpp");
+  dds::pub::Publisher pub(p1);
+  dds::sub::Subscriber sub(p2);
+  dds::pub::DataWriter<HelloWorld::Greeting> w(pub, t1, reliable_writer(pub));
+  dds::sub::qos::DataReaderQos rq = sub.default_datareader_qos();
+  rq << policy::Reliability::Reliable() << policy::History::KeepAll();
+  dds::sub::DataReader<HelloWorld::Greeting> r(sub, t2, rq);
+  CHECK(w.wait_for_subscriptions(1, Duration(10)));
+  HelloWorld::Greeting g;
+  g.index(1);
+  g.message("secret");
+  w.write(g);
+  std::vector<std::string> got;
+  for (int i = 0; i < 100 && got.empty(); i++) {
+    for (const auto& s : r.take()) {
+      if (s.info().valid()) got.push_back(s.data().message());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  CHECK(got.size() == 1 && got[0] == "secret");
+}
+
 int main() { return check::run_all(); }

@@ -6,12 +6,16 @@
 package org.omg.dds.domain;
 
 import org.omg.dds.core.EntityQos;
+import org.omg.dds.core.policy.Property;
 import org.omg.dds.core.policy.QosPolicy;
 import org.omg.dds.core.policy.UserData;
 
 /** The QoS of a DomainParticipant. */
 public interface DomainParticipantQos extends EntityQos<QosPolicy.ForDomainParticipant> {
     public UserData getUserData();
+
+    /** The PROPERTY (rustorb-dds; see {@link Property}). */
+    public Property getProperty();
 
     @Override
     public DomainParticipantQos withPolicy(QosPolicy.ForDomainParticipant policy);

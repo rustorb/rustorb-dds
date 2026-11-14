@@ -347,6 +347,8 @@ void set_group_listener(H* h, L* l, uint32_t mask, std::weak_ptr<participant_imp
 
 // rustorb: a participant that uses only the loopback interface, for tests.
 inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id);
+inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id,
+                                                              const ::dds::domain::qos::DomainParticipantQos& qos);
 
 }  // namespace dds
 }  // namespace rustorb
@@ -566,14 +568,18 @@ class DomainParticipant {
   }
 
  private:
-  friend DomainParticipant rustorb::dds::localhost_participant(uint32_t);
+  friend DomainParticipant rustorb::dds::localhost_participant(uint32_t, const ::dds::domain::qos::DomainParticipantQos&);
 
   DomainParticipant(uint32_t domain_id, const qos::DomainParticipantQos& qos, DomainParticipantListener* listener,
                     const ::dds::core::status::StatusMask& mask, uint32_t flags) {
     auto impl = std::make_shared<rustorb::dds::detail::participant_impl>();
     impl->qos = qos;
     const auto& ud = qos.policy<::dds::core::policy::UserData>().value();
-    rdds_participant_qos c{ud.data(), ud.size()};
+    std::vector<rdds_property> props;
+    for (const auto& e : qos.policy<::dds::core::policy::Property>().value()) {
+      props.push_back(rdds_property{e.first.c_str(), e.second.c_str()});
+    }
+    rdds_participant_qos c{ud.data(), ud.size(), props.data(), props.size()};
     rdds_participant* p = nullptr;
     rustorb::dds::detail::check(rdds_participant_new(domain_id, &c, flags, &p));
     impl->p.h = p;
@@ -1973,9 +1979,14 @@ rdds_listener group_table(group_box<L>* b) {
 
 }  // namespace detail
 
+inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id,
+                                                              const ::dds::domain::qos::DomainParticipantQos& qos) {
+  return ::dds::domain::DomainParticipant(domain_id, qos, nullptr, ::dds::core::status::StatusMask::none(),
+                                          RDDS_PARTICIPANT_LOCALHOST);
+}
+
 inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id) {
-  return ::dds::domain::DomainParticipant(domain_id, ::dds::domain::qos::DomainParticipantQos(), nullptr,
-                                          ::dds::core::status::StatusMask::none(), RDDS_PARTICIPANT_LOCALHOST);
+  return localhost_participant(domain_id, ::dds::domain::qos::DomainParticipantQos());
 }
 }  // namespace dds
 }  // namespace rustorb

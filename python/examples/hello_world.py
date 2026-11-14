@@ -12,8 +12,13 @@ The same as the Rust example ``hello_world`` (topic ``hello_world`` of
 
 The subscriber exits once it has ``count`` samples (all of them, in
 order, when reliable), with an error on timeout.
+
+``RUSTORB_DDS_SECURITY=<file>`` turns on DDS Security, as in the Rust
+example: the file has the ``dds.sec.*`` properties of the participant
+QoS, one ``name=value`` a line.
 """
 
+import os
 import sys
 import time
 
@@ -29,6 +34,21 @@ class Greeting:
 MESSAGE = "Hello, world!"
 
 
+def security_properties():
+    """The properties in the file named by RUSTORB_DDS_SECURITY, if any."""
+    path = os.environ.get("RUSTORB_DDS_SECURITY")
+    if not path:
+        return None
+    props = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                name, _, value = line.partition("=")
+                props[name.strip()] = value.strip()
+    return props
+
+
 def main(argv):
     role = argv[1] if len(argv) > 1 else "pub"
     domain = int(argv[2]) if len(argv) > 2 else 0
@@ -38,7 +58,7 @@ def main(argv):
         sys.exit("unknown reliability %r" % kind)
     reliable = kind != "best_effort"
     durability = "transient_local" if kind == "transient_local" else "volatile"
-    participant = dds.DomainParticipant(domain)
+    participant = dds.DomainParticipant(domain, properties=security_properties())
     topic = participant.create_topic("hello_world", Greeting)
     if role == "pub":
         interval = (int(argv[4]) if len(argv) > 4 else 1000) / 1000

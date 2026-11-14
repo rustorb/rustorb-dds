@@ -8,6 +8,18 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security from the PROPERTY of the participant QoS (DDS Security
+  1.2, 7.2.5, #69): the six `dds.sec.*` properties in
+  `ParticipantConfig::set_properties` in Rust, `property` of
+  `rdds_participant_qos` in the C ABI (built with `security` by
+  default), `dds::core::policy::Property` in C++, `Property` in Java and
+  `properties` of `DomainParticipant` in Python. The `hello_world`
+  examples of C++ and Python read `RUSTORB_DDS_SECURITY` as the Rust one
+  does, with new `-secure` interop cases.
+- The secure SPDP endpoints (`DCPSParticipantsSecure`, DDS Security 1.2,
+  7.5.1.6, #69): with discovery protection, authenticated participants
+  exchange their data and the deletion of a participant there, and
+  changes and disposes of them on plain SPDP are ignored.
 - Interoperability tests with OpenDDS 3.31 (`interop/run.sh opendds`, in
   Docker, and the CI job `opendds`, #68): best effort, reliable,
   transient-local, large samples, keyed instances, XCDR2, type evolution
