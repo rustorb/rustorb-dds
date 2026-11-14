@@ -898,15 +898,16 @@ fn with_dependencies(
 /// Computes TypeIdentifiers of one equivalence kind, collecting the
 /// TypeObjects of the named types on the way.
 ///
-/// The named types are taken in the order of the strongly connected
+/// The types are taken in the order of the strongly connected
 /// components of their dependency graph (7.3.4.9.2), those depended on
-/// first. A type alone in its component, that does not use itself, is
-/// identified by the hash of its TypeObject; the types of a component
-/// that has a cycle get `TI_STRONGLY_CONNECTED_COMPONENT` identifiers,
-/// from the hash of their TypeObjects together. Anonymous types
-/// (sequences, arrays, maps) are not vertices of the graph here: they
-/// have plain identifiers, with the identifier of their element, and
-/// are part of the edges between named types.
+/// first; its vertices are the named types and the anonymous
+/// collections (sequences, arrays, maps). A named type alone in its
+/// component, that does not use itself, is identified by the hash of its
+/// TypeObject, and an anonymous collection outside a cycle by a plain
+/// identifier. The types of a component that has a cycle, anonymous
+/// collections included (as `sequence<TreeNode>` in 7.3.4.9.1), get
+/// `TI_STRONGLY_CONNECTED_COMPONENT` identifiers from the hash of their
+/// TypeObjects together.
 struct Builder {
     kind: EquivalenceKind,
     /// The identifiers of the named types computed so far, by address.
@@ -926,64 +927,97 @@ fn address(ty: &Type) -> Option<usize> {
     })
 }
 
-/// The dependency graph of the named types reachable from a type.
+/// The address of a type that is a vertex of the dependency graph: a
+/// named type or an anonymous collection.
+fn vertex(ty: &Type) -> Option<usize> {
+    address(ty).or_else(|| match ty.resolve() {
+        Type::Sequence(t) => Some(Arc::as_ptr(t) as usize),
+        Type::Array(t) => Some(Arc::as_ptr(t) as usize),
+        Type::Map(t) => Some(Arc::as_ptr(t) as usize),
+        _ => None,
+    })
+}
+
+/// The dependency graph of the types reachable from a type
+/// (7.3.4.9.2): its named types and anonymous collections.
 #[derive(Default)]
 struct Graph {
-    /// The types, in the order they are first used (depth first).
+    /// The types: named types and anonymous collections (sequences,
+    /// arrays, maps), in the order they are first used (depth first).
     types: Vec<Type>,
+    /// Their names for the order of a strongly connected component
+    /// (7.3.4.9.2 step 4.b): the qualified name of a named type; for an
+    /// anonymous type, that of the type that contains it, with `.` and
+    /// the member's name for a member.
+    names: Vec<String>,
     index: HashMap<usize, usize>,
-    /// For each type, the types it uses directly or through anonymous
-    /// types, and whether the use can be empty (through a sequence, a
-    /// map or an optional member), which keeps a cycle finite.
+    /// For each type, the types it uses directly, and whether the use
+    /// can be empty (the element of a sequence or a map, an optional
+    /// member), which keeps a cycle finite.
     edges: Vec<Vec<(usize, bool)>>,
 }
 
 impl Graph {
     fn of(ty: &Type) -> Result<Graph> {
         let mut g = Graph::default();
-        g.visit(ty)?;
+        g.visit(ty, "")?;
         Ok(g)
     }
 
-    fn visit(&mut self, ty: &Type) -> Result<usize> {
+    /// Adds `ty` and the types it uses; `name` is the name of an
+    /// anonymous type. None for a type that is not a vertex (a primitive
+    /// type or a string).
+    fn visit(&mut self, ty: &Type, name: &str) -> Result<Option<usize>> {
         let ty = defined(ty)?;
-        let address = address(ty).expect("a named type");
+        let Some(address) = vertex(ty) else {
+            return Ok(None);
+        };
         if let Some(&i) = self.index.get(&address) {
-            return Ok(i);
+            return Ok(Some(i));
         }
         let i = self.types.len();
+        let name = ty.name().unwrap_or(name).to_owned();
         self.types.push(ty.clone());
+        self.names.push(name.clone());
         self.index.insert(address, i);
         self.edges.push(Vec::new());
-        let mut uses = Vec::new();
+        let member = |m: &str| format!("{name}.{m}");
+        let mut uses: Vec<(&Type, bool, String)> = Vec::new();
         match ty {
-            Type::Alias(t) => named_uses(&t.related, false, &mut uses)?,
+            Type::Alias(t) => uses.push((&t.related, false, name.clone())),
             Type::Struct(t) => {
                 if let Some(base) = &t.base {
-                    named_uses(base, false, &mut uses)?;
+                    uses.push((base, false, name.clone()));
                 }
                 for m in &t.members {
-                    named_uses(&m.ty, m.optional, &mut uses)?;
+                    uses.push((&m.ty, m.optional, member(&m.name)));
                 }
             }
             Type::Union(t) => {
-                named_uses(&t.discriminator, false, &mut uses)?;
+                uses.push((&t.discriminator, false, name.clone()));
                 for m in &t.members {
-                    named_uses(&m.ty, false, &mut uses)?;
+                    uses.push((&m.ty, false, member(&m.name)));
                 }
             }
             Type::Annotation(t) => {
                 for m in &t.members {
-                    named_uses(&m.ty, false, &mut uses)?;
+                    uses.push((&m.ty, false, member(&m.name)));
                 }
+            }
+            Type::Sequence(t) => uses.push((&t.element.ty, true, name.clone())),
+            Type::Array(t) => uses.push((&t.element.ty, false, name.clone())),
+            Type::Map(t) => {
+                uses.push((&t.key.ty, true, name.clone()));
+                uses.push((&t.element.ty, true, name.clone()));
             }
             _ => {}
         }
-        for (u, can_be_empty) in uses {
-            let j = self.visit(&u)?;
-            self.edges[i].push((j, can_be_empty));
+        for (u, can_be_empty, name) in uses {
+            if let Some(j) = self.visit(u, &name)? {
+                self.edges[i].push((j, can_be_empty));
+            }
         }
-        Ok(i)
+        Ok(Some(i))
     }
 
     /// The strongly connected components (Tarjan), each one after the
@@ -1090,7 +1124,7 @@ impl Graph {
                 return Err(Error::InvalidType(format!(
                     "{} contains itself without a sequence, map or optional member \
                      in between: its values would never end",
-                    self.types[v].name().unwrap_or_default()
+                    self.names[v]
                 )));
             }
         }
@@ -1167,23 +1201,6 @@ fn defined(ty: &Type) -> Result<&Type> {
     }
 }
 
-/// The named types that `ty` is or uses through anonymous types, and
-/// whether the use can be empty.
-fn named_uses(ty: &Type, can_be_empty: bool, out: &mut Vec<(Type, bool)>) -> Result<()> {
-    let ty = defined(ty)?;
-    match ty {
-        Type::Primitive(_) | Type::String { .. } => {}
-        Type::Sequence(s) => named_uses(&s.element.ty, true, out)?,
-        Type::Array(a) => named_uses(&a.element.ty, can_be_empty, out)?,
-        Type::Map(m) => {
-            named_uses(&m.key.ty, true, out)?;
-            named_uses(&m.element.ty, true, out)?;
-        }
-        _ => out.push((ty.clone(), can_be_empty)),
-    }
-    Ok(())
-}
-
 impl Builder {
     fn new(kind: EquivalenceKind) -> Builder {
         Builder {
@@ -1203,6 +1220,11 @@ impl Builder {
         for component in g.components() {
             if !g.cyclic(&component) {
                 let v = component[0];
+                if address(&g.types[v]).is_none() {
+                    // An anonymous collection outside a cycle: a plain
+                    // identifier, made where it is used.
+                    continue;
+                }
                 let type_object = self.type_object(&g.types[v])?;
                 let type_identifier = type_object.type_identifier()?;
                 self.ids.insert(
@@ -1220,7 +1242,7 @@ impl Builder {
                 objects[i] = Some(pair);
             }
         }
-        Ok(objects.into_iter().map(|p| p.expect("built")).collect())
+        Ok(objects.into_iter().flatten().collect())
     }
 
     /// The TypeObjects of the types of a strongly connected component
@@ -1231,7 +1253,7 @@ impl Builder {
         mut component: Vec<usize>,
     ) -> Result<Vec<(usize, TypeIdentifierTypeObjectPair)>> {
         // Sorted by qualified name: the SCCIndex, from 1.
-        component.sort_by(|&a, &b| g.types[a].name().cmp(&g.types[b].name()));
+        component.sort_by(|&a, &b| g.names[a].cmp(&g.names[b]).then(a.cmp(&b)));
         let scc_length = i32::try_from(component.len())
             .map_err(|_| Error::InvalidType("too many types".into()))?;
         let kind = self.kind;
@@ -1243,7 +1265,7 @@ impl Builder {
                     TypeObjectHashId::Minimal(hash)
                 };
                 ids.insert(
-                    address(&g.types[v]).expect("named"),
+                    vertex(&g.types[v]).expect("a vertex"),
                     TypeIdentifier::StronglyConnectedComponent(StronglyConnectedComponentId {
                         sc_component_id,
                         scc_length,
@@ -1273,7 +1295,7 @@ impl Builder {
                 Ok((
                     v,
                     TypeIdentifierTypeObjectPair {
-                        type_identifier: self.ids[&address(ty).expect("named")].clone(),
+                        type_identifier: self.ids[&vertex(ty).expect("a vertex")].clone(),
                         type_object: self.type_object(ty)?,
                     },
                 ))
@@ -1282,6 +1304,10 @@ impl Builder {
     }
 
     fn identifier(&mut self, ty: &Type) -> Result<TypeIdentifier> {
+        // An anonymous collection of a strongly connected component.
+        if let Some(id) = vertex(ty).and_then(|v| self.ids.get(&v)) {
+            return Ok(id.clone());
+        }
         Ok(match ty.resolve() {
             Type::Primitive(p) => TypeIdentifier::Primitive(p.kind()),
             Type::String { wide, bound } => string_identifier(*wide, *bound),
@@ -1385,8 +1411,98 @@ impl Builder {
             Type::Union(t) => self.union(t),
             Type::Bitset(t) => self.bitset(t),
             Type::Annotation(t) => self.annotation(t),
-            _ => unreachable!("only named types have TypeObjects"),
+            Type::Sequence(_) | Type::Array(_) | Type::Map(_) => self.collection(ty),
+            _ => unreachable!("only named types and collections have TypeObjects"),
         }
+    }
+
+    /// The TypeObject of an anonymous collection, which only one of a
+    /// strongly connected component has (7.3.4.9.1).
+    fn collection(&mut self, ty: &Type) -> Result<TypeObject> {
+        let complete = self.complete();
+        let mut element =
+            |e: &Element| -> Result<(CompleteCollectionElement, MinimalCollectionElement)> {
+                let common = CommonCollectionElement {
+                    element_flags: e.flags(),
+                    r#type: self.identifier(&e.ty)?,
+                };
+                Ok((
+                    CompleteCollectionElement {
+                        common: common.clone(),
+                        detail: CompleteElementDetail::default(),
+                    },
+                    MinimalCollectionElement { common },
+                ))
+            };
+        let collection_flag = CollectionTypeFlag::default();
+        Ok(match ty {
+            Type::Sequence(t) => {
+                let (c, m) = element(&t.element)?;
+                let common = CommonCollectionHeader { bound: t.bound };
+                if complete {
+                    TypeObject::Complete(CompleteTypeObject::Sequence(CompleteSequenceType {
+                        collection_flag,
+                        header: CompleteCollectionHeader {
+                            common,
+                            detail: None,
+                        },
+                        element: c,
+                    }))
+                } else {
+                    TypeObject::Minimal(MinimalTypeObject::Sequence(MinimalSequenceType {
+                        collection_flag,
+                        header: MinimalCollectionHeader { common },
+                        element: m,
+                    }))
+                }
+            }
+            Type::Array(t) => {
+                let (c, m) = element(&t.element)?;
+                let common = CommonArrayHeader {
+                    bound_seq: t.dimensions.clone(),
+                };
+                if complete {
+                    TypeObject::Complete(CompleteTypeObject::Array(CompleteArrayType {
+                        collection_flag,
+                        header: CompleteArrayHeader {
+                            common,
+                            detail: type_detail(""),
+                        },
+                        element: c,
+                    }))
+                } else {
+                    TypeObject::Minimal(MinimalTypeObject::Array(MinimalArrayType {
+                        collection_flag,
+                        header: MinimalArrayHeader { common },
+                        element: m,
+                    }))
+                }
+            }
+            Type::Map(t) => {
+                let (ck, mk) = element(&t.key)?;
+                let (ce, me) = element(&t.element)?;
+                let common = CommonCollectionHeader { bound: t.bound };
+                if complete {
+                    TypeObject::Complete(CompleteTypeObject::Map(CompleteMapType {
+                        collection_flag,
+                        header: CompleteCollectionHeader {
+                            common,
+                            detail: None,
+                        },
+                        key: ck,
+                        element: ce,
+                    }))
+                } else {
+                    TypeObject::Minimal(MinimalTypeObject::Map(MinimalMapType {
+                        collection_flag,
+                        header: MinimalCollectionHeader { common },
+                        key: mk,
+                        element: me,
+                    }))
+                }
+            }
+            _ => unreachable!("a collection"),
+        })
     }
 
     fn bitset(&mut self, t: &BitsetType) -> Result<TypeObject> {
@@ -1939,18 +2055,38 @@ mod tests {
     fn a_type_that_contains_itself() {
         let objects = TypeObjects::new(&tree()).unwrap();
         for (pairs, complete) in [(&objects.minimal, false), (&objects.complete, true)] {
-            assert_eq!(pairs.len(), 1);
-            let id = &pairs[0].type_identifier;
-            let c = scc(id);
-            assert_eq!((c.scc_length, c.scc_index), (1, 1));
+            // The struct and its anonymous sequence<M::TreeNode>
+            // (7.3.4.9.1), sorted by name: "M::TreeNode" is 1,
+            // "M::TreeNode.children" 2.
+            assert_eq!(pairs.len(), 2);
+            let (node, seq) = (
+                scc(&pairs[0].type_identifier),
+                scc(&pairs[1].type_identifier),
+            );
+            assert_eq!((node.scc_length, node.scc_index), (2, 1));
+            assert_eq!((seq.scc_length, seq.scc_index), (2, 2));
+            assert_eq!(node.sc_component_id, seq.sc_component_id);
             assert_eq!(
-                matches!(c.sc_component_id, TypeObjectHashId::Complete(_)),
+                matches!(node.sc_component_id, TypeObjectHashId::Complete(_)),
                 complete
             );
-            // The sequence's element is the type itself.
-            let refs = pairs[0].type_object.referenced_types();
-            assert!(refs.contains(&id), "{refs:?}");
-            check_hash(&[&pairs[0]]);
+            assert!(matches!(
+                pairs[1].type_object,
+                TypeObject::Complete(CompleteTypeObject::Sequence(_))
+                    | TypeObject::Minimal(MinimalTypeObject::Sequence(_))
+            ));
+            // The struct uses the sequence, whose element is the struct.
+            assert!(
+                pairs[0]
+                    .type_object
+                    .referenced_types()
+                    .contains(&&pairs[1].type_identifier)
+            );
+            assert_eq!(
+                pairs[1].type_object.referenced_types(),
+                vec![&pairs[0].type_identifier]
+            );
+            check_hash(&[&pairs[0], &pairs[1]]);
         }
         assert_eq!(
             objects.information.minimal.typeid_with_size.type_id,
@@ -1989,21 +2125,25 @@ mod tests {
         });
         let objects = TypeObjects::new(&root).unwrap();
         for pairs in [&objects.minimal, &objects.complete] {
-            // Root, then B and A in the order they are first used.
-            assert_eq!(pairs.len(), 3);
+            // Root, then B, B's sequence<A> and A in the order they are
+            // first used.
+            assert_eq!(pairs.len(), 4);
             assert!(matches!(
                 pairs[0].type_identifier,
                 TypeIdentifier::Minimal(_) | TypeIdentifier::Complete(_)
             ));
-            let (b, a) = (
+            let (b, seq, a) = (
                 scc(&pairs[1].type_identifier),
                 scc(&pairs[2].type_identifier),
+                scc(&pairs[3].type_identifier),
             );
-            // Sorted by name: A is 1, B is 2.
-            assert_eq!((a.scc_length, a.scc_index), (2, 1));
-            assert_eq!((b.scc_length, b.scc_index), (2, 2));
+            // Sorted by name: "M::A" is 1, "M::B" 2, "M::B.a" 3.
+            assert_eq!((a.scc_length, a.scc_index), (3, 1));
+            assert_eq!((b.scc_length, b.scc_index), (3, 2));
+            assert_eq!((seq.scc_length, seq.scc_index), (3, 3));
             assert_eq!(a.sc_component_id, b.sc_component_id);
-            check_hash(&[&pairs[2], &pairs[1]]);
+            assert_eq!(a.sc_component_id, seq.sc_component_id);
+            check_hash(&[&pairs[3], &pairs[1], &pairs[2]]);
             assert_eq!(
                 pairs[0].type_object.referenced_types(),
                 vec![&pairs[1].type_identifier]
@@ -2032,7 +2172,7 @@ mod tests {
         );
         // What another participant does with them: checked together.
         let mut other = crate::registry::TypeRegistry::new();
-        assert_eq!(other.add_pairs(&objects.complete[1..]).unwrap(), 2);
+        assert_eq!(other.add_pairs(&objects.complete[1..]).unwrap(), 3);
         assert!(other.knows(&deps[0].type_id));
         // One alone is not added, nor a component whose hash is wrong.
         let mut other = crate::registry::TypeRegistry::new();
