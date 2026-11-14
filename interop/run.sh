@@ -413,21 +413,16 @@ for peer in "${PEERS[@]}"; do
   fi
   # A recursive type (rustorb-dds#70), whose TypeObjects are identified
   # by their strongly connected component: matched by the TypeInformation
-  # of both sides, and learnt by TypeLookup with "discover". Cyclone DDS
-  # 0.10.4's idlc does not finish on a recursive type, and Fast DDS
-  # 2.11.2 has no TypeObjects.
+  # of both sides. Cyclone DDS 0.10.4's idlc does not finish on a
+  # recursive type, and Fast DDS 2.11.2 has no TypeObjects. OpenDDS 3.31
+  # does not take a getTypes request for a component (see README), so
+  # there is no "discover" case.
   if [ "$peer" = opendds ]; then
     run_case "$peer-to-rustorb-tree" \
       "$BUILD/$peer/tree" pub @D@ "$COUNT" -- \
       timeout $((TIMEOUT + 5)) "$RUST_TREE" sub @D@ "$COUNT" "$TIMEOUT"
     run_case "rustorb-to-$peer-tree" \
       "$RUST_TREE" pub @D@ "$COUNT" -- \
-      timeout $((TIMEOUT + 5)) "$BUILD/$peer/tree" sub @D@ "$COUNT" "$TIMEOUT"
-    run_case "$peer-to-rustorb-tree-discover" \
-      "$BUILD/$peer/tree" pub @D@ "$COUNT" -- \
-      timeout $((TIMEOUT + 5)) "$RUST_TREE" sub @D@ "$COUNT" "$TIMEOUT" discover
-    run_case "rustorb-discover-to-$peer-tree" \
-      "$RUST_TREE" pub @D@ "$COUNT" discover -- \
       timeout $((TIMEOUT + 5)) "$BUILD/$peer/tree" sub @D@ "$COUNT" "$TIMEOUT"
   fi
   # The Python binding: hello world (best effort and reliable), keyed

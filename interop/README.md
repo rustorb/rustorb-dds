@@ -104,10 +104,9 @@ The `-tree` cases (OpenDDS only, rustorb-dds#70) send a recursive type,
 the `tree` example on the rustorb-dds side and `opendds/tree.cpp`. Its
 TypeObjects are identified by their strongly connected component (SCC
 identifiers, DDS-XTypes 1.3, 7.3.4.9.2), so the two sides match only if
-they make the same component hash. With `discover` the rustorb-dds side
-is not built with the type and gets it by TypeLookup. Cyclone DDS
-0.10.4's `idlc` does not finish on a recursive type, and Fast DDS 2.11.2
-has no TypeObjects, so they have no `-tree` cases.
+they make the same component hash. Cyclone DDS 0.10.4's `idlc` does not
+finish on a recursive type, and Fast DDS 2.11.2 has no TypeObjects, so
+they have no `-tree` cases.
 
 The `python-` cases (rustorb-dds#35) run the Python binding's examples
 in `python/examples` on the rustorb-dds side, with the same command
@@ -200,6 +199,16 @@ acknowledgments, SEDP and TypeLookup).
 | 2026-11-14 | rustorb-dds#68 | 3.31 (`ghcr.io/opendds/opendds:DDS-3.31`) | all 54 cases pass (Rust, Python, C++, Java) |
 
 Found on the way:
+
+- Recursive types (rustorb-dds#70): the anonymous `sequence<Node>` is a
+  type of the strongly connected component as well (XTypes 7.3.4.9.1
+  draws it as a vertex); with it, `Tree::Node` gets the MINIMAL and
+  COMPLETE hashes OpenDDS 3.31 gives it, and the `-tree` cases pass.
+  OpenDDS does not take a getTypes request whose type is an SCCIdentifier
+  (`Sedp::TypeLookupRequestReader::data_received_i: failed to take type
+  lookup request`), which 7.6.3.3.4.2 says a request for such a type
+  uses, so the `tree` example with `discover` does not learn the type
+  from OpenDDS (it does from rustorb-dds, `tests/xtypes.rs`).
 
 - Bitsets (rustorb-dds#70): DDS-XTypes 1.3 gives a bitset TypeObjects but
   no serialization. rustorb-dds writes one as the smallest unsigned
