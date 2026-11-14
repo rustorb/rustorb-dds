@@ -270,11 +270,16 @@ class EntitiesTest {
             }
             assertEquals(2, n);
         }
+        // take with max samples: the first to arrive
+        try (Sample.Iterator<Greeting> it = reader.select().maxSamples(1).take()) {
+            assertEquals(1, it.next().getData().index);
+            assertFalse(it.hasNext());
+        }
         List<Sample<Greeting>> taken = takeAll(reader);
-        assertEquals(3, taken.size());
-        for (int i = 0; i < 3; i++) {
-            assertEquals(i + 1, taken.get(i).getData().index);
-            assertEquals("hello " + (i + 1), taken.get(i).getData().message);
+        assertEquals(2, taken.size());
+        for (int i = 0; i < 2; i++) {
+            assertEquals(i + 2, taken.get(i).getData().index);
+            assertEquals("hello " + (i + 2), taken.get(i).getData().message);
         }
         assertTrue(takeAll(reader).isEmpty());
 

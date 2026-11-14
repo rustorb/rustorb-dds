@@ -1463,17 +1463,29 @@ fn filter(sample_states: u32, view_states: u32, instance_states: u32) -> Res<Sta
     Ok(f)
 }
 
+/// The `max_samples` of a read or take: `RDDS_LENGTH_UNLIMITED` (-1) or
+/// a number.
+fn max(max_samples: i32) -> Res<usize> {
+    match max_samples {
+        -1 => Ok(usize::MAX),
+        n if n >= 0 => Ok(n as usize),
+        n => Err(bad(format!("max_samples {n}"))),
+    }
+}
+
 /// `rdds_reader_select`: reads (or takes, with `take`) the samples in
 /// the states of the masks (`RDDS_ANY_*_STATE` for any); with
 /// `RDDS_SELECT_INSTANCE`, those of `*instance` only (the masks then
 /// ignored); with `RDDS_SELECT_NEXT_INSTANCE`, those of the instance
-/// after `*instance` (`HANDLE_NIL` or NULL for the first). An empty
-/// result is `RETCODE_OK` with no samples.
+/// after `*instance` (`HANDLE_NIL` or NULL for the first). At most
+/// `max_samples` samples (`RDDS_LENGTH_UNLIMITED` for any number), the
+/// first to arrive. An empty result is `RETCODE_OK` with no samples.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdds_reader_select(
     r: *const RddsReader,
     take: bool,
+    max_samples: i32,
     sample_states: u32,
     view_states: u32,
     instance_states: u32,
@@ -1483,32 +1495,29 @@ pub unsafe extern "C" fn rdds_reader_select(
 ) -> Status {
     guard(|| {
         let r = unsafe { obj(r, "the reader") }?;
+        let r = r.inner.max_samples(max(max_samples)?);
         let handle = unsafe { instance.as_ref() }
             .map(|h| InstanceHandle(h.value))
             .filter(|h| h.0 != [0; 16]);
         let v = match mode {
             SELECT_ANY => {
                 let f = filter(sample_states, view_states, instance_states)?;
-                if take {
-                    r.inner.take_with(f)
-                } else {
-                    r.inner.read_with(f)
-                }
+                if take { r.take_with(f) } else { r.read_with(f) }
             }
             SELECT_INSTANCE => {
                 let h = handle.ok_or_else(|| bad("no instance given"))?;
                 if take {
-                    r.inner.take_instance(h)
+                    r.take_instance(h)
                 } else {
-                    r.inner.read_instance(h)
+                    r.read_instance(h)
                 }
             }
             SELECT_NEXT_INSTANCE => {
                 let f = filter(sample_states, view_states, instance_states)?;
                 if take {
-                    r.inner.take_next_instance(handle, f)
+                    r.take_next_instance(handle, f)
                 } else {
-                    r.inner.read_next_instance(handle, f)
+                    r.read_next_instance(handle, f)
                 }
             }
             m => return Err(bad(format!("unknown selection {m}"))),
@@ -1518,11 +1527,12 @@ pub unsafe extern "C" fn rdds_reader_select(
 }
 
 /// `rdds_reader_select_w_condition`: the samples a read condition of
-/// this reader selects.
+/// this reader selects, at most `max_samples`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdds_reader_select_w_condition(
     r: *const RddsReader,
     take: bool,
+    max_samples: i32,
     condition: *const RddsCondition,
     out: *mut *mut RddsSamples,
 ) -> Status {
@@ -1532,10 +1542,11 @@ pub unsafe extern "C" fn rdds_reader_select_w_condition(
         let rustorb_dds::Condition::Read(c) = &c.0 else {
             return Err(bad("not a read condition"));
         };
+        let r = r.inner.max_samples(max(max_samples)?);
         let v = if take {
-            r.inner.take_w_condition(c)?
+            r.take_w_condition(c)?
         } else {
-            r.inner.read_w_condition(c)?
+            r.read_w_condition(c)?
         };
         unsafe { put(out, RddsSamples(v)) }
     })

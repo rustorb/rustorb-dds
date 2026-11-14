@@ -229,12 +229,22 @@ impl<T> DataReader<T> {
         instance: Option<InstanceHandle>,
         take: bool,
     ) -> Vec<Sample<T>> {
+        self.select_max(filter, instance, take, usize::MAX)
+    }
+
+    fn select_max(
+        &self,
+        filter: StateFilter,
+        instance: Option<InstanceHandle>,
+        take: bool,
+        max: usize,
+    ) -> Vec<Sample<T>> {
         let raw = {
             let mut g = self.shared.lock_any();
             match g.readers.get_mut(&self.guid) {
                 Some(r) => {
                     r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
-                    r.samples.select(filter, instance, take)
+                    r.samples.select_max(filter, instance, take, max)
                 }
                 None => Vec::new(),
             }
@@ -250,7 +260,8 @@ impl<T> DataReader<T> {
         match g.readers.get_mut(&self.guid) {
             Some(r) => {
                 r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
-                r.samples.select(StateFilter::ANY, None, true)
+                r.samples
+                    .select_max(StateFilter::ANY, None, true, usize::MAX)
             }
             None => Vec::new(),
         }
@@ -302,7 +313,7 @@ impl<T> DataReader<T> {
         previous: Option<InstanceHandle>,
         filter: StateFilter,
     ) -> Vec<Sample<T>> {
-        self.next_instance(previous, filter, true)
+        self.next_instance(previous, filter, true, usize::MAX)
     }
 
     /// Like [`Self::take_next_instance`], reading (`read_next_instance`).
@@ -311,7 +322,7 @@ impl<T> DataReader<T> {
         previous: Option<InstanceHandle>,
         filter: StateFilter,
     ) -> Vec<Sample<T>> {
-        self.next_instance(previous, filter, false)
+        self.next_instance(previous, filter, false, usize::MAX)
     }
 
     fn next_instance(
@@ -319,6 +330,7 @@ impl<T> DataReader<T> {
         previous: Option<InstanceHandle>,
         filter: StateFilter,
         take: bool,
+        max: usize,
     ) -> Vec<Sample<T>> {
         let raw = {
             let mut g = self.shared.lock_any();
@@ -327,13 +339,24 @@ impl<T> DataReader<T> {
             };
             r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
             match r.samples.next_instance(previous, filter) {
-                Some(h) => r.samples.select(filter, Some(h), take),
+                Some(h) => r.samples.select_max(filter, Some(h), take, max),
                 None => Vec::new(),
             }
         };
         raw.into_iter()
             .filter_map(|r| decode(&*self.samples, r))
             .collect()
+    }
+
+    /// The reads and takes of at most `max_samples` samples (the
+    /// `max_samples` argument of DDS 1.4, 2.2.2.5.3.8): the first to
+    /// arrive of those selected. The others stay in the reader as they
+    /// were.
+    pub fn max_samples(&self, max_samples: usize) -> MaxSamples<'_, T> {
+        MaxSamples {
+            reader: self,
+            max: max_samples,
+        }
     }
 
     /// The handle of the instance of `instance` (`lookup_instance`), if
@@ -586,4 +609,84 @@ fn reader_listener<T: 'static>(
             ReaderEvent::SampleLost(s) => listener.on_sample_lost(&reader, s),
         }
     })
+}
+
+/// The reads and takes of a [`DataReader`] limited to a number of
+/// samples ([`DataReader::max_samples`]).
+pub struct MaxSamples<'a, T> {
+    reader: &'a DataReader<T>,
+    max: usize,
+}
+
+impl<T> std::fmt::Debug for MaxSamples<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaxSamples")
+            .field("reader", self.reader)
+            .field("max", &self.max)
+            .finish()
+    }
+}
+
+impl<T> MaxSamples<'_, T> {
+    /// Like [`DataReader::take_with`].
+    pub fn take_with(&self, filter: StateFilter) -> Vec<Sample<T>> {
+        self.reader.select_max(filter, None, true, self.max)
+    }
+
+    /// Like [`DataReader::read_with`].
+    pub fn read_with(&self, filter: StateFilter) -> Vec<Sample<T>> {
+        self.reader.select_max(filter, None, false, self.max)
+    }
+
+    /// Like [`DataReader::take`].
+    pub fn take(&self) -> Vec<Sample<T>> {
+        self.take_with(StateFilter::ANY)
+    }
+
+    /// Like [`DataReader::read`].
+    pub fn read(&self) -> Vec<Sample<T>> {
+        self.read_with(StateFilter::ANY)
+    }
+
+    /// Like [`DataReader::take_instance`].
+    pub fn take_instance(&self, instance: InstanceHandle) -> Vec<Sample<T>> {
+        self.reader
+            .select_max(StateFilter::ANY, Some(instance), true, self.max)
+    }
+
+    /// Like [`DataReader::read_instance`].
+    pub fn read_instance(&self, instance: InstanceHandle) -> Vec<Sample<T>> {
+        self.reader
+            .select_max(StateFilter::ANY, Some(instance), false, self.max)
+    }
+
+    /// Like [`DataReader::take_next_instance`].
+    pub fn take_next_instance(
+        &self,
+        previous: Option<InstanceHandle>,
+        filter: StateFilter,
+    ) -> Vec<Sample<T>> {
+        self.reader.next_instance(previous, filter, true, self.max)
+    }
+
+    /// Like [`DataReader::read_next_instance`].
+    pub fn read_next_instance(
+        &self,
+        previous: Option<InstanceHandle>,
+        filter: StateFilter,
+    ) -> Vec<Sample<T>> {
+        self.reader.next_instance(previous, filter, false, self.max)
+    }
+
+    /// Like [`DataReader::take_w_condition`].
+    pub fn take_w_condition(&self, condition: &ReadCondition) -> Result<Vec<Sample<T>>> {
+        let f = self.reader.check_condition(condition)?;
+        Ok(self.reader.select_max(f, None, true, self.max))
+    }
+
+    /// Like [`DataReader::read_w_condition`].
+    pub fn read_w_condition(&self, condition: &ReadCondition) -> Result<Vec<Sample<T>>> {
+        let f = self.reader.check_condition(condition)?;
+        Ok(self.reader.select_max(f, None, false, self.max))
+    }
 }

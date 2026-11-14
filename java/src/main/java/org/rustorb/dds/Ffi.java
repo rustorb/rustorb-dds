@@ -147,8 +147,8 @@ final class Ffi {
     static final MethodHandle rdds_reader_requested_incompatible_qos_status = Library.fn("rdds_reader_requested_incompatible_qos_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_sample_lost_status = Library.fn("rdds_reader_sample_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_sample_rejected_status = Library.fn("rdds_reader_sample_rejected_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
-    static final MethodHandle rdds_reader_select = Library.fn("rdds_reader_select", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
-    static final MethodHandle rdds_reader_select_w_condition = Library.fn("rdds_reader_select_w_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_reader_select = Library.fn("rdds_reader_select", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_reader_select_w_condition = Library.fn("rdds_reader_select_w_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_set_listener = Library.fn("rdds_reader_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_reader_status_changes = Library.fn("rdds_reader_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_reader_status_condition = Library.fn("rdds_reader_status_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));

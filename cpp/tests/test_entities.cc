@@ -97,8 +97,20 @@ TEST(read_marks_samples_read) {
   auto read = reader.select().state(dds::sub::status::SampleState::read()).max_samples(1).read();
   CHECK(read.length() == 1);
   CHECK(read[0].info().state().sample_state() == dds::sub::status::SampleState::read());
-  CHECK_THROWS(reader.select().max_samples(1).take(), dds::core::UnsupportedError);
-  CHECK(reader.take().length() == 2);
+  // max_samples takes the first to arrive and leaves the others.
+  auto first = reader.select().max_samples(1).take();
+  CHECK(first.length() == 1 && first[0].data().index() == 1);
+  CHECK(reader.select().max_samples(0).take().length() == 0);
+  // Written in this participant: in the reader when write returns.
+  writer << HelloWorld::Greeting(3, "c") << HelloWorld::Greeting(4, "d");
+  auto not_read = DataState(dds::sub::status::SampleState::not_read(), dds::sub::status::ViewState::any(),
+                            dds::sub::status::InstanceState::any());
+  auto three = reader.select().state(not_read).max_samples(1).read();
+  CHECK(three.length() == 1 && three[0].data().index() == 3);
+  // Only the sample read is marked read.
+  auto four = reader.select().state(not_read).read();
+  CHECK(four.length() == 1 && four[0].data().index() == 4);
+  CHECK(reader.take().length() == 3);
 }
 
 TEST(instances) {

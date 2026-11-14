@@ -603,19 +603,22 @@ class DataReader:
                 for d, i in v]
 
     def take(self, sample_states=_ANY, view_states=_ANY, instance_states=_ANY,
-             instance=None):
+             instance=None, max_samples=None):
         """Takes the samples in the given states (lists of state names:
         ``"read"``/``"not_read"``, ``"new"``/``"not_new"``, ``"alive"``/
         ``"not_alive_disposed"``/``"not_alive_no_writers"``; None for
-        any), or those of the ``instance`` handle."""
+        any), or those of the ``instance`` handle; at most
+        ``max_samples``, the first to arrive."""
         return self._samples(self._native.select(
-            True, sample_states, view_states, instance_states, instance))
+            True, sample_states, view_states, instance_states, instance,
+            max_samples))
 
     def read(self, sample_states=_ANY, view_states=_ANY, instance_states=_ANY,
-             instance=None):
+             instance=None, max_samples=None):
         """Like :meth:`take`, leaving the samples in the reader."""
         return self._samples(self._native.select(
-            False, sample_states, view_states, instance_states, instance))
+            False, sample_states, view_states, instance_states, instance,
+            max_samples))
 
     def take_w_condition(self, condition):
         return self._samples(self._native.select_w_condition(True, condition._native))

@@ -753,17 +753,20 @@ typedef struct rdds_sample_info {
   bool valid_data;
 } rdds_sample_info;
 
-/* Reads (or takes) the samples in the states of the masks. With
+/* Reads (or takes) at most max_samples (RDDS_LENGTH_UNLIMITED for any
+ * number) of the samples in the states of the masks, the first to arrive.
+ * With
  * RDDS_SELECT_INSTANCE, those of *instance (the masks ignored); with
  * RDDS_SELECT_NEXT_INSTANCE, those of the instance after *instance (NULL
  * or HANDLE_NIL for the first). No samples is RDDS_RETCODE_OK with an
  * empty rdds_samples. */
 rdds_status rdds_reader_select(const rdds_reader *r, bool take,
-                               uint32_t sample_states, uint32_t view_states,
+                               int32_t max_samples, uint32_t sample_states, uint32_t view_states,
                                uint32_t instance_states, int32_t mode,
                                const rdds_instance_handle *instance,
                                rdds_samples **out);
 rdds_status rdds_reader_select_w_condition(const rdds_reader *r, bool take,
+                                           int32_t max_samples,
                                            const rdds_condition *condition,
                                            rdds_samples **out);
 size_t rdds_samples_count(const rdds_samples *s);

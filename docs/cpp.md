@@ -72,7 +72,6 @@ entity は PSM どおり参照で、写しは同じ entity を指す。最後の
 ## PSM と違うところ、rustorb の拡張
 
 - `DataWriter::unregister_instance(handle)`、`dispose_instance(handle)`、`key_value(sample, handle)` は、その writer の `register_instance` か `lookup_instance` が返したハンドルだけを受ける（C ABI はキーの値で instance を指すため）。キーの値を渡す `unregister_instance(const T&)`、`dispose_instance(const T&)` もある
-- `take` と `max_samples` は一緒に使えない（`UnsupportedError`）。`read` では使える
 - `Selector::condition(read_condition)` で `ReadCondition` のサンプルを読む
 - `rustorb::dds::localhost_participant(domain)` はループバックだけを使う参加者（試験用）。`wait_for_subscriptions`、`wait_for_publications`、`wait_for_data`、`discovered_participants` も足した
 - listener はライブラリのスレッドで呼ばれるか、同じ参加者の writer が書いたときはその `write` の中で呼ばれる。entity を作る間に起きた呼び出しは、作り終えてから行う

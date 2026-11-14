@@ -8,6 +8,13 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- `max_samples` for takes as well as reads (DDS 1.4, 2.2.2.5.3.8, #67):
+  `DataReader::max_samples(n)` in Rust gives the first `n` samples to
+  arrive and leaves the others as they were; `max_samples` of
+  `rdds_reader_select` and `rdds_reader_select_w_condition` in the C ABI
+  (a new argument), `Selector::max_samples` with `take` in C++,
+  `maxSamples` with `take` in Java and `max_samples` in Python. A read
+  with a limit no longer marks the samples beyond it read.
 - Listeners of participants, publishers, subscribers and topics (DDS 1.4,
   2.2.4.3, #66): a status that an entity's own listener does not take
   goes to its publisher's or subscriber's listener, then to the

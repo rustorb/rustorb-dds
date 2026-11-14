@@ -1376,7 +1376,7 @@ class DataReader {
       return *this;
     }
     Selector& max_samples(uint32_t n) {
-      max_ = n;
+      max_ = n > static_cast<uint32_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(n);
       return *this;
     }
     // rustorb: the samples of a ReadCondition of this reader.
@@ -1391,7 +1391,7 @@ class DataReader {
     int32_t mode_ = RDDS_SELECT_ANY;
     ::dds::core::InstanceHandle handle_;
     status::DataState state_;
-    uint32_t max_ = 0;
+    int32_t max_ = RDDS_LENGTH_UNLIMITED;
     const rdds_condition* condition_ = nullptr;
     std::shared_ptr<void> condition_owner_;
   };
@@ -1583,20 +1583,17 @@ class DataReader {
   explicit DataReader(std::shared_ptr<impl_type> impl) : impl_(std::move(impl)) {}
 
   LoanedSamples<T> select_c(bool take, const Selector& sel) {
-    if (take && sel.max_ != 0)
-      throw ::dds::core::UnsupportedError("max_samples with take is not supported yet");
     rdds_samples* samples = nullptr;
     if (sel.condition_) {
-      rustorb::dds::detail::check(rdds_reader_select_w_condition(impl().get(), take, sel.condition_, &samples));
+      rustorb::dds::detail::check(rdds_reader_select_w_condition(impl().get(), take, sel.max_, sel.condition_, &samples));
     } else {
       rdds_instance_handle h = sel.handle_.c();
-      rustorb::dds::detail::check(rdds_reader_select(impl().get(), take, sel.state_.sample_state().c(),
+      rustorb::dds::detail::check(rdds_reader_select(impl().get(), take, sel.max_, sel.state_.sample_state().c(),
                                                      sel.state_.view_state().c(), sel.state_.instance_state().c(),
                                                      sel.mode_, &h, &samples));
     }
     rustorb::dds::detail::handle<rdds_samples, rdds_samples_release> owner(samples);
     size_t n = rdds_samples_count(samples);
-    if (sel.max_ != 0 && n > sel.max_) n = sel.max_;
     std::vector<Sample<T>> out(n);
     for (size_t i = 0; i < n; i++) {
       rdds_sample_info info;

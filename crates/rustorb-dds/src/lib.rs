@@ -127,5 +127,5 @@ pub use status::{
     LivelinessLostStatus, MatchedStatus, QosPolicyCount, SampleLostStatus, SampleRejectedReason,
     SampleRejectedStatus, StatusMask,
 };
-pub use subscriber::{DataReader, Sample, Subscriber};
+pub use subscriber::{DataReader, MaxSamples, Sample, Subscriber};
 pub use topic::{ContentFilteredTopic, Topic, TopicDescription};

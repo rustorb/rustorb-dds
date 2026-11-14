@@ -55,7 +55,7 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 - 状態は構造体で返す。取得すると変化の数は 0 に戻る（DDS 1.4 どおり）。不整合 QoS の方針の一覧は固定長（32）の配列で、所有の受け渡しを避けた
 - listener は関数表と `self`。どの関数も NULL でよい。ライブラリのスレッドから呼ばれる。ただし同じ参加者の writer が書いたときは、その `rdds_writer_*` の呼び出しの中で、呼び出し側のスレッドから呼ばれる。ライブラリのロックは持たないので、listener からどの関数を呼んでもよい。`release` は listener が置き換えられたとき、または entity が削除されたときに一度だけ呼ばれる。C++ と Java はここで自分のオブジェクトの参照を手放す
 - 参加者・publisher・subscriber・topic の listener は一つの関数表 `rdds_listener`（`rdds_*_set_listener`）。writer と reader の状態では `rdds_endpoint_info`（GUID、トピック名、型名）を渡す。entity の listener が受けない状態は publisher・subscriber、次に参加者の listener へ（DDS 1.4 2.2.4.3）。`on_data_on_readers` に渡す subscriber は呼び出しの間だけ有効（残すなら `rdds_subscriber_clone`、比べるのは `rdds_subscriber_same`）。`rdds_subscriber_notify_datareaders` で reader の listener を呼ぶ
-- 読み取りは `rdds_reader_select`（状態のマスク、インスタンス指定、次のインスタンス）と `rdds_reader_select_w_condition`。結果の `rdds_samples` からサンプル情報と、サンプルごとの入力ストリームを取る
+- 読み取りは `rdds_reader_select`（状態のマスク、インスタンス指定、次のインスタンス、`max_samples`）と `rdds_reader_select_w_condition`。結果の `rdds_samples` からサンプル情報と、サンプルごとの入力ストリームを取る
 
 ### Content filtered topic
 

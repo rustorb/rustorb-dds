@@ -594,11 +594,25 @@ impl ReaderHistory {
     /// Returns the samples passing `filter` (of one instance, if given),
     /// in the order they arrived, and marks them read; `take` removes
     /// them instead.
+    #[cfg(test)]
     pub(crate) fn select(
         &mut self,
         filter: StateFilter,
         instance: Option<InstanceHandle>,
         take: bool,
+    ) -> Vec<Selected> {
+        self.select_max(filter, instance, take, usize::MAX)
+    }
+
+    /// Like `select`, for at most `max` samples: the first to arrive of
+    /// those passing `filter` (`max_samples`, DDS 1.4, 2.2.2.5.3.8). The
+    /// others stay as they were.
+    pub(crate) fn select_max(
+        &mut self,
+        filter: StateFilter,
+        instance: Option<InstanceHandle>,
+        take: bool,
+        max: usize,
     ) -> Vec<Selected> {
         // Instances emptied by an earlier take are forgotten now, not at
         // that take, so that their key stays available until the next
@@ -616,6 +630,35 @@ impl ReaderHistory {
         let handles: Vec<InstanceHandle> = match instance {
             Some(h) => vec![h],
             None => self.instances.keys().copied().collect(),
+        };
+        // With a limit, the arrival of the last sample to give.
+        let last = if max == usize::MAX {
+            u64::MAX
+        } else {
+            let mut arrivals: Vec<u64> = Vec::new();
+            for h in &handles {
+                let Some(inst) = self.instances.get(h) else {
+                    continue;
+                };
+                let view = if inst.new {
+                    ViewState::New
+                } else {
+                    ViewState::NotNew
+                };
+                arrivals.extend(inst.samples.iter().filter_map(|s| {
+                    let st = if s.read {
+                        SampleState::Read
+                    } else {
+                        SampleState::NotRead
+                    };
+                    filter.accepts(st, view, inst.state).then_some(s.arrival)
+                }));
+            }
+            if max == 0 {
+                return Vec::new();
+            }
+            arrivals.sort_unstable();
+            arrivals.get(max - 1).copied().unwrap_or(u64::MAX)
         };
         for h in &handles {
             let Some(inst) = self.instances.get_mut(h) else {
@@ -636,7 +679,7 @@ impl ReaderHistory {
                 } else {
                     SampleState::NotRead
                 };
-                if !filter.accepts(st, view, state) {
+                if s.arrival > last || !filter.accepts(st, view, state) {
                     kept.push_back(s);
                     continue;
                 }
@@ -785,6 +828,27 @@ mod tests {
         assert_eq!(r.last_value(&h(1)), Some(&[12][..]));
         assert!(r.select(StateFilter::ANY, None, true).is_empty());
         assert!(r.last_value(&h(1)).is_none());
+    }
+
+    #[test]
+    fn max_samples_takes_the_first_to_arrive() {
+        let mut r = ReaderHistory::new(History::KeepAll);
+        r.accept(write(w(1), 1, 2, 1));
+        r.accept(write(w(1), 2, 1, 2));
+        r.accept(write(w(1), 3, 2, 3));
+        r.accept(write(w(1), 4, 1, 4));
+        let s = r.select_max(StateFilter::ANY, None, false, 3);
+        assert_eq!(values(&s), [Some(1), Some(2), Some(3)]);
+        // Only the samples given are marked read.
+        let s = r.select_max(StateFilter::NOT_READ, None, true, 2);
+        assert_eq!(values(&s), [Some(4)]);
+        let s = r.select_max(StateFilter::ANY, None, true, 2);
+        assert_eq!(values(&s), [Some(1), Some(2)]);
+        // The ranks count the samples given.
+        assert_eq!(s[0].1.sample_rank, 0);
+        assert!(r.select_max(StateFilter::ANY, None, true, 0).is_empty());
+        let s = r.select_max(StateFilter::ANY, Some(h(2)), true, 5);
+        assert_eq!(values(&s), [Some(3)]);
     }
 
     #[test]

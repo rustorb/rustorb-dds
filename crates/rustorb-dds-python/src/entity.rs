@@ -1203,8 +1203,9 @@ impl PyReader {
 
     /// Takes (or reads) the samples passing the filter, or those of one
     /// instance when `instance` is given: a list of `(data or None,
-    /// info)`.
-    #[pyo3(signature = (take, sample_states = None, view_states = None, instance_states = None, instance = None))]
+    /// info)`; at most `max_samples`, the first to arrive.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (take, sample_states = None, view_states = None, instance_states = None, instance = None, max_samples = None))]
     fn select<'py>(
         &self,
         py: Python<'py>,
@@ -1213,13 +1214,15 @@ impl PyReader {
         view_states: Option<Vec<String>>,
         instance_states: Option<Vec<String>>,
         instance: Option<&str>,
+        max_samples: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         let f = filter(sample_states, view_states, instance_states)?;
+        let r = self.inner.max_samples(max_samples.unwrap_or(usize::MAX));
         let v = match (instance.map(parse_handle).transpose()?, take) {
-            (None, true) => self.inner.take_with(f),
-            (None, false) => self.inner.read_with(f),
-            (Some(h), true) => self.inner.take_instance(h),
-            (Some(h), false) => self.inner.read_instance(h),
+            (None, true) => r.take_with(f),
+            (None, false) => r.read_with(f),
+            (Some(h), true) => r.take_instance(h),
+            (Some(h), false) => r.read_instance(h),
         };
         samples(py, &v)
     }

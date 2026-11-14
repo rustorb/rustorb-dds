@@ -59,6 +59,15 @@ def test_read_states():
     assert len(r.take(sample_states=["read"])) == 1
     with pytest.raises(ValueError):
         r.read(sample_states=["bogus"])
+    # max_samples: the first to arrive; the others stay as they were.
+    for i in (2, 3, 4):
+        w.write(Shape(1, i, "b"))
+    w.wait_for_acknowledgments(5.0)
+    assert [s.data.index for s in r.read(max_samples=1)] == [2]
+    assert [s.data.index for s in r.take(sample_states=["not_read"],
+                                         max_samples=1)] == [3]
+    assert r.take(max_samples=0) == []
+    assert [s.data.index for s in r.take()] == [2, 4]
 
 
 def test_waitset_conditions():

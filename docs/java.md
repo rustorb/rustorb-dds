@@ -83,7 +83,6 @@ done
 - listener はライブラリのスレッドで呼ばれるか、同じ参加者の writer が書いたときはその `write` の中で呼ばれる
 - 状態の条件は writer と reader のもの
 - `DataWriter` の instance をハンドルで指す操作は、その writer の `registerInstance` か `lookupInstance` が返したハンドルだけを受ける（C++ と同じ）
-- `take` と `maxSamples` は一緒に使えない（`UnsupportedOperationException`）。`read` では使える
 - entity の QoS は作った後に変えられない（`setQos` は `UnsupportedOperationException`）
 - `waitForHistoricalData` はすぐ返す
 - 無効なサンプル（dispose などの知らせ）の `getData()` は PSM どおり `null`。キーは `getKeyValue(null, sample.getInstanceHandle())` で得る

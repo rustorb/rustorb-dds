@@ -588,7 +588,13 @@ fn samples_go_from_a_writer_to_a_reader() {
         assert_eq!((n, active[0]), (1, 0));
 
         let mut samples = null_mut();
-        ok(rdds_reader_select_w_condition(r, true, cond, &mut samples));
+        ok(rdds_reader_select_w_condition(
+            r,
+            true,
+            -1,
+            cond,
+            &mut samples,
+        ));
         assert_eq!(rdds_samples_count(samples), 3);
         let mut got = Vec::new();
         for i in 0..3 {
@@ -639,6 +645,7 @@ fn samples_go_from_a_writer_to_a_reader() {
         ok(rdds_reader_select(
             r,
             true,
+            -1,
             3,
             3,
             7,
@@ -750,6 +757,7 @@ fn content_filtered_topics_filter_samples() {
             ok(rdds_reader_select(
                 r,
                 true,
+                -1,
                 3,
                 3,
                 7,

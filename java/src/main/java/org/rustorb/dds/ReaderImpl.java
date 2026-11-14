@@ -96,15 +96,12 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
 
     /** The samples the selector selects, read or taken. */
     List<Sample<T>> select(Samples.Selector<T> s, boolean take) {
-        if (take && s.maxSamples != ResourceLimits.LENGTH_UNLIMITED) {
-            throw new UnsupportedOperationException("rustorb-dds cannot take a limited number of samples yet");
-        }
         List<Sample<T>> out = new ArrayList<>();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment p = arena.allocate(JAVA_LONG);
             int rc;
             if (s.condition != null) {
-                rc = (int) Ffi.rdds_reader_select_w_condition.invokeExact(handle(), take, s.condition.handle(),
+                rc = (int) Ffi.rdds_reader_select_w_condition.invokeExact(handle(), take, s.maxSamples, s.condition.handle(),
                         p.address());
             } else {
                 int mode = s.nextInstance ? SELECT_NEXT_INSTANCE : s.instance != null ? SELECT_INSTANCE : SELECT_ANY;
@@ -112,7 +109,7 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
                 if (s.instance != null) {
                     HandleImpl.put(h, 0, s.instance);
                 }
-                rc = (int) Ffi.rdds_reader_select.invokeExact(handle(), take, s.state.sampleMask(),
+                rc = (int) Ffi.rdds_reader_select.invokeExact(handle(), take, s.maxSamples, s.state.sampleMask(),
                         s.state.viewMask(), s.state.instanceMask(), mode, h.address(), p.address());
             }
             Errors.check(env, rc);
@@ -121,9 +118,6 @@ final class ReaderImpl<T> extends EntityBase<DataReaderListener<T>, DataReaderQo
                 long n = (long) Ffi.rdds_samples_count.invokeExact(samples);
                 MemorySegment info = arena.allocate(Samples.INFO_SIZE, 8);
                 for (long i = 0; i < n; i++) {
-                    if (!take && s.maxSamples >= 0 && out.size() >= s.maxSamples) {
-                        break;
-                    }
                     Errors.check(env, (int) Ffi.rdds_samples_info.invokeExact(samples, i, info.address()));
                     T data = null;
                     if (Samples.SampleImpl.validData(info)) {
