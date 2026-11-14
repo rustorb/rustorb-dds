@@ -1,14 +1,14 @@
 // A recursive type (DDS-XTypes 1.3, 7.3.4.8): a node holds a sequence of
 // nodes. Its TypeObjects are identified by their strongly connected
-// component (Tree::Node and Tree::Children). The typedef is not named
+// component (Tree::Node and Tree::Forest). The typedef is not named
 // NodeSeq: OpenDDS's TypeSupport.idl declares Tree::NodeSeq itself.
 module Tree {
   struct Node;
-  typedef sequence<Node> Children;
+  typedef sequence<Node> Forest;
 
   @appendable
   struct Node {
     long data;
-    Children children;
+    Forest children;
   };
 };
