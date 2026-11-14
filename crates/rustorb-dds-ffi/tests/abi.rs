@@ -1048,3 +1048,76 @@ fn group_listeners_take_what_endpoint_listeners_do_not() {
         assert_eq!(GROUP_RELEASED.load(Ordering::SeqCst), 2);
     }
 }
+
+/// The `dds.sec.*` properties of rustorb-dds-security's test
+/// certificates for participant `who`.
+fn security_properties(who: &str) -> Vec<(CString, CString)> {
+    let certs = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rustorb-dds-security/tests/certs/"
+    );
+    let f = |n: &str| c(&format!("file:{certs}{n}"));
+    vec![
+        (c("dds.sec.auth.identity_ca"), f("identity_ca.pem")),
+        (
+            c("dds.sec.auth.identity_certificate"),
+            f(&format!("{who}_cert.pem")),
+        ),
+        (c("dds.sec.auth.private_key"), f(&format!("{who}_key.pem"))),
+        (c("dds.sec.access.permissions_ca"), f("permissions_ca.pem")),
+        (c("dds.sec.access.governance"), f("governance.p7s")),
+        (
+            c("dds.sec.access.permissions"),
+            f(&format!("permissions_{who}.p7s")),
+        ),
+        (c("some.other.property"), c("ignored")),
+    ]
+}
+
+unsafe fn secure_participant(
+    domain: u32,
+    props: &[(CString, CString)],
+    out: *mut *mut rustorb_dds::DomainParticipant,
+) -> Status {
+    let list: Vec<RddsProperty> = props
+        .iter()
+        .map(|(n, v)| RddsProperty {
+            name: n.as_ptr(),
+            value: v.as_ptr(),
+        })
+        .collect();
+    let qos = RddsParticipantQos {
+        user_data: null(),
+        user_data_len: 0,
+        property: list.as_ptr(),
+        property_len: list.len(),
+    };
+    unsafe { rdds_participant_new(domain, &qos, PARTICIPANT_LOCALHOST, out) }
+}
+
+#[test]
+fn security_from_the_property_qos() {
+    unsafe {
+        // Some of the dds.sec properties only: refused.
+        let mut partial = security_properties("p1");
+        partial.retain(|(n, _)| n.to_bytes() != b"dds.sec.access.permissions");
+        let mut p = null_mut();
+        assert_eq!(secure_participant(44, &partial, &mut p), ERROR);
+        let msg = CStr::from_ptr(rdds_last_error_message()).to_string_lossy();
+        assert!(msg.contains("dds.sec.access.permissions"), "{msg}");
+        // All of them: the two participants authenticate each other
+        // before they see each other.
+        let (mut p1, mut p2) = (null_mut(), null_mut());
+        ok(secure_participant(44, &security_properties("p1"), &mut p1));
+        ok(secure_participant(44, &security_properties("p2"), &mut p2));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while rdds_participant_discovered_participants(p1) == 0
+            || rdds_participant_discovered_participants(p2) == 0
+        {
+            assert!(std::time::Instant::now() < deadline, "not discovered");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        rdds_participant_release(p1);
+        rdds_participant_release(p2);
+    }
+}

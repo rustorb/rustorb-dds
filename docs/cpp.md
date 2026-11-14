@@ -59,7 +59,7 @@ done
 - `dds::topic::Topic<T>`（`name`、`type_name`、`inconsistent_topic_status`）
 - `dds::pub::Publisher`、`dds::pub::DataWriter<T>`（`write`、`<<`、`register_instance`、`unregister_instance`、`dispose_instance`、`key_value`、`lookup_instance`、`wait_for_acknowledgments`、状態の取得、`assert_liveliness`、`listener`）
 - `dds::sub::Subscriber`、`dds::sub::DataReader<T>`（`read`、`take`、`select()` の `instance`・`next_instance`・`state`・`max_samples`、`key_value`、`lookup_instance`、状態の取得、`listener`）、`Sample<T>`、`SampleInfo`、`LoanedSamples<T>`、`DataState`
-- QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、WriterDataLifecycle、DataRepresentation、TypeConsistencyEnforcement。`qos << policy`、`qos.policy<P>()`、`DataWriterQos(topic_qos)`
+- QoS：Reliability、History、Durability、Deadline、Liveliness、ResourceLimits、Partition、UserData、Property（参加者。`dds.sec.*` で DDS Security、`docs/security.md`）、WriterDataLifecycle、DataRepresentation、TypeConsistencyEnforcement。`qos << policy`、`qos.policy<P>()`、`DataWriterQos(topic_qos)`
 - 状態：`StatusMask` と各状態のクラス（PSM のつづり `offered_deadlined_missed_status`、`offered_incompatible_qos_staus` も）
 - `DataWriterListener<T>`、`DataReaderListener<T>`、`PublisherListener`、`SubscriberListener`（`on_data_on_readers`）、`TopicListener<T>`、`DomainParticipantListener` と `NoOp` 版。entity の作成時か `listener(l, mask)` で渡す。entity の listener が受けない状態は publisher・subscriber、次に参加者の listener へ（DDS 1.4 2.2.4.3）。`Subscriber::notify_datareaders()`
 - `GuardCondition`、`StatusCondition`、`ReadCondition`、`WaitSet`（`wait`、`dispatch` と条件の `handler`）

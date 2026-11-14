@@ -48,7 +48,7 @@ The type of a declared class is described to the network as an XTypes TypeObject
 
 ## Entities
 
-`DomainParticipant(domain_id, localhost=False)`, `create_topic`, `create_contentfilteredtopic(name, topic, expression, parameters)` (readers of it get the samples that pass the filter; `set_expression_parameters` changes the parameters), `create_publisher(partition=[...])`, `create_subscriber`, `create_datawriter(topic, qos, listener, mask)`, `create_datareader(...)`.
+`DomainParticipant(domain_id, localhost=False, properties=None)` (`properties`, a dict or pairs, is the PROPERTY of the participant QoS: the six `dds.sec.*` properties turn on DDS Security, see docs/security.md), `create_topic`, `create_contentfilteredtopic(name, topic, expression, parameters)` (readers of it get the samples that pass the filter; `set_expression_parameters` changes the parameters), `create_publisher(partition=[...])`, `create_subscriber`, `create_datawriter(topic, qos, listener, mask)`, `create_datareader(...)`.
 
 Requests and replies (DDS-RPC): `Requester(participant, request_topic, reply_topic)` with `wait_for_service`, `send_request` (returns a `SampleIdentity`), `receive_reply(identity, timeout)` and `request(sample, timeout)`; `Replier(participant, request_topic, reply_topic, instance_name=None)` with `receive_requests(timeout)` (`(sample, identity)` pairs) and `send_reply(sample, identity)`. See docs/rpc.md in the repository.
 

@@ -31,6 +31,7 @@ import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.Partition;
 import org.omg.dds.core.policy.PolicyFactory;
+import org.omg.dds.core.policy.Property;
 import org.omg.dds.core.policy.QosPolicy;
 import org.omg.dds.core.policy.Reliability;
 import org.omg.dds.core.policy.ResourceLimits;
@@ -129,7 +130,8 @@ final class Qos {
         }
 
         static ParticipantQos defaults(ServiceEnvironment env) {
-            return new ParticipantQos(env, map(env.getSPI().getPolicyFactory().UserData()));
+            PolicyFactory f = env.getSPI().getPolicyFactory();
+            return new ParticipantQos(env, map(f.UserData(), f.Property()));
         }
 
         @Override
@@ -142,12 +144,30 @@ final class Qos {
             return get(UserData.class);
         }
 
+        @Override
+        public Property getProperty() {
+            return get(Property.class);
+        }
+
         /** An rdds_participant_qos. */
         MemorySegment toNative(Arena arena) {
-            MemorySegment s = arena.allocate(16, 8);
+            MemorySegment s = arena.allocate(32, 8);
             byte[] ud = ((Policies.UserDataImpl) getUserData()).value;
             s.set(JAVA_LONG, 0, ud.length == 0 ? 0 : arena.allocateFrom(JAVA_BYTE, ud).address());
             s.set(JAVA_LONG, 8, ud.length);
+            // rdds_property: name and value, two pointers.
+            Map<String, String> props = ((Policies.PropertyImpl) getProperty()).value;
+            if (!props.isEmpty()) {
+                MemorySegment a = arena.allocate(16L * props.size(), 8);
+                long at = 0;
+                for (Map.Entry<String, String> e : props.entrySet()) {
+                    a.set(ADDRESS, at, arena.allocateFrom(e.getKey()));
+                    a.set(ADDRESS, at + 8, arena.allocateFrom(e.getValue()));
+                    at += 16;
+                }
+                s.set(JAVA_LONG, 16, a.address());
+            }
+            s.set(JAVA_LONG, 24, props.size());
             return s;
         }
     }

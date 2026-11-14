@@ -554,15 +554,25 @@ impl PyParticipant {
     }
 
     /// Joins `domain_id`. With `localhost`, discovery and data stay on
-    /// the loopback interface (for tests).
+    /// the loopback interface (for tests). `properties` are the PROPERTY
+    /// of the DomainParticipantQos (name and value pairs): the `dds.sec.*`
+    /// ones turn on DDS Security.
     #[new]
-    #[pyo3(signature = (domain_id, localhost = false))]
-    fn new(py: Python<'_>, domain_id: u32, localhost: bool) -> PyResult<Self> {
-        let config = if localhost {
+    #[pyo3(signature = (domain_id, localhost = false, properties = Vec::new()))]
+    fn new(
+        py: Python<'_>,
+        domain_id: u32,
+        localhost: bool,
+        properties: Vec<(String, String)>,
+    ) -> PyResult<Self> {
+        let mut config = if localhost {
             ParticipantConfig::localhost(domain_id)
         } else {
             ParticipantConfig::new(domain_id)
         };
+        config
+            .set_properties(properties.iter().map(|(n, v)| (n.as_str(), v.as_str())))
+            .map_err(dds_err)?;
         let inner = py
             .detach(|| DomainParticipant::with_config(config))
             .map_err(dds_err)?;
