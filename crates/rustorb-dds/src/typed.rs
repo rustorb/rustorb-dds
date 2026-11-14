@@ -22,6 +22,27 @@ pub(crate) trait KeyOps: Send + Sync {
     /// Whether a key-only payload is the key of the value payload
     /// `value`.
     fn key_matches(&self, key_payload: &[u8], value: &[u8]) -> bool;
+
+    /// The key payload of the value payload `value`: its key holder
+    /// (DDS-XTypes 1.3, 7.6.8) in XCDR1, `CDR_LE`, as Cyclone DDS 0.10.4
+    /// and OpenDDS 3.31 send it.
+    fn key_payload(&self, value: &[u8]) -> Option<Vec<u8>>;
+}
+
+/// A key payload: the encapsulation `CDR_LE` and the key holder written
+/// by `write_key`, padded to a multiple of 4 octets (the padding counted
+/// in the options, DDS-XTypes 1.3, 7.6.3.1.2).
+fn key_payload_of(write_key: impl FnOnce(&mut Encoder) -> bool) -> Option<Vec<u8>> {
+    let mut enc = Encoder::new(ByteOrder::Little, Encoding::Xcdr1);
+    if !write_key(&mut enc) {
+        return None;
+    }
+    let key = enc.into_bytes();
+    let pad = (4 - key.len() % 4) % 4;
+    let mut out = vec![0x00, 0x01, 0x00, pad as u8];
+    out.extend_from_slice(&key);
+    out.resize(out.len() + pad, 0);
+    Some(out)
 }
 
 /// The samples of a topic, of Rust type `T`.
@@ -92,6 +113,11 @@ impl<T: TopicType> KeyOps for Typed<T> {
         };
         key_payload_matches(key_payload, |enc| T::write_key(&v, enc).is_ok())
     }
+
+    fn key_payload(&self, value: &[u8]) -> Option<Vec<u8>> {
+        let v = T::from_payload(value).ok()?;
+        key_payload_of(|enc| T::write_key(&v, enc).is_ok())
+    }
 }
 
 impl<T: TopicType + 'static> SampleType<T> for Typed<T> {
@@ -157,6 +183,11 @@ impl KeyOps for Dynamic {
             return false;
         };
         key_payload_matches(key_payload, |enc| v.serialize_key(enc).is_ok())
+    }
+
+    fn key_payload(&self, value: &[u8]) -> Option<Vec<u8>> {
+        let v = DynamicData::from_payload(&self.ty, value).ok()?;
+        key_payload_of(|enc| v.serialize_key(enc).is_ok())
     }
 }
 
@@ -234,6 +265,8 @@ mod tests {
         assert!(ops.key_matches(&[0x00, 0x00, 0x00, 0x00, 0, 0, 0, 2], &value));
         assert!(ops.key_matches(&[0x00, 0x10, 0x00, 0x00, 0, 0, 0, 2], &value));
         assert!(!ops.key_matches(&[0x00, 0x01], &value));
+        // The key payload sent: the same as Cyclone DDS's.
+        assert_eq!(ops.key_payload(&value).unwrap(), cyclone);
         // The key hash: the key holder in big endian, padded to 16.
         let mut hash = [0u8; 16];
         hash[3] = 2;

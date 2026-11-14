@@ -130,8 +130,13 @@ impl Publisher {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.entity.qos.partition.clone();
-        self.shared
-            .add_writer(data, qos, keyed, listener, self.entity.clone())?;
+        self.shared.add_writer(
+            data,
+            qos,
+            topic.samples.key_ops(),
+            listener,
+            self.entity.clone(),
+        )?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,

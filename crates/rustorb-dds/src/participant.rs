@@ -549,11 +549,18 @@ fn drop_missing_padding(bytes: &mut [u8]) {
     }
 }
 
+/// The vendor id that OpenDDS sends.
+const OPENDDS: VendorId = VendorId([0x01, 0x03]);
+
 /// An instance a writer has registered.
 #[derive(Debug)]
 pub(crate) struct WriterInstance {
     /// Its changes still in the history, oldest first.
     changes: VecDeque<SequenceNumber>,
+    /// Its key payload (the key holder in XCDR1, `CDR_LE`), from the
+    /// first value written, for the readers that need one with a
+    /// dispose or an unregister.
+    key: Option<Vec<u8>>,
 }
 
 /// What a writer does to an instance.
@@ -570,6 +577,8 @@ pub(crate) struct WriterState {
     pub(crate) data: EndpointData,
     pub(crate) qos: DataWriterQos,
     keyed: bool,
+    /// The topic type's key operations.
+    keys: Arc<dyn KeyOps>,
     /// The history and the remote readers. Local readers get each sample
     /// directly when it is written.
     pub(crate) rtps: ReliableWriter,
@@ -743,6 +752,7 @@ impl WriterState {
             h,
             WriterInstance {
                 changes: VecDeque::new(),
+                key: None,
             },
         );
         Ok(())
@@ -756,6 +766,7 @@ impl WriterState {
         h: InstanceHandle,
         op: WriteOp,
         timestamp: Time,
+        key_payload: bool,
     ) -> Result<(SequenceNumber, instance::Change)> {
         let unregister = matches!(
             op,
@@ -776,6 +787,12 @@ impl WriterState {
         }
         let (payload, change) = match op {
             WriteOp::Value(v, related) => {
+                if self.keyed {
+                    let inst = self.instances.get_mut(&h).expect("registered above");
+                    if inst.key.is_none() {
+                        inst.key = self.keys.key_payload(&v);
+                    }
+                }
                 if let Some(id) = related {
                     // In the byte order the message is sent in.
                     q.push(Parameter::new(
@@ -810,13 +827,21 @@ impl WriterState {
                     flags |= STATUS_UNREGISTERED;
                 }
                 q.push(Parameter::new(pid::STATUS_INFO, [0, 0, 0, flags]));
-                // The key hash alone tells the instance: no key payload
-                // goes with it. Fast DDS 2.11.2 takes the wrong instance
-                // for a DATA with a key payload, even with the key hash
-                // inline, while Cyclone DDS 0.10.4 and Fast DDS both
-                // accept this form.
+                // The key hash tells the instance. Fast DDS 2.11.2 takes
+                // the wrong instance for a DATA with a key payload, even
+                // with the key hash inline, while Cyclone DDS 0.10.4
+                // accepts either; OpenDDS 3.31 needs the key payload. So
+                // it goes only when `key_payload` asks for it.
+                let key = if key_payload && self.keyed {
+                    self.instances.get(&h).and_then(|i| i.key.clone())
+                } else {
+                    None
+                };
                 (
-                    None,
+                    key.map(|bytes| SerializedPayload {
+                        kind: PayloadKind::Key,
+                        bytes,
+                    }),
                     instance::Change::Lifecycle {
                         disposed: dispose,
                         unregistered: unregister,
@@ -831,7 +856,7 @@ impl WriterState {
             q.parameters.insert(0, Parameter::new(pid::KEY_HASH, h.0));
         }
         let inline_qos = (!q.parameters.is_empty()).then_some(q);
-        if payload.is_some() {
+        if matches!(change, instance::Change::Write(_)) {
             self.deadlines.renew(h, Instant::now());
         } else {
             // Disposed or unregistered: no more updates are due.
@@ -1425,7 +1450,7 @@ impl Shared {
         &self,
         #[allow(unused_mut)] mut data: EndpointData,
         qos: DataWriterQos,
-        keyed: bool,
+        keys: Arc<dyn KeyOps>,
         listener: Option<(WriterListener, StatusMask)>,
         publisher: Arc<PublisherEntity>,
     ) -> Result<()> {
@@ -1445,7 +1470,8 @@ impl Shared {
             let mut w = WriterState {
                 data: data.clone(),
                 qos,
-                keyed,
+                keyed: keys.keyed(),
+                keys,
                 rtps,
                 matched: BTreeSet::new(),
                 instances: BTreeMap::new(),
@@ -1753,7 +1779,16 @@ impl Shared {
             let inner = &mut *g;
             let w = inner.writers.get_mut(&writer).expect("checked above");
             let change;
-            (sn, change) = w.add(h, op, timestamp)?;
+            // A dispose or an unregister carries the key payload when an
+            // OpenDDS reader is matched (see `WriterState::add`).
+            let key_payload = matches!(op, WriteOp::Lifecycle { .. })
+                && w.matched.iter().any(|r| {
+                    inner
+                        .spdp
+                        .participant(&r.prefix)
+                        .is_some_and(|p| p.vendor_id == OPENDDS)
+                });
+            (sn, change) = w.add(h, op, timestamp, key_payload)?;
             let now = Instant::now();
             out = w.rtps.poll(now);
             w.trim();

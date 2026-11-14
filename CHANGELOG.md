@@ -99,6 +99,8 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 - Readers take samples whose encapsulation counts padding octets that
   the payload does not have (OpenDDS 3.31 leaves them out of a DATA that
   ends a message); they were dropped (#68).
+- A dispose or an unregister carries the key payload as well as the key
+  hash when an OpenDDS reader is matched, as OpenDDS 3.31 needs it (#68).
 
 ## [python-0.1.0] - 2026-11-05
 
