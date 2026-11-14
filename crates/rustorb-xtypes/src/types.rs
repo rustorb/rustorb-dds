@@ -33,7 +33,8 @@
 //! Bitsets ([`BitsetType`]) have TypeObjects (7.3.4.6) but no
 //! serialization in XTypes 1.3: rustorb writes one as the smallest of
 //! `uint8`, `uint16`, `uint32` and `uint64` that holds its bits, the first
-//! field in the lowest bits. Annotation types ([`AnnotationType`]) have TypeObjects and
+//! field in the lowest bits (Fast DDS 2.11 writes each field as its own
+//! holder instead, so the two do not agree). Annotation types ([`AnnotationType`]) have TypeObjects and
 //! no samples.
 
 use std::collections::HashMap;

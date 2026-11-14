@@ -201,6 +201,13 @@ acknowledgments, SEDP and TypeLookup).
 
 Found on the way:
 
+- Bitsets (rustorb-dds#70): DDS-XTypes 1.3 gives a bitset TypeObjects but
+  no serialization. rustorb-dds writes one as the smallest unsigned
+  integer that holds its bits. Fast DDS 2.11.2 (fastddsgen 2.3.0) writes
+  each field as its own holder type (`char`, `bool`, `int8_t`...), so a
+  bitset does not go between them. Cyclone DDS 0.10.4's `idlc` does not
+  parse bitsets. There are no bitset cases.
+
 - OpenDDS 3.31 (rustorb-dds#68): `opendds_idl` makes a struct a topic
   type only with `@topic` or `--no-default-nested`, its default
   extensibility is APPENDABLE (the other peers make the hello world
