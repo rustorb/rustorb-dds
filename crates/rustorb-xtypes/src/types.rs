@@ -29,7 +29,8 @@
 //! [`Error::Unsupported`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 pub use rustorb_cdr::xcdr::Extensibility;
 
@@ -84,7 +85,10 @@ impl Primitive {
 ///
 /// Named types are behind an [`Arc`] so that a type used in several
 /// places is described once.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality is structural, except that a forward declaration is equal to
+/// any type of its name: that is where comparing recursive types stops.
+#[derive(Debug, Clone)]
 pub enum Type {
     /// A primitive type.
     Primitive(Primitive),
@@ -111,9 +115,132 @@ pub enum Type {
     Struct(Arc<StructType>),
     /// A `union`.
     Union(Arc<UnionType>),
+    /// A named type declared before it is defined, for types that depend
+    /// on each other (7.3.4.8): it stands for the type it is defined as
+    /// ([`Type::define`]).
+    Forward(Arc<ForwardType>),
+}
+
+/// A forward declaration (`struct TreeNode;`): the name, and the type
+/// once it is defined.
+///
+/// A recursive type made with it holds itself: it is never freed, which
+/// is fine for types, made once.
+pub struct ForwardType {
+    name: String,
+    target: OnceLock<Type>,
+}
+
+impl ForwardType {
+    /// The qualified name it was declared with.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The type, once defined.
+    pub fn target(&self) -> Option<&Type> {
+        self.target.get()
+    }
+}
+
+impl fmt::Debug for ForwardType {
+    // Not the target, which may contain this.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ForwardType")
+            .field("name", &self.name)
+            .field("defined", &self.target.get().is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Forward(f), t) | (t, Type::Forward(f)) => t.name() == Some(f.name()),
+            (Type::Primitive(a), Type::Primitive(b)) => a == b,
+            (
+                Type::String { wide, bound },
+                Type::String {
+                    wide: w2,
+                    bound: b2,
+                },
+            ) => wide == w2 && bound == b2,
+            (Type::Sequence(a), Type::Sequence(b)) => a == b,
+            (Type::Array(a), Type::Array(b)) => a == b,
+            (Type::Map(a), Type::Map(b)) => a == b,
+            (Type::Alias(a), Type::Alias(b)) => a == b,
+            (Type::Enum(a), Type::Enum(b)) => a == b,
+            (Type::Bitmask(a), Type::Bitmask(b)) => a == b,
+            (Type::Struct(a), Type::Struct(b)) => a == b,
+            (Type::Union(a), Type::Union(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for ForwardType {
+    // By name: comparing the targets would not end.
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
 }
 
 impl Type {
+    /// A forward declaration of the named type `name`, to use in the
+    /// types that refer to it before [`Type::define`] ties the knot:
+    ///
+    /// ```
+    /// use rustorb_xtypes::types::*;
+    ///
+    /// // struct TreeNode { long data; sequence<TreeNode> children; };
+    /// let fwd = Type::forward("TreeNode");
+    /// let node = Type::from(StructType {
+    ///     name: "TreeNode".into(),
+    ///     members: vec![
+    ///         StructMember::new("data", 0, Type::Primitive(Primitive::Int32)),
+    ///         StructMember::new("children", 1, Type::sequence(fwd.clone())),
+    ///     ],
+    ///     ..StructType::default()
+    /// });
+    /// fwd.define(node.clone()).unwrap();
+    /// assert!(TypeObjects::new(&node).is_ok());
+    /// ```
+    pub fn forward(name: impl Into<String>) -> Type {
+        Type::Forward(Arc::new(ForwardType {
+            name: name.into(),
+            target: OnceLock::new(),
+        }))
+    }
+
+    /// Defines a forward declaration as `target`, a named type of the
+    /// same name. Fails for other types, a different name, or a forward
+    /// declaration defined already.
+    pub fn define(&self, target: Type) -> Result<()> {
+        let Type::Forward(f) = self else {
+            return Err(Error::BadParameter("not a forward declaration".into()));
+        };
+        let target_name = target.resolve().name();
+        if matches!(target, Type::Forward(_)) || target_name != Some(f.name.as_str()) {
+            return Err(Error::BadParameter(format!(
+                "{} cannot be defined as {}",
+                f.name,
+                target_name.unwrap_or("an anonymous type")
+            )));
+        }
+        f.target
+            .set(target)
+            .map_err(|_| Error::BadParameter(format!("{} is defined already", f.name)))
+    }
+
+    /// The type itself, or for a forward declaration the type it is
+    /// defined as (itself while undefined).
+    pub fn resolve(&self) -> &Type {
+        match self {
+            Type::Forward(f) => f.target.get().unwrap_or(self),
+            _ => self,
+        }
+    }
+
     /// An unbounded `string`.
     pub fn string() -> Type {
         Type::String {
@@ -133,6 +260,7 @@ impl Type {
     /// The qualified name of a named type.
     pub fn name(&self) -> Option<&str> {
         match self {
+            Type::Forward(f) => Some(&f.name),
             Type::Alias(t) => Some(&t.name),
             Type::Enum(t) => Some(&t.name),
             Type::Bitmask(t) => Some(&t.name),
@@ -561,20 +689,53 @@ impl TypeObjects {
 fn with_dependencies(
     pairs: &[TypeIdentifierTypeObjectPair],
 ) -> Result<TypeIdentifierWithDependencies> {
-    let sized = |p: &TypeIdentifierTypeObjectPair| -> Result<TypeIdentifierWithSize> {
-        let size = p.type_object.to_bytes()?.len();
-        Ok(TypeIdentifierWithSize {
-            type_id: p.type_identifier.clone(),
-            typeobject_serialized_size: u32::try_from(size)
-                .map_err(|_| Error::InvalidType("TypeObject too large".into()))?,
-        })
-    };
-    let (first, rest) = pairs
-        .split_first()
+    let size =
+        |n: usize| u32::try_from(n).map_err(|_| Error::InvalidType("TypeObject too large".into()));
+    let first = pairs
+        .first()
         .ok_or_else(|| Error::InvalidType("no TypeObject".into()))?;
-    let dependent_typeids = rest.iter().map(sized).collect::<Result<Vec<_>>>()?;
+    let typeid_with_size = TypeIdentifierWithSize {
+        type_id: first.type_identifier.clone(),
+        typeobject_serialized_size: size(first.type_object.to_bytes()?.len())?,
+    };
+    // The types of a strongly connected component are listed as the
+    // component (7.6.3.2.2), with the size of their TypeObjects in
+    // sequence; the type's own component too when it has other types.
+    let mut dependent_typeids: Vec<TypeIdentifierWithSize> = Vec::new();
+    let own = first.type_identifier.scc_identifier();
+    for p in pairs {
+        let type_id = match p.type_identifier.scc_identifier() {
+            Some(scc) => {
+                let alone = p.type_identifier.scc_members().len() == 1;
+                if Some(&scc) == own.as_ref() && alone {
+                    continue;
+                }
+                scc
+            }
+            None if std::ptr::eq(p, first) => continue,
+            None => p.type_identifier.clone(),
+        };
+        if dependent_typeids.iter().any(|d| d.type_id == type_id) {
+            continue;
+        }
+        let bytes = if type_id.is_scc_identifier() {
+            let mut members: Vec<&TypeIdentifierTypeObjectPair> = pairs
+                .iter()
+                .filter(|q| q.type_identifier.scc_identifier().as_ref() == Some(&type_id))
+                .collect();
+            members.sort_by_key(|q| q.type_identifier.clone());
+            let objects: Vec<TypeObject> = members.iter().map(|q| q.type_object.clone()).collect();
+            crate::xcdr2::to_bytes(&objects, rustorb_cdr::ByteOrder::Little)?
+        } else {
+            p.type_object.to_bytes()?
+        };
+        dependent_typeids.push(TypeIdentifierWithSize {
+            type_id,
+            typeobject_serialized_size: size(bytes.len())?,
+        });
+    }
     Ok(TypeIdentifierWithDependencies {
-        typeid_with_size: sized(first)?,
+        typeid_with_size,
         dependent_typeid_count: i32::try_from(dependent_typeids.len())
             .map_err(|_| Error::InvalidType("too many types".into()))?,
         dependent_typeids,
@@ -583,18 +744,24 @@ fn with_dependencies(
 
 /// Computes TypeIdentifiers of one equivalence kind, collecting the
 /// TypeObjects of the named types on the way.
+///
+/// The named types are taken in the order of the strongly connected
+/// components of their dependency graph (7.3.4.9.2), those depended on
+/// first. A type alone in its component, that does not use itself, is
+/// identified by the hash of its TypeObject; the types of a component
+/// that has a cycle get `TI_STRONGLY_CONNECTED_COMPONENT` identifiers,
+/// from the hash of their TypeObjects together. Anonymous types
+/// (sequences, arrays, maps) are not vertices of the graph here: they
+/// have plain identifiers, with the identifier of their element, and
+/// are part of the edges between named types.
 struct Builder {
     kind: EquivalenceKind,
-    /// Named types by address: their index in `objects`.
-    done: HashMap<usize, usize>,
-    /// Named types being built, to find types that depend on each other.
-    in_progress: Vec<usize>,
-    /// In the order the types were first used; filled in when built.
-    objects: Vec<Option<TypeIdentifierTypeObjectPair>>,
+    /// The identifiers of the named types computed so far, by address.
+    ids: HashMap<usize, TypeIdentifier>,
 }
 
 fn address(ty: &Type) -> Option<usize> {
-    Some(match ty {
+    Some(match ty.resolve() {
         Type::Alias(t) => Arc::as_ptr(t) as usize,
         Type::Enum(t) => Arc::as_ptr(t) as usize,
         Type::Bitmask(t) => Arc::as_ptr(t) as usize,
@@ -604,13 +771,218 @@ fn address(ty: &Type) -> Option<usize> {
     })
 }
 
+/// The dependency graph of the named types reachable from a type.
+#[derive(Default)]
+struct Graph {
+    /// The types, in the order they are first used (depth first).
+    types: Vec<Type>,
+    index: HashMap<usize, usize>,
+    /// For each type, the types it uses directly or through anonymous
+    /// types, and whether the use can be empty (through a sequence, a
+    /// map or an optional member), which keeps a cycle finite.
+    edges: Vec<Vec<(usize, bool)>>,
+}
+
+impl Graph {
+    fn of(ty: &Type) -> Result<Graph> {
+        let mut g = Graph::default();
+        g.visit(ty)?;
+        Ok(g)
+    }
+
+    fn visit(&mut self, ty: &Type) -> Result<usize> {
+        let ty = defined(ty)?;
+        let address = address(ty).expect("a named type");
+        if let Some(&i) = self.index.get(&address) {
+            return Ok(i);
+        }
+        let i = self.types.len();
+        self.types.push(ty.clone());
+        self.index.insert(address, i);
+        self.edges.push(Vec::new());
+        let mut uses = Vec::new();
+        match ty {
+            Type::Alias(t) => named_uses(&t.related, false, &mut uses)?,
+            Type::Struct(t) => {
+                if let Some(base) = &t.base {
+                    named_uses(base, false, &mut uses)?;
+                }
+                for m in &t.members {
+                    named_uses(&m.ty, m.optional, &mut uses)?;
+                }
+            }
+            Type::Union(t) => {
+                named_uses(&t.discriminator, false, &mut uses)?;
+                for m in &t.members {
+                    named_uses(&m.ty, false, &mut uses)?;
+                }
+            }
+            _ => {}
+        }
+        for (u, can_be_empty) in uses {
+            let j = self.visit(&u)?;
+            self.edges[i].push((j, can_be_empty));
+        }
+        Ok(i)
+    }
+
+    /// The strongly connected components (Tarjan), each one after the
+    /// components it depends on.
+    fn components(&self) -> Vec<Vec<usize>> {
+        struct Tarjan<'a> {
+            g: &'a Graph,
+            next: usize,
+            index: Vec<Option<usize>>,
+            low: Vec<usize>,
+            stack: Vec<usize>,
+            on_stack: Vec<bool>,
+            out: Vec<Vec<usize>>,
+        }
+        impl Tarjan<'_> {
+            fn connect(&mut self, v: usize) {
+                self.index[v] = Some(self.next);
+                self.low[v] = self.next;
+                self.next += 1;
+                self.stack.push(v);
+                self.on_stack[v] = true;
+                for &(w, _) in &self.g.edges[v] {
+                    match self.index[w] {
+                        None => {
+                            self.connect(w);
+                            self.low[v] = self.low[v].min(self.low[w]);
+                        }
+                        Some(iw) if self.on_stack[w] => self.low[v] = self.low[v].min(iw),
+                        Some(_) => {}
+                    }
+                }
+                if Some(self.low[v]) == self.index[v] {
+                    let mut c = Vec::new();
+                    loop {
+                        let w = self.stack.pop().expect("on the stack");
+                        self.on_stack[w] = false;
+                        c.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    self.out.push(c);
+                }
+            }
+        }
+        let n = self.types.len();
+        let mut t = Tarjan {
+            g: self,
+            next: 0,
+            index: vec![None; n],
+            low: vec![0; n],
+            stack: Vec::new(),
+            on_stack: vec![false; n],
+            out: Vec::new(),
+        };
+        for v in 0..n {
+            if t.index[v].is_none() {
+                t.connect(v);
+            }
+        }
+        t.out
+    }
+
+    /// Whether the types of `component` use each other in a cycle.
+    fn cyclic(&self, component: &[usize]) -> bool {
+        component.len() > 1
+            || self.edges[component[0]]
+                .iter()
+                .any(|&(w, _)| w == component[0])
+    }
+
+    /// Refuses a cycle of the component that no value can end: one that
+    /// goes through no sequence, map or optional member.
+    fn check_finite(&self, component: &[usize]) -> Result<()> {
+        // Depth-first search for a cycle among the edges that cannot be
+        // empty, inside the component.
+        fn has_cycle(
+            g: &Graph,
+            inside: &[usize],
+            v: usize,
+            state: &mut HashMap<usize, bool>,
+        ) -> bool {
+            state.insert(v, true);
+            for &(w, can_be_empty) in &g.edges[v] {
+                if can_be_empty || !inside.contains(&w) {
+                    continue;
+                }
+                match state.get(&w) {
+                    Some(true) => return true,
+                    Some(false) => {}
+                    None => {
+                        if has_cycle(g, inside, w, state) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            state.insert(v, false);
+            false
+        }
+        let mut state = HashMap::new();
+        for &v in component {
+            if !state.contains_key(&v) && has_cycle(self, component, v, &mut state) {
+                return Err(Error::InvalidType(format!(
+                    "{} contains itself without a sequence, map or optional member \
+                     in between: its values would never end",
+                    self.types[v].name().unwrap_or_default()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the named type `ty` uses itself, directly or through other
+/// types (it is in a cycle of the dependency graph, 7.3.4.8).
+pub(crate) fn uses_itself(ty: &Type) -> bool {
+    let Ok(g) = Graph::of(ty) else {
+        return false;
+    };
+    g.components()
+        .iter()
+        .find(|c| c.contains(&0))
+        .is_some_and(|c| g.cyclic(c))
+}
+
+/// `ty`, a forward declaration resolved; an error for one not defined.
+fn defined(ty: &Type) -> Result<&Type> {
+    match ty.resolve() {
+        Type::Forward(f) => Err(Error::InvalidType(format!(
+            "the forward declaration {} is not defined",
+            f.name()
+        ))),
+        t => Ok(t),
+    }
+}
+
+/// The named types that `ty` is or uses through anonymous types, and
+/// whether the use can be empty.
+fn named_uses(ty: &Type, can_be_empty: bool, out: &mut Vec<(Type, bool)>) -> Result<()> {
+    let ty = defined(ty)?;
+    match ty {
+        Type::Primitive(_) | Type::String { .. } => {}
+        Type::Sequence(s) => named_uses(&s.element.ty, true, out)?,
+        Type::Array(a) => named_uses(&a.element.ty, can_be_empty, out)?,
+        Type::Map(m) => {
+            named_uses(&m.key.ty, true, out)?;
+            named_uses(&m.element.ty, true, out)?;
+        }
+        _ => out.push((ty.clone(), can_be_empty)),
+    }
+    Ok(())
+}
+
 impl Builder {
     fn new(kind: EquivalenceKind) -> Builder {
         Builder {
             kind,
-            done: HashMap::new(),
-            in_progress: Vec::new(),
-            objects: Vec::new(),
+            ids: HashMap::new(),
         }
     }
 
@@ -620,16 +992,91 @@ impl Builder {
                 "only a named type has a TypeObject".into(),
             ));
         }
-        self.identifier(ty)?;
-        Ok(self
-            .objects
-            .into_iter()
-            .map(|p| p.expect("built"))
-            .collect())
+        let g = Graph::of(ty)?;
+        let mut objects: Vec<Option<TypeIdentifierTypeObjectPair>> = vec![None; g.types.len()];
+        for component in g.components() {
+            if !g.cyclic(&component) {
+                let v = component[0];
+                let type_object = self.type_object(&g.types[v])?;
+                let type_identifier = type_object.type_identifier()?;
+                self.ids.insert(
+                    address(&g.types[v]).expect("named"),
+                    type_identifier.clone(),
+                );
+                objects[v] = Some(TypeIdentifierTypeObjectPair {
+                    type_identifier,
+                    type_object,
+                });
+                continue;
+            }
+            g.check_finite(&component)?;
+            for (i, pair) in self.component(&g, component)? {
+                objects[i] = Some(pair);
+            }
+        }
+        Ok(objects.into_iter().map(|p| p.expect("built")).collect())
+    }
+
+    /// The TypeObjects of the types of a strongly connected component
+    /// with a cycle (7.3.4.9.2 step 4.b to 4.f).
+    fn component(
+        &mut self,
+        g: &Graph,
+        mut component: Vec<usize>,
+    ) -> Result<Vec<(usize, TypeIdentifierTypeObjectPair)>> {
+        // Sorted by qualified name: the SCCIndex, from 1.
+        component.sort_by(|&a, &b| g.types[a].name().cmp(&g.types[b].name()));
+        let scc_length = i32::try_from(component.len())
+            .map_err(|_| Error::InvalidType("too many types".into()))?;
+        let kind = self.kind;
+        let set_ids = |ids: &mut HashMap<usize, TypeIdentifier>, hash: EquivalenceHash| {
+            for (n, &v) in component.iter().enumerate() {
+                let sc_component_id = if kind == EK_COMPLETE {
+                    TypeObjectHashId::Complete(hash)
+                } else {
+                    TypeObjectHashId::Minimal(hash)
+                };
+                ids.insert(
+                    address(&g.types[v]).expect("named"),
+                    TypeIdentifier::StronglyConnectedComponent(StronglyConnectedComponentId {
+                        sc_component_id,
+                        scc_length,
+                        scc_index: n as i32 + 1,
+                    }),
+                );
+            }
+        };
+        // The TypeObjects with the temporary identifiers, of hash 0,
+        // serialized in sequence (XCDR2, little endian) and hashed.
+        set_ids(&mut self.ids, [0; 14]);
+        let temporary = component
+            .iter()
+            .map(|&v| self.type_object(&g.types[v]))
+            .collect::<Result<TypeObjectSeq>>()?;
+        let hash = hash_of(&crate::xcdr2::to_bytes(
+            &temporary,
+            rustorb_cdr::ByteOrder::Little,
+        )?);
+        set_ids(&mut self.ids, hash);
+        // The TypeObjects refer to the others of the component by their
+        // final identifiers.
+        component
+            .iter()
+            .map(|&v| {
+                let ty = &g.types[v];
+                Ok((
+                    v,
+                    TypeIdentifierTypeObjectPair {
+                        type_identifier: self.ids[&address(ty).expect("named")].clone(),
+                        type_object: self.type_object(ty)?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn identifier(&mut self, ty: &Type) -> Result<TypeIdentifier> {
-        Ok(match ty {
+        Ok(match ty.resolve() {
             Type::Primitive(p) => TypeIdentifier::Primitive(p.kind()),
             Type::String { wide, bound } => string_identifier(*wide, *bound),
             Type::Sequence(s) => {
@@ -693,30 +1140,12 @@ impl Builder {
             }
             named => {
                 let address = address(named).expect("a named type");
-                if let Some(&i) = self.done.get(&address) {
-                    return Ok(self.objects[i]
-                        .as_ref()
-                        .expect("built")
-                        .type_identifier
-                        .clone());
-                }
-                if self.in_progress.contains(&address) {
-                    return Err(Error::Unsupported(
-                        "types that depend on each other (DDS-XTypes 7.3.4.8)",
-                    ));
-                }
-                let index = self.objects.len();
-                self.objects.push(None);
-                self.in_progress.push(address);
-                let type_object = self.type_object(named)?;
-                self.in_progress.pop();
-                let type_identifier = type_object.type_identifier()?;
-                self.objects[index] = Some(TypeIdentifierTypeObjectPair {
-                    type_identifier: type_identifier.clone(),
-                    type_object,
-                });
-                self.done.insert(address, index);
-                type_identifier
+                self.ids.get(&address).cloned().ok_or_else(|| {
+                    Error::InvalidType(format!(
+                        "{} is used before it is built",
+                        named.name().unwrap_or_default()
+                    ))
+                })?
             }
         })
     }
@@ -1089,9 +1518,13 @@ mod tests {
             ..StructType::default()
         }
         .into();
-        let seq = Type::sequence(inner);
+        let seq = Type::sequence(inner.clone());
         for kind in [EK_MINIMAL, EK_COMPLETE] {
-            let id = Builder::new(kind).identifier(&seq).unwrap();
+            let mut b = Builder::new(kind);
+            // As if built.
+            b.ids
+                .insert(address(&inner).unwrap(), TypeIdentifier::Minimal([1; 14]));
+            let id = b.identifier(&seq).unwrap();
             assert_eq!(id.plain_collection_header().unwrap().equiv_kind, kind);
             assert!(!id.is_fully_descriptive());
         }
@@ -1152,5 +1585,193 @@ mod tests {
         let a = TypeObjects::new(&make()).unwrap();
         let b = TypeObjects::new(&make()).unwrap();
         assert_eq!(a.information, b.information);
+    }
+
+    /// struct TreeNode { long data; sequence<TreeNode> children; }.
+    fn tree() -> Type {
+        let fwd = Type::forward("M::TreeNode");
+        let node = Type::from(StructType {
+            name: "M::TreeNode".into(),
+            members: vec![
+                StructMember::new("data", 0, Type::Primitive(Primitive::Int32)),
+                StructMember::new("children", 1, Type::sequence(fwd.clone())),
+            ],
+            ..StructType::default()
+        });
+        fwd.define(node.clone()).unwrap();
+        node
+    }
+
+    fn scc(id: &TypeIdentifier) -> StronglyConnectedComponentId {
+        match id {
+            TypeIdentifier::StronglyConnectedComponent(c) => *c,
+            other => panic!("not an SCC identifier: {other:?}"),
+        }
+    }
+
+    /// Checks the hash of a component the way 7.3.4.9.2 makes it: the
+    /// TypeObjects with the hash zeroed in their identifiers, in sequence.
+    fn check_hash(pairs: &[&TypeIdentifierTypeObjectPair]) {
+        let c = scc(&pairs[0].type_identifier);
+        let hash = match c.sc_component_id {
+            TypeObjectHashId::Complete(h) | TypeObjectHashId::Minimal(h) => h,
+        };
+        let mut seq = Vec::new();
+        for p in pairs {
+            let mut bytes = p.type_object.to_bytes().unwrap();
+            // The 14 octets of the hash appear only as the hash.
+            let mut i = 0;
+            while i + 14 <= bytes.len() {
+                if bytes[i..i + 14] == hash {
+                    bytes[i..i + 14].fill(0);
+                    i += 14;
+                } else {
+                    i += 1;
+                }
+            }
+            seq.push(TypeObject::from_bytes(&bytes).unwrap());
+        }
+        let bytes = crate::xcdr2::to_bytes(&seq, rustorb_cdr::ByteOrder::Little).unwrap();
+        assert_eq!(hash_of(&bytes), hash);
+    }
+
+    #[test]
+    fn a_type_that_contains_itself() {
+        let objects = TypeObjects::new(&tree()).unwrap();
+        for (pairs, complete) in [(&objects.minimal, false), (&objects.complete, true)] {
+            assert_eq!(pairs.len(), 1);
+            let id = &pairs[0].type_identifier;
+            let c = scc(id);
+            assert_eq!((c.scc_length, c.scc_index), (1, 1));
+            assert_eq!(
+                matches!(c.sc_component_id, TypeObjectHashId::Complete(_)),
+                complete
+            );
+            // The sequence's element is the type itself.
+            let refs = pairs[0].type_object.referenced_types();
+            assert!(refs.contains(&id), "{refs:?}");
+            check_hash(&[&pairs[0]]);
+        }
+        assert_eq!(
+            objects.information.minimal.typeid_with_size.type_id,
+            objects.minimal[0].type_identifier
+        );
+        // The same each time.
+        assert_eq!(TypeObjects::new(&tree()).unwrap(), objects);
+    }
+
+    #[test]
+    fn types_that_contain_each_other() {
+        // struct Root { M::B b; };
+        // struct B { sequence<A> a; };   struct A { @optional B b; long x; };
+        let fwd_a = Type::forward("M::A");
+        let b = Type::from(StructType {
+            name: "M::B".into(),
+            members: vec![StructMember::new("a", 0, Type::sequence(fwd_a.clone()))],
+            ..StructType::default()
+        });
+        let a = Type::from(StructType {
+            name: "M::A".into(),
+            members: vec![
+                StructMember {
+                    optional: true,
+                    ..StructMember::new("b", 0, b.clone())
+                },
+                StructMember::new("x", 1, Type::Primitive(Primitive::Int32)),
+            ],
+            ..StructType::default()
+        });
+        fwd_a.define(a).unwrap();
+        let root = Type::from(StructType {
+            name: "M::Root".into(),
+            members: vec![StructMember::new("b", 0, b)],
+            ..StructType::default()
+        });
+        let objects = TypeObjects::new(&root).unwrap();
+        for pairs in [&objects.minimal, &objects.complete] {
+            // Root, then B and A in the order they are first used.
+            assert_eq!(pairs.len(), 3);
+            assert!(matches!(
+                pairs[0].type_identifier,
+                TypeIdentifier::Minimal(_) | TypeIdentifier::Complete(_)
+            ));
+            let (b, a) = (
+                scc(&pairs[1].type_identifier),
+                scc(&pairs[2].type_identifier),
+            );
+            // Sorted by name: A is 1, B is 2.
+            assert_eq!((a.scc_length, a.scc_index), (2, 1));
+            assert_eq!((b.scc_length, b.scc_index), (2, 2));
+            assert_eq!(a.sc_component_id, b.sc_component_id);
+            check_hash(&[&pairs[2], &pairs[1]]);
+            assert_eq!(
+                pairs[0].type_object.referenced_types(),
+                vec![&pairs[1].type_identifier]
+            );
+        }
+        // B and A are listed as their component.
+        let deps = &objects.information.complete.dependent_typeids;
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            Some(&deps[0].type_id),
+            objects.complete[1]
+                .type_identifier
+                .scc_identifier()
+                .as_ref()
+        );
+        let mut registry = crate::registry::TypeRegistry::new();
+        registry.add_type(&objects);
+        assert_eq!(
+            registry.with_size(&deps[0].type_id).as_ref(),
+            Some(&deps[0])
+        );
+        let root = &objects.information.complete.typeid_with_size.type_id;
+        assert_eq!(
+            registry.dependencies(root).unwrap(),
+            vec![deps[0].type_id.clone()]
+        );
+        // What another participant does with them: checked together.
+        let mut other = crate::registry::TypeRegistry::new();
+        assert_eq!(other.add_pairs(&objects.complete[1..]).unwrap(), 2);
+        assert!(other.knows(&deps[0].type_id));
+        // One alone is not added, nor a component whose hash is wrong.
+        let mut other = crate::registry::TypeRegistry::new();
+        assert_eq!(other.add_pairs(&objects.complete[1..2]).unwrap(), 0);
+        let mut wrong = objects.complete[1..].to_vec();
+        wrong.swap(0, 1);
+        let ids: Vec<_> = wrong.iter().map(|p| p.type_identifier.clone()).collect();
+        wrong[0].type_identifier = ids[1].clone();
+        wrong[1].type_identifier = ids[0].clone();
+        assert_eq!(other.add_pairs(&wrong).unwrap(), 0);
+    }
+
+    #[test]
+    fn endless_and_undefined_types_are_refused() {
+        // struct S { S s; }: no value ends.
+        let fwd = Type::forward("S");
+        let s = Type::from(StructType {
+            name: "S".into(),
+            members: vec![StructMember::new("s", 0, fwd.clone())],
+            ..StructType::default()
+        });
+        fwd.define(s.clone()).unwrap();
+        assert!(matches!(TypeObjects::new(&s), Err(Error::InvalidType(_))));
+        // A forward declaration never defined.
+        let t = Type::from(StructType {
+            name: "T".into(),
+            members: vec![StructMember::new("u", 0, Type::forward("U"))],
+            ..StructType::default()
+        });
+        assert!(matches!(TypeObjects::new(&t), Err(Error::InvalidType(_))));
+        // Defined as another name, or twice.
+        let fwd = Type::forward("V");
+        assert!(fwd.define(t.clone()).is_err());
+        let v = Type::from(StructType {
+            name: "V".into(),
+            ..StructType::default()
+        });
+        fwd.define(v.clone()).unwrap();
+        assert!(fwd.define(v.clone()).is_err());
+        assert_eq!(fwd, v);
     }
 }

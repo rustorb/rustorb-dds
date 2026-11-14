@@ -197,6 +197,7 @@ unsafe fn copy(ty: &Type, src: *mut In, dst: *mut Out) {
     unsafe {
         match ty {
             Type::Alias(a) => copy(&a.related, src, dst),
+            Type::Forward(f) => copy(f.target().expect("defined"), src, dst),
             Type::Primitive(p) => match p {
                 Primitive::Boolean => rdds_out_boolean(dst, rdds_in_boolean(src)),
                 Primitive::Byte => rdds_out_octet(dst, rdds_in_octet(src)),

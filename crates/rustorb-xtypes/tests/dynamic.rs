@@ -404,3 +404,90 @@ fn types_only_dynamic_data_has() {
     want[..2].copy_from_slice(&[2, 1]);
     assert_eq!(data.key_hash().unwrap(), want);
 }
+
+/// struct M::TreeNode { long data; sequence<M::TreeNode> children; },
+/// made with a forward declaration, and struct M::Tree { M::TreeNode root;
+/// string name; }.
+fn tree_types() -> (Type, Type) {
+    let fwd = Type::forward("M::TreeNode");
+    let node = Type::from(StructType {
+        name: "M::TreeNode".into(),
+        extensibility: Extensibility::Appendable,
+        members: vec![
+            StructMember::new("data", 0, Type::Primitive(Primitive::Int32)),
+            StructMember::new("children", 1, Type::sequence(fwd.clone())),
+        ],
+        ..StructType::default()
+    });
+    fwd.define(node.clone()).unwrap();
+    let tree = Type::from(StructType {
+        name: "M::Tree".into(),
+        extensibility: Extensibility::Mutable,
+        members: vec![
+            StructMember::new("root", 0, node.clone()),
+            StructMember::new("name", 1, Type::string()),
+        ],
+        ..StructType::default()
+    });
+    (node, tree)
+}
+
+#[test]
+fn recursive_types() {
+    let (_, tree) = tree_types();
+    let ty = DynamicType::from(tree.clone());
+    let mut data = DynamicDataFactory::create_data(&ty);
+    data.set_string_value(1, "t").unwrap();
+    let root = data.loan_value(0).unwrap();
+    root.set_int32_value(0, 1).unwrap();
+    // Two children, the second with a child of its own.
+    for (i, v) in [(0, 2), (1, 3)] {
+        root.loan_value(1)
+            .unwrap()
+            .loan_value(i)
+            .unwrap()
+            .set_int32_value(0, v)
+            .unwrap();
+    }
+    root.loan_value(1)
+        .unwrap()
+        .loan_value(1)
+        .unwrap()
+        .loan_value(1)
+        .unwrap()
+        .loan_value(0)
+        .unwrap()
+        .set_int32_value(0, 4)
+        .unwrap();
+    for (encoding, order) in FORMATS {
+        let payload = data.to_payload(encoding, order).unwrap();
+        let back = DynamicData::from_payload(&ty, &payload).unwrap();
+        assert_eq!(back, data, "{encoding:?} {order:?}");
+    }
+    // Made back from the TypeObjects, COMPLETE and MINIMAL.
+    let objects = TypeObjects::new(&tree).unwrap();
+    let mut registry = TypeRegistry::new();
+    registry.add_type(&objects);
+    let complete =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.complete_id(), &registry)
+            .unwrap();
+    assert!(complete.equals(&ty));
+    let minimal =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.minimal_id(), &registry)
+            .unwrap();
+    let payload = data.to_payload(Encoding::Xcdr2, ByteOrder::Little).unwrap();
+    for t in [&complete, &minimal] {
+        let back = DynamicData::from_payload(t, &payload).unwrap();
+        assert_eq!(
+            back.to_payload(Encoding::Xcdr2, ByteOrder::Little).unwrap(),
+            payload
+        );
+    }
+    // The type made from the COMPLETE TypeObjects has the same ones.
+    assert_eq!(
+        TypeObjects::new(complete.as_type()).unwrap().information,
+        objects.information
+    );
+    // A recursive type has no bound to its key holder: none here.
+    assert!(data.key_hash().is_ok());
+}

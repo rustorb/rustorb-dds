@@ -2140,6 +2140,9 @@ fn request_missing_types(inner: &mut Inner) {
             }
         }
         for id in ids {
+            // A type of a strongly connected component is asked for as the
+            // component (DDS-XTypes 1.3, 7.6.3.3.4.2).
+            let id = id.scc_identifier().unwrap_or(id);
             if !registry.knows(&id) && inner.type_requests.insert((id.clone(), remote.prefix)) {
                 asks.entry(remote.prefix).or_default().push(id);
             }
@@ -2172,10 +2175,13 @@ fn request_complete_types(inner: &mut Inner, server: GuidPrefix, info: &TypeInfo
     let requests = &mut inner.type_requests;
     let type_ids: Vec<TypeIdentifier> = std::iter::once(&c.typeid_with_size)
         .chain(&c.dependent_typeids)
-        .map(|t| &t.type_id)
+        .map(|t| {
+            t.type_id
+                .scc_identifier()
+                .unwrap_or_else(|| t.type_id.clone())
+        })
         .filter(|id| !registry.knows(id))
-        .filter(|id| requests.insert(((*id).clone(), server)))
-        .cloned()
+        .filter(|id| requests.insert((id.clone(), server)))
         .collect();
     let listed = i32::try_from(c.dependent_typeids.len()).unwrap_or(i32::MAX);
     let dependencies = c.dependent_typeid_count > listed
@@ -2215,7 +2221,7 @@ fn type_lookup_replied(inner: &mut Inner, r: TypeLookupReplied, now: Instant) {
             let type_ids: Vec<TypeIdentifier> = out
                 .dependent_typeids
                 .into_iter()
-                .map(|t| t.type_id)
+                .map(|t| t.type_id.scc_identifier().unwrap_or(t.type_id))
                 .filter(|id| !registry.knows(id))
                 .collect();
             let type_ids: Vec<TypeIdentifier> = type_ids

@@ -352,53 +352,63 @@ impl TypeLookup {
         if request.header.instance_name != self.instance_name {
             return;
         }
-        let (remote_ex, data) = match request.data {
-            TypeLookupCall::GetTypes(call) => {
-                let mut seen = HashSet::new();
-                let types = call
-                    .type_ids
-                    .iter()
-                    .filter(|id| seen.insert(*id))
-                    .filter_map(|id| {
-                        registry.get(id).map(|o| {
-                            rustorb_xtypes::type_object::TypeIdentifierTypeObjectPair {
-                                type_identifier: id.clone(),
-                                type_object: o.clone(),
-                            }
-                        })
-                    })
-                    .collect();
-                (
-                    REMOTE_EX_OK,
-                    TypeLookupReturn::GetTypes(Ok(GetTypesOut {
-                        types,
-                        complete_to_minimal: Vec::new(),
-                    })),
-                )
-            }
-            TypeLookupCall::GetTypeDependencies(call) => {
-                // All of them at once: no continuation point.
-                let asked: HashSet<_> = call.type_ids.iter().collect();
-                let mut seen = HashSet::new();
-                let dependent_typeids = call
-                    .type_ids
-                    .iter()
-                    .flat_map(|id| registry.dependencies(id).unwrap_or_default())
-                    .filter(|id| !asked.contains(id) && seen.insert(id.clone()))
-                    .filter_map(|id| registry.with_size(&id))
-                    .collect();
-                (
-                    REMOTE_EX_OK,
-                    TypeLookupReturn::GetTypeDependencies(Ok(GetTypeDependenciesOut {
-                        dependent_typeids,
-                        continuation_point: None,
-                    })),
-                )
-            }
-            TypeLookupCall::Unknown(d) => {
-                (REMOTE_EX_UNKNOWN_OPERATION, TypeLookupReturn::Unknown(d))
-            }
-        };
+        let (remote_ex, data) =
+            match request.data {
+                TypeLookupCall::GetTypes(call) => {
+                    // The types of a strongly connected component go together,
+                    // all or none (7.6.3.3.4.2), even when one is asked for
+                    // alone.
+                    let mut seen = HashSet::new();
+                    let types =
+                        call.type_ids
+                            .iter()
+                            .flat_map(|id| {
+                                if id.scc_identifier().is_some() {
+                                    registry.component(id).unwrap_or_default()
+                                } else {
+                                    registry
+                                .get(id)
+                                .map(|o| rustorb_xtypes::type_object::TypeIdentifierTypeObjectPair {
+                                    type_identifier: id.clone(),
+                                    type_object: o.clone(),
+                                })
+                                .into_iter()
+                                .collect()
+                                }
+                            })
+                            .filter(|p| seen.insert(p.type_identifier.clone()))
+                            .collect();
+                    (
+                        REMOTE_EX_OK,
+                        TypeLookupReturn::GetTypes(Ok(GetTypesOut {
+                            types,
+                            complete_to_minimal: Vec::new(),
+                        })),
+                    )
+                }
+                TypeLookupCall::GetTypeDependencies(call) => {
+                    // All of them at once: no continuation point.
+                    let asked: HashSet<_> = call.type_ids.iter().collect();
+                    let mut seen = HashSet::new();
+                    let dependent_typeids = call
+                        .type_ids
+                        .iter()
+                        .flat_map(|id| registry.dependencies(id).unwrap_or_default())
+                        .filter(|id| !asked.contains(id) && seen.insert(id.clone()))
+                        .filter_map(|id| registry.with_size(&id))
+                        .collect();
+                    (
+                        REMOTE_EX_OK,
+                        TypeLookupReturn::GetTypeDependencies(Ok(GetTypeDependenciesOut {
+                            dependent_typeids,
+                            continuation_point: None,
+                        })),
+                    )
+                }
+                TypeLookupCall::Unknown(d) => {
+                    (REMOTE_EX_UNKNOWN_OPERATION, TypeLookupReturn::Unknown(d))
+                }
+            };
         let reply = TypeLookupReply {
             header: ReplyHeader {
                 related_request_id: request.header.request_id,

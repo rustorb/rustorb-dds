@@ -16,7 +16,7 @@ pub struct DynamicType(Type);
 impl DynamicType {
     /// The DynamicType of `ty`.
     pub fn new(ty: Type) -> DynamicType {
-        DynamicType(ty)
+        DynamicType(ty.resolve().clone())
     }
 
     /// The type.
@@ -43,23 +43,23 @@ impl DynamicType {
     /// `get_descriptor`.
     pub fn get_descriptor(&self) -> TypeDescriptor {
         let mut d = TypeDescriptor::new(self.get_kind(), &self.get_name());
-        match &self.0 {
+        match self.0.resolve() {
             Type::Primitive(_) => {}
             Type::String { bound, .. } => d.bound = vec![*bound],
             Type::Sequence(s) => {
-                d.element_type = Some(DynamicType(s.element.ty.clone()));
+                d.element_type = Some(DynamicType::new(s.element.ty.clone()));
                 d.bound = vec![s.bound];
             }
             Type::Array(a) => {
-                d.element_type = Some(DynamicType(a.element.ty.clone()));
+                d.element_type = Some(DynamicType::new(a.element.ty.clone()));
                 d.bound = a.dimensions.clone();
             }
             Type::Map(m) => {
-                d.key_element_type = Some(DynamicType(m.key.ty.clone()));
-                d.element_type = Some(DynamicType(m.element.ty.clone()));
+                d.key_element_type = Some(DynamicType::new(m.key.ty.clone()));
+                d.element_type = Some(DynamicType::new(m.element.ty.clone()));
                 d.bound = vec![m.bound];
             }
-            Type::Alias(a) => d.base_type = Some(DynamicType(a.related.clone())),
+            Type::Alias(a) => d.base_type = Some(DynamicType::new(a.related.clone())),
             Type::Enum(e) => {
                 d.bound = vec![u32::from(e.bit_bound)];
                 d.extensibility_kind = e.extensibility;
@@ -74,10 +74,11 @@ impl DynamicType {
                 d.is_nested = s.nested;
             }
             Type::Union(u) => {
-                d.discriminator_type = Some(DynamicType(u.discriminator.clone()));
+                d.discriminator_type = Some(DynamicType::new(u.discriminator.clone()));
                 d.extensibility_kind = u.extensibility;
                 d.is_nested = u.nested;
             }
+            Type::Forward(f) => undefined(f),
         }
         d
     }
@@ -124,7 +125,7 @@ impl DynamicType {
                 .map(|(i, m)| MemberDescriptor {
                     name: m.name.clone(),
                     id: m.id,
-                    r#type: DynamicType(m.ty.clone()),
+                    r#type: DynamicType::new(m.ty.clone()),
                     index: i as u32,
                     try_construct_kind: m.try_construct,
                     is_key: m.key,
@@ -141,7 +142,7 @@ impl DynamicType {
                 .map(|(i, m)| MemberDescriptor {
                     name: m.name.clone(),
                     id: m.id,
-                    r#type: DynamicType(m.ty.clone()),
+                    r#type: DynamicType::new(m.ty.clone()),
                     index: i as u32,
                     label: m.labels.clone(),
                     is_default_label: m.default,
@@ -157,7 +158,7 @@ impl DynamicType {
                 .map(|(i, l)| MemberDescriptor {
                     name: l.name.clone(),
                     id: l.value as MemberId,
-                    r#type: DynamicType(ty.clone()),
+                    r#type: DynamicType::new(ty.clone()),
                     index: i as u32,
                     is_default_label: l.default,
                     ..MemberDescriptor::default()
@@ -170,7 +171,7 @@ impl DynamicType {
                 .map(|(i, f)| MemberDescriptor {
                     name: f.name.clone(),
                     id: MemberId::from(f.position),
-                    r#type: DynamicType(Type::Primitive(Primitive::Boolean)),
+                    r#type: DynamicType::new(Type::Primitive(Primitive::Boolean)),
                     index: i as u32,
                     ..MemberDescriptor::default()
                 })
@@ -188,13 +189,13 @@ impl DynamicType {
 
 impl From<Type> for DynamicType {
     fn from(ty: Type) -> DynamicType {
-        DynamicType(ty)
+        DynamicType::new(ty)
     }
 }
 
 /// The type kind of `ty`.
 pub(crate) fn kind_of(ty: &Type) -> TypeKind {
-    match ty {
+    match ty.resolve() {
         Type::Primitive(p) => p.kind(),
         Type::String { wide: false, .. } => TK_STRING8,
         Type::String { wide: true, .. } => TK_STRING16,
@@ -206,15 +207,29 @@ pub(crate) fn kind_of(ty: &Type) -> TypeKind {
         Type::Bitmask(_) => TK_BITMASK,
         Type::Struct(_) => TK_STRUCTURE,
         Type::Union(_) => TK_UNION,
+        Type::Forward(f) => undefined(f),
     }
 }
 
 /// `ty` with its aliases resolved.
 pub(crate) fn resolve(mut ty: &Type) -> &Type {
-    while let Type::Alias(a) = ty {
-        ty = &a.related;
+    loop {
+        match ty {
+            Type::Alias(a) => ty = &a.related,
+            Type::Forward(f) => match f.target() {
+                Some(t) => ty = t,
+                None => return ty,
+            },
+            _ => return ty,
+        }
     }
-    ty
+}
+
+/// A forward declaration used before it is defined: a type that should
+/// not have been built ([`DynamicTypeBuilder::build`] and
+/// [`TypeObjects::new`] refuse them).
+pub(crate) fn undefined(f: &ForwardType) -> ! {
+    panic!("the forward declaration {} is not defined", f.name())
 }
 
 /// The members of a struct, those of its base types first.
@@ -338,7 +353,7 @@ impl Default for MemberDescriptor {
         MemberDescriptor {
             name: String::new(),
             id: super::MEMBER_ID_INVALID,
-            r#type: DynamicType(Type::Primitive(Primitive::Int32)),
+            r#type: DynamicType::new(Type::Primitive(Primitive::Int32)),
             default_value: String::new(),
             index: 0,
             label: Vec::new(),
@@ -377,7 +392,7 @@ impl DynamicTypeBuilderFactory {
             TK_CHAR16 => Primitive::Char16,
             _ => return None,
         };
-        Some(DynamicType(Type::Primitive(p)))
+        Some(DynamicType::new(Type::Primitive(p)))
     }
 
     /// `create_type`.
@@ -411,7 +426,7 @@ impl DynamicTypeBuilderFactory {
         registry: &TypeRegistry,
     ) -> Result<DynamicTypeBuilder> {
         let ty = super::convert::type_of_object(type_object, registry)?;
-        Self::create_type_copy(&DynamicType(ty))
+        Self::create_type_copy(&DynamicType::new(ty))
     }
 
     /// The type a TypeIdentifier identifies, with the TypeObjects in
@@ -706,7 +721,7 @@ impl DynamicTypeBuilder {
                 }));
             }
         };
-        Ok(DynamicType(ty))
+        Ok(DynamicType::new(ty))
     }
 }
 

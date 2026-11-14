@@ -325,6 +325,8 @@ pub(crate) fn describe<'py>(py: Python<'py>, ty: &Type) -> PyResult<Bound<'py, P
             describe(py, &m.element.ty)?,
             obj(&m.bound)?,
         ]),
+        // A reference back to a type being described (a recursive type).
+        Type::Forward(f) => tuple(vec![obj(&"ref")?, obj(&f.name())?]),
         Type::Alias(a) => tuple(vec![
             obj(&"alias")?,
             obj(&a.name.as_str())?,

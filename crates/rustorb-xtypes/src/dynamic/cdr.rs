@@ -609,6 +609,12 @@ fn read(ty: &Type, dec: &mut Decoder<'_>) -> Result<DynamicData> {
         Type::Struct(s) => read_struct(s, dec)?,
         Type::Union(u) => read_union(u, dec)?,
         Type::Alias(_) => unreachable!("resolved"),
+        Type::Forward(f) => {
+            return Err(Error::InvalidType(format!(
+                "the forward declaration {} is not defined",
+                f.name()
+            )));
+        }
     };
     Ok(DynamicData {
         ty: ty.clone(),
@@ -807,6 +813,8 @@ pub(crate) fn max_key_end(ty: &Type, offset: usize) -> Option<usize> {
             }
             offset
         }
+        // A type that contains itself has no bound.
+        Type::Struct(_) | Type::Union(_) if crate::types::uses_itself(ty) => return None,
         Type::Struct(s) => {
             let mut members = struct_members(s);
             if members.iter().any(|m| m.key) {
@@ -831,6 +839,7 @@ pub(crate) fn max_key_end(ty: &Type, offset: usize) -> Option<usize> {
             end
         }
         Type::Alias(_) => unreachable!("resolved"),
+        Type::Forward(_) => return None,
     })
 }
 

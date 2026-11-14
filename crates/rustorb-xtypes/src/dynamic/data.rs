@@ -196,6 +196,7 @@ impl DynamicData {
             }
             Type::Map(_) => Value::Map(Vec::new()),
             Type::Alias(_) => unreachable!("resolved"),
+            Type::Forward(f) => super::ty::undefined(f),
             Type::Enum(e) => Value::Enum(enum_default(e)),
             Type::Bitmask(_) => Value::Bitmask(0),
             Type::Struct(s) => Value::Struct(
