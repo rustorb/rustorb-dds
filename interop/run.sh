@@ -273,9 +273,9 @@ run_case() {
     tail -n 5 "$dir/pub.log" "$dir/sub.log"
     if [ "${DUMP:-0}" = 1 ] && [ -f "$dir/capture.pcap" ]; then
       echo "--- $name: RTPS trace (domain $DOMAIN)"
-      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --trace | head -n 120
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --trace 2>/dev/null | uniq | head -n "${DUMP_LINES:-200}"
       echo "--- $name: first user DATA"
-      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --max 2 | head -n 40
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --max 2 2>/dev/null | head -n 40
     fi
   fi
 }
