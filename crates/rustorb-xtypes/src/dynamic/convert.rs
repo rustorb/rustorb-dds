@@ -56,6 +56,18 @@ fn hex(hash: &[u8]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A field of a bitset.
+fn bitfield(common: &CommonBitfield, name: String) -> Result<Bitfield> {
+    Ok(Bitfield {
+        name,
+        position: common.position,
+        bitcount: common.bitcount,
+        holder: Primitive::of_kind(common.holder_type).ok_or(Error::Invalid(
+            "a bitfield holder that is not a primitive type",
+        ))?,
+    })
+}
+
 /// The name a minimal TypeObject gives no name to: after its
 /// TypeIdentifier.
 fn minimal_name(id: Option<&TypeIdentifier>) -> String {
@@ -84,6 +96,8 @@ fn object_name(object: &TypeObject, id: &TypeIdentifier) -> String {
         CompleteTypeObject::Union(t) => t.header.detail.type_name.clone(),
         CompleteTypeObject::Enumerated(t) => t.header.detail.type_name.clone(),
         CompleteTypeObject::Bitmask(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Bitset(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Annotation(t) => t.header.annotation_name.clone(),
         _ => String::new(),
     }
 }
@@ -286,10 +300,28 @@ impl<'a> Converter<'a> {
                     })
                     .collect(),
             }),
-            CompleteTypeObject::Annotation(_) => {
-                return Err(Error::Unsupported("annotation types"));
-            }
-            CompleteTypeObject::Bitset(_) => return Err(Error::Unsupported("bitset types")),
+            CompleteTypeObject::Annotation(t) => Type::from(AnnotationType {
+                name: t.header.annotation_name.clone(),
+                members: t
+                    .member_seq
+                    .iter()
+                    .map(|m| {
+                        Ok(AnnotationParameter {
+                            name: m.name.clone(),
+                            ty: self.identifier(&m.common.member_type_id)?,
+                            default: Some(m.default_value.clone()),
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            CompleteTypeObject::Bitset(t) => Type::from(BitsetType {
+                name: t.header.detail.type_name.clone(),
+                fields: t
+                    .field_seq
+                    .iter()
+                    .map(|f| bitfield(&f.common, f.detail.name.clone()))
+                    .collect::<Result<_>>()?,
+            }),
             CompleteTypeObject::Extended(_) => {
                 return Err(Error::Unsupported("an unknown type kind"));
             }
@@ -375,10 +407,28 @@ impl<'a> Converter<'a> {
                     })
                     .collect(),
             }),
-            MinimalTypeObject::Annotation(_) => {
-                return Err(Error::Unsupported("annotation types"));
-            }
-            MinimalTypeObject::Bitset(_) => return Err(Error::Unsupported("bitset types")),
+            MinimalTypeObject::Annotation(t) => Type::from(AnnotationType {
+                name,
+                members: t
+                    .member_seq
+                    .iter()
+                    .map(|m| {
+                        Ok(AnnotationParameter {
+                            name: format!("p{}", hex(&m.name_hash)),
+                            ty: self.identifier(&m.common.member_type_id)?,
+                            default: Some(m.default_value.clone()),
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            MinimalTypeObject::Bitset(t) => Type::from(BitsetType {
+                name,
+                fields: t
+                    .field_seq
+                    .iter()
+                    .map(|f| bitfield(&f.common, format!("b{}", f.common.position)))
+                    .collect::<Result<_>>()?,
+            }),
             MinimalTypeObject::Extended(_) => {
                 return Err(Error::Unsupported("an unknown type kind"));
             }

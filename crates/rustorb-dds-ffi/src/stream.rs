@@ -6,7 +6,9 @@
 //! value...), the elements of an array (all its dimensions, row by row),
 //! whether an optional member is present and then its value if it is,
 //! the discriminator of a union and then the value of the member it
-//! selects (nothing when it selects none). Aliases and `@external` are
+//! selects (nothing when it selects none), a bitset as one integer (as
+//! a bitmask: the bits of its fields, the first field in the lowest
+//! bits). Aliases and `@external` are
 //! transparent. The elements of a sequence or array of a primitive type
 //! other than `float128` go in one call (`rdds_out_*_array`) after the
 //! length of a sequence. An input stream (`rdds_in`) gives the values of
@@ -259,7 +261,8 @@ fn fill(d: &mut DynamicData, r: &mut Reader<'_>) -> Res {
             }
             v => return Err(mismatch("enum", v)),
         },
-        TK_BITMASK => match r.take("bitmask")? {
+        // A bitset as one integer, as the bitmask: its fields' bits.
+        TK_BITMASK | TK_BITSET => match r.take("bitmask")? {
             Value::Bitmask(x) => {
                 let x = *x;
                 if let Ok(x) = u8::try_from(x) {
@@ -435,7 +438,7 @@ fn emit(d: &DynamicData, out: &mut Vec<Value>) -> Res {
             d.get_wstring_value(ME)?.encode_utf16().collect(),
         )),
         TK_ENUM => out.push(Value::Enum(d.get_int32_value(ME)?)),
-        TK_BITMASK => out.push(Value::Bitmask(d.get_uint64_value(ME)?)),
+        TK_BITMASK | TK_BITSET => out.push(Value::Bitmask(d.get_uint64_value(ME)?)),
         TK_SEQUENCE | TK_ARRAY => {
             let n = d.get_item_count();
             if kind == TK_SEQUENCE {

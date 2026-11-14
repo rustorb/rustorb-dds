@@ -444,6 +444,8 @@ impl ToTypeCode {
             }
             Type::Map(_) => return unsupported("map"),
             Type::Bitmask(b) => return unsupported(format!("the bitmask {}", b.name)),
+            Type::Bitset(b) => return unsupported(format!("the bitset {}", b.name)),
+            Type::Annotation(a) => return unsupported(format!("the annotation {}", a.name)),
             Type::Alias(a) => &a.name,
             Type::Enum(e) => &e.name,
             Type::Struct(s) => &s.name,

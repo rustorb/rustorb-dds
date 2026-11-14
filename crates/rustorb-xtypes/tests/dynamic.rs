@@ -7,6 +7,9 @@ use rustorb_typesupport::TopicType;
 
 use rustorb_xtypes::dynamic::*;
 use rustorb_xtypes::registry::TypeRegistry;
+use rustorb_xtypes::type_object::{
+    AnnotationParameterValue, TK_ANNOTATION, TK_BITSET, TK_BOOLEAN, TK_FLOAT64, TK_INT8, TK_UINT8,
+};
 use rustorb_xtypes::types::*;
 
 /// See tests/cyclonedds.rs.
@@ -490,4 +493,217 @@ fn recursive_types() {
     );
     // A recursive type has no bound to its key holder: none here.
     assert!(data.key_hash().is_ok());
+}
+
+/// `bitset Flags { bitfield<3> mode; bitfield<1, boolean> on; bitfield<2>;
+/// bitfield<5, int8> delta; }` in `struct Status { Flags flags; long n; }`.
+fn bitset_types() -> (Type, Type) {
+    let flags = Type::from(BitsetType {
+        name: "Flags".into(),
+        fields: vec![
+            Bitfield {
+                name: "mode".into(),
+                position: 0,
+                bitcount: 3,
+                holder: Primitive::Uint8,
+            },
+            Bitfield {
+                name: "on".into(),
+                position: 3,
+                bitcount: 1,
+                holder: Primitive::Boolean,
+            },
+            Bitfield {
+                name: "delta".into(),
+                position: 6,
+                bitcount: 5,
+                holder: Primitive::Int8,
+            },
+        ],
+    });
+    let status = Type::from(StructType {
+        name: "Status".into(),
+        members: vec![
+            StructMember::new("flags", 0, flags.clone()),
+            StructMember::new("n", 1, Type::Primitive(Primitive::Int32)),
+        ],
+        extensibility: rustorb_cdr::xcdr::Extensibility::Final,
+        ..StructType::default()
+    });
+    (flags, status)
+}
+
+#[test]
+fn bitsets() {
+    let (flags, status) = bitset_types();
+    let ty = DynamicType::from(status.clone());
+    let mut data = DynamicDataFactory::create_data(&ty);
+    data.set_int32_value(1, 7).unwrap();
+    let f = data.loan_value(0).unwrap();
+    assert_eq!(f.get_member_id_by_name("delta"), 6);
+    f.set_uint8_value(0, 5).unwrap();
+    f.set_boolean_value(3, true).unwrap();
+    f.set_int8_value(6, -3).unwrap();
+    // Out of the field's bits, and no field at 4.
+    assert!(f.set_uint8_value(0, 8).is_err());
+    assert!(f.set_int8_value(6, 16).is_err());
+    assert!(f.set_uint8_value(4, 0).is_err());
+    assert_eq!(f.get_uint8_value(0).unwrap(), 5);
+    assert!(f.get_boolean_value(3).unwrap());
+    assert_eq!(f.get_int8_value(6).unwrap(), -3);
+    // 11 bits: a uint16 holds them all.
+    let bits: u16 = 5 | 1 << 3 | ((-3i16 as u16) & 0x1f) << 6;
+    assert_eq!(f.get_uint16_value(MEMBER_ID_INVALID).unwrap(), bits);
+    for (encoding, order) in FORMATS {
+        let payload = data.to_payload(encoding, order).unwrap();
+        // The encapsulation, then the uint16 (Status is final).
+        let holder = match order {
+            ByteOrder::Little => bits.to_le_bytes(),
+            ByteOrder::Big => bits.to_be_bytes(),
+        };
+        assert_eq!(payload[4..6], holder, "{encoding:?} {order:?}");
+        let back = DynamicData::from_payload(&ty, &payload).unwrap();
+        assert_eq!(back, data, "{encoding:?} {order:?}");
+    }
+    // Made back from the TypeObjects, COMPLETE and MINIMAL.
+    let objects = TypeObjects::new(&status).unwrap();
+    let mut registry = TypeRegistry::new();
+    registry.add_type(&objects);
+    let complete =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.complete_id(), &registry)
+            .unwrap();
+    assert!(complete.equals(&ty));
+    let minimal =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.minimal_id(), &registry)
+            .unwrap();
+    let payload = data.to_payload(Encoding::Xcdr2, ByteOrder::Little).unwrap();
+    let back = DynamicData::from_payload(&minimal, &payload).unwrap();
+    assert_eq!(
+        back.to_payload(Encoding::Xcdr2, ByteOrder::Little).unwrap(),
+        payload
+    );
+    // The same bitset, by DynamicTypeBuilder: bit counts are its bound.
+    let mut d = TypeDescriptor::new(TK_BITSET, "Flags");
+    d.bound = vec![3, 1, 5];
+    let mut b = DynamicTypeBuilderFactory::create_type(d).unwrap();
+    for (name, id, kind) in [
+        ("mode", 0, TK_UINT8),
+        ("on", 3, TK_BOOLEAN),
+        ("delta", 6, TK_INT8),
+    ] {
+        b.add_member(MemberDescriptor {
+            name: name.into(),
+            id,
+            r#type: DynamicTypeBuilderFactory::get_primitive_type(kind).unwrap(),
+            ..MemberDescriptor::default()
+        })
+        .unwrap();
+    }
+    let built = b.build().unwrap();
+    assert!(built.equals(&DynamicType::from(flags)));
+    assert_eq!(built.get_kind(), TK_BITSET);
+}
+
+#[test]
+fn annotation_types() {
+    let unit = Type::from(EnumType {
+        name: "Unit".into(),
+        bit_bound: 32,
+        extensibility: rustorb_cdr::xcdr::Extensibility::Final,
+        literals: vec![
+            EnumLiteral {
+                name: "METER".into(),
+                value: 0,
+                default: false,
+            },
+            EnumLiteral {
+                name: "FOOT".into(),
+                value: 1,
+                default: true,
+            },
+        ],
+    });
+    let range = Type::from(AnnotationType {
+        name: "Measured".into(),
+        members: vec![
+            AnnotationParameter {
+                name: "unit".into(),
+                ty: unit,
+                default: None,
+            },
+            AnnotationParameter {
+                name: "scale".into(),
+                ty: Type::Primitive(Primitive::Float64),
+                default: Some(AnnotationParameterValue::Float64(1.5)),
+            },
+            AnnotationParameter {
+                name: "label".into(),
+                ty: Type::string(),
+                default: None,
+            },
+        ],
+    });
+    let objects = TypeObjects::new(&range).unwrap();
+    let mut registry = TypeRegistry::new();
+    registry.add_type(&objects);
+    let complete =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.complete_id(), &registry)
+            .unwrap();
+    assert_eq!(complete.get_kind(), TK_ANNOTATION);
+    assert_eq!(
+        TypeObjects::new(complete.as_type()).unwrap().information,
+        objects.information
+    );
+    let minimal =
+        DynamicTypeBuilderFactory::create_type_w_type_identifier(objects.minimal_id(), &registry)
+            .unwrap();
+    // MINIMAL names are hashes: the parameters keep only their types.
+    assert_eq!(minimal.get_kind(), TK_ANNOTATION);
+    assert_eq!(minimal.get_member_count(), 3);
+    // Its members, with their defaults.
+    let ty = DynamicType::from(range);
+    assert_eq!(ty.get_member_count(), 3);
+    let data = DynamicDataFactory::create_data(&ty);
+    assert_eq!(data.get_int32_value(0).unwrap(), 1);
+    assert_eq!(data.get_float64_value(1).unwrap(), 1.5);
+    assert_eq!(data.get_string_value(2).unwrap(), "");
+    // The same annotation, by DynamicTypeBuilder.
+    let mut b =
+        DynamicTypeBuilderFactory::create_type(TypeDescriptor::new(TK_ANNOTATION, "Measured"))
+            .unwrap();
+    for (id, name, ty, default) in [
+        (
+            0,
+            "unit",
+            ty.get_member(0).unwrap().get_descriptor().r#type.clone(),
+            "",
+        ),
+        (
+            1,
+            "scale",
+            DynamicTypeBuilderFactory::get_primitive_type(TK_FLOAT64).unwrap(),
+            "1.5",
+        ),
+        (
+            2,
+            "label",
+            DynamicTypeBuilderFactory::create_string_type(0)
+                .unwrap()
+                .build()
+                .unwrap(),
+            "",
+        ),
+    ] {
+        b.add_member(MemberDescriptor {
+            name: name.into(),
+            id,
+            r#type: ty,
+            default_value: default.into(),
+            ..MemberDescriptor::default()
+        })
+        .unwrap();
+    }
+    assert!(b.build().unwrap().equals(&ty));
+    // Annotations are not serialized.
+    assert!(data.to_payload(Encoding::Xcdr2, ByteOrder::Little).is_err());
 }

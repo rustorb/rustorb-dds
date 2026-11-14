@@ -230,7 +230,8 @@ unsafe fn copy(ty: &Type, src: *mut In, dst: *mut Out) {
                 rdds_out_wstring(dst, p, n);
             }
             Type::Enum(_) => rdds_out_enum(dst, rdds_in_enum(src)),
-            Type::Bitmask(_) => rdds_out_bitmask(dst, rdds_in_bitmask(src)),
+            Type::Bitmask(_) | Type::Bitset(_) => rdds_out_bitmask(dst, rdds_in_bitmask(src)),
+            Type::Annotation(_) => panic!("annotations have no samples"),
             Type::Sequence(s) => {
                 let n = rdds_in_length(src);
                 rdds_out_length(dst, n);
@@ -1120,5 +1121,168 @@ fn security_from_the_property_qos() {
         }
         rdds_participant_release(p1);
         rdds_participant_release(p2);
+    }
+}
+
+#[test]
+fn recursive_types_and_bitsets() {
+    use rustorb_xtypes::types::*;
+    // `@appendable struct M::Node { long data; sequence<M::Node> children; };`
+    let expected_node = {
+        let fwd = Type::forward("M::Node");
+        let node = Type::from(StructType {
+            name: "M::Node".into(),
+            extensibility: Extensibility::Appendable,
+            members: vec![
+                StructMember::new("data", 0, Type::Primitive(Primitive::Int32)),
+                StructMember::new("children", 1, Type::sequence(fwd.clone())),
+            ],
+            ..StructType::default()
+        });
+        fwd.define(node.clone()).unwrap();
+        node
+    };
+    let long = prim(0x04);
+    unsafe {
+        let mut fwd = null_mut();
+        ok(rdds_type_forward(c("M::Node").as_ptr(), &mut fwd));
+        let fwd = T(fwd);
+        let mut seq = null_mut();
+        ok(rdds_type_sequence(fwd.0, 0, &mut seq));
+        let seq = T(seq);
+        let mut b = null_mut();
+        ok(rdds_struct_builder_new(
+            c("M::Node").as_ptr(),
+            1,
+            0,
+            null(),
+            &mut b,
+        ));
+        ok(rdds_struct_builder_add_member(
+            b,
+            c("data").as_ptr(),
+            0,
+            long.0,
+            0,
+            null(),
+        ));
+        ok(rdds_struct_builder_add_member(
+            b,
+            c("children").as_ptr(),
+            1,
+            seq.0,
+            0,
+            null(),
+        ));
+        let mut node = null_mut();
+        ok(rdds_struct_builder_build(b, &mut node));
+        rdds_struct_builder_release(b);
+        let node = T(node);
+        // Not yet defined: no TypeObjects.
+        let (mut m, mut cm) = ([0; 14], [0; 14]);
+        assert_ne!(
+            rdds_type_hashes(node.0, m.as_mut_ptr(), cm.as_mut_ptr()),
+            OK
+        );
+        ok(rdds_type_define(fwd.0, node.0));
+        assert_eq!(rdds_type_define(fwd.0, node.0), BAD_PARAMETER);
+        assert_eq!((*node.0).as_type(), &expected_node);
+        // Identified by its strongly connected component: no hashes.
+        assert_eq!(
+            rdds_type_hashes(node.0, m.as_mut_ptr(), cm.as_mut_ptr()),
+            BAD_PARAMETER
+        );
+
+        // A node with one child, through the streams.
+        let mut out = null_mut();
+        ok(rdds_out_new(&mut out));
+        rdds_out_int32(out, 1);
+        rdds_out_length(out, 1);
+        rdds_out_int32(out, 2);
+        rdds_out_length(out, 0);
+        let (mut p, mut n) = (null_mut(), 0);
+        ok(rdds_type_serialize(node.0, out, true, &mut p, &mut n));
+        let mut src = null_mut();
+        ok(rdds_type_deserialize(node.0, p, n, &mut src));
+        assert_eq!(rdds_in_int32(src), 1);
+        assert_eq!(rdds_in_length(src), 1);
+        assert_eq!(rdds_in_int32(src), 2);
+        assert_eq!(rdds_in_length(src), 0);
+        assert!(rdds_in_at_end(src));
+        ok(rdds_in_status(src));
+        rdds_in_release(src);
+        rdds_bytes_free(p, n);
+        rdds_out_release(out);
+
+        // `bitset M::Flags { bitfield<3> mode; bitfield<1, boolean> on; };`
+        let mut b = null_mut();
+        ok(rdds_bitset_builder_new(c("M::Flags").as_ptr(), &mut b));
+        ok(rdds_bitset_builder_add_field(
+            b,
+            c("mode").as_ptr(),
+            0,
+            3,
+            0x0d,
+        ));
+        ok(rdds_bitset_builder_add_field(
+            b,
+            c("on").as_ptr(),
+            3,
+            1,
+            0x01,
+        ));
+        let mut flags = null_mut();
+        ok(rdds_bitset_builder_build(b, &mut flags));
+        // Overlapping fields are refused.
+        ok(rdds_bitset_builder_add_field(
+            b,
+            c("x").as_ptr(),
+            2,
+            2,
+            0x0d,
+        ));
+        let mut bad = null_mut();
+        assert_eq!(rdds_bitset_builder_build(b, &mut bad), BAD_PARAMETER);
+        rdds_bitset_builder_release(b);
+        let flags = T(flags);
+        assert_eq!(
+            (*flags.0).as_type(),
+            &Type::from(BitsetType {
+                name: "M::Flags".into(),
+                fields: vec![
+                    Bitfield {
+                        name: "mode".into(),
+                        position: 0,
+                        bitcount: 3,
+                        holder: Primitive::Uint8,
+                    },
+                    Bitfield {
+                        name: "on".into(),
+                        position: 3,
+                        bitcount: 1,
+                        holder: Primitive::Boolean,
+                    },
+                ],
+            })
+        );
+        let mut out = null_mut();
+        ok(rdds_out_new(&mut out));
+        rdds_out_bitmask(out, 0b1101);
+        let (mut p, mut n) = (null_mut(), 0);
+        ok(rdds_type_serialize(flags.0, out, true, &mut p, &mut n));
+        // One octet holds the 4 bits, padded to 4 (the options say 3).
+        assert_eq!(
+            std::slice::from_raw_parts(p, n)[2..],
+            [0, 3, 0b1101, 0, 0, 0]
+        );
+        rdds_bytes_free(p, n);
+        // Bits beyond the fields do not fit.
+        rdds_out_clear(out);
+        rdds_out_bitmask(out, 0x10);
+        assert_eq!(
+            rdds_type_serialize(flags.0, out, true, &mut p, &mut n),
+            BAD_PARAMETER
+        );
+        rdds_out_release(out);
     }
 }

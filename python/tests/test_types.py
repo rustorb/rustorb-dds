@@ -135,3 +135,50 @@ def test_dynamic_type_samples_are_plain():
     ]))
     s = round_trip(t, {"a": 3, "b": ["x", "y"]}, 23)
     assert s.data == {"a": 3, "b": ["x", "y"]}
+
+
+@dds.struct("M::Node", extensibility="appendable")
+class Node:
+    data: dds.int32
+    children: dds.sequence("Node")
+    next: dds.optional("M::Node")
+
+
+def test_recursive_types():
+    t = dds.type_of(Node)
+    assert t.name == "M::Node"
+    v = Node(1, [Node(2), Node(3, [Node(4)])], Node(5))
+    assert round_trip(Node, v, 39).data == v
+    desc = t.describe()
+    assert desc[5][1][2] == ("sequence", ("ref", "M::Node"), 0)
+    # Described back, it is the same type.
+    assert dds.DynamicType(desc) == t
+
+
+def test_a_reference_to_nothing_fails():
+    with pytest.raises(TypeError):
+        dds.type_of(dds.sequence("Nowhere"))
+
+
+@dds.bitset("M::Flags")
+class Bits:
+    mode: dds.bitfield(3)
+    on: dds.bitfield(1)
+    _: dds.bitfield(2)
+    delta: dds.bitfield(5, dds.int8)
+
+
+@dds.struct("M::Status")
+class Status:
+    flags: Bits
+    n: dds.int32
+
+
+def test_bitsets():
+    t = dds.type_of(Status)
+    assert t.describe()[5][0][2] == (
+        "bitset", "M::Flags",
+        [("mode", 0, 3, "byte"), ("on", 3, 1, "boolean"), ("delta", 6, 5, "int8")],
+    )
+    v = Status(Bits(mode=5, on=True, delta=-3), 7)
+    assert round_trip(Status, v, 40).data == v

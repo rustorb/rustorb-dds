@@ -78,6 +78,9 @@ impl DynamicType {
                 d.extensibility_kind = u.extensibility;
                 d.is_nested = u.nested;
             }
+            // The bit counts of the fields, in their order.
+            Type::Bitset(b) => d.bound = b.fields.iter().map(|f| u32::from(f.bitcount)).collect(),
+            Type::Annotation(_) => {}
             Type::Forward(f) => undefined(f),
         }
         d
@@ -176,6 +179,31 @@ impl DynamicType {
                     ..MemberDescriptor::default()
                 })
                 .collect(),
+            Type::Bitset(b) => b
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| MemberDescriptor {
+                    name: f.name.clone(),
+                    id: MemberId::from(f.position),
+                    r#type: DynamicType::new(Type::Primitive(f.holder)),
+                    index: i as u32,
+                    ..MemberDescriptor::default()
+                })
+                .collect(),
+            Type::Annotation(a) => a
+                .members
+                .iter()
+                .enumerate()
+                .map(|(i, m)| MemberDescriptor {
+                    name: m.name.clone(),
+                    id: i as MemberId,
+                    r#type: DynamicType::new(m.ty.clone()),
+                    index: i as u32,
+                    default_value: m.default.as_ref().map(value_text).unwrap_or_default(),
+                    ..MemberDescriptor::default()
+                })
+                .collect(),
             _ => Vec::new(),
         };
         out.into_iter().map(DynamicTypeMember).collect()
@@ -207,6 +235,8 @@ pub(crate) fn kind_of(ty: &Type) -> TypeKind {
         Type::Bitmask(_) => TK_BITMASK,
         Type::Struct(_) => TK_STRUCTURE,
         Type::Union(_) => TK_UNION,
+        Type::Bitset(_) => TK_BITSET,
+        Type::Annotation(_) => TK_ANNOTATION,
         Type::Forward(f) => undefined(f),
     }
 }
@@ -543,7 +573,7 @@ impl DynamicTypeBuilder {
     pub fn add_member(&mut self, mut member: MemberDescriptor) -> Result<()> {
         if !matches!(
             self.descriptor.kind,
-            TK_STRUCTURE | TK_UNION | TK_ENUM | TK_BITMASK
+            TK_STRUCTURE | TK_UNION | TK_ENUM | TK_BITMASK | TK_BITSET | TK_ANNOTATION
         ) {
             return Err(bad("this kind of type has no members"));
         }
@@ -713,16 +743,124 @@ impl DynamicTypeBuilder {
                     ..UnionType::default()
                 })
             }
-            other => {
-                return Err(Error::Unsupported(match other {
-                    TK_ANNOTATION => "annotation types",
-                    TK_BITSET => "bitset types",
-                    _ => "this type kind",
-                }));
+            TK_BITSET => {
+                // The bit counts are the descriptor's bound, one for each
+                // member in order; the members' IDs are their positions.
+                if d.bound.len() != self.members.len() {
+                    return Err(bad("a bitset needs a bit count (bound) for each member"));
+                }
+                let mut fields = Vec::with_capacity(self.members.len());
+                for (m, bits) in self.members.iter().zip(&d.bound) {
+                    let Type::Primitive(holder) = resolve(&m.r#type.0) else {
+                        return Err(bad("a bitfield is held by an integer type"));
+                    };
+                    fields.push(Bitfield {
+                        name: m.name.clone(),
+                        position: u16::try_from(m.id).map_err(|_| bad("a bitfield's position"))?,
+                        bitcount: u8::try_from(*bits).map_err(|_| bad("a bitfield's bit count"))?,
+                        holder: *holder,
+                    });
+                }
+                let t = BitsetType {
+                    name: d.name.clone(),
+                    fields,
+                };
+                t.check()?;
+                Type::from(t)
             }
+            TK_ANNOTATION => Type::from(AnnotationType {
+                name: d.name.clone(),
+                members: self
+                    .members
+                    .iter()
+                    .map(|m| {
+                        Ok(AnnotationParameter {
+                            name: m.name.clone(),
+                            ty: m.r#type.0.clone(),
+                            default: match m.default_value.as_str() {
+                                "" => None,
+                                text => Some(parse_value(&m.r#type.0, text)?),
+                            },
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            _ => return Err(Error::Unsupported("this type kind")),
         };
         Ok(DynamicType::new(ty))
     }
+}
+
+/// The text of an annotation parameter value, for
+/// [`MemberDescriptor::default_value`].
+fn value_text(v: &AnnotationParameterValue) -> String {
+    use AnnotationParameterValue as V;
+    match v {
+        V::Boolean(v) => v.to_string(),
+        V::Byte(v) | V::Uint8(v) => v.to_string(),
+        V::Int8(v) => v.to_string(),
+        V::Int16(v) => v.to_string(),
+        V::Uint16(v) => v.to_string(),
+        V::Int32(v) | V::Enumerated(v) => v.to_string(),
+        V::Uint32(v) => v.to_string(),
+        V::Int64(v) => v.to_string(),
+        V::Uint64(v) => v.to_string(),
+        V::Float32(v) => v.to_string(),
+        V::Float64(v) => v.to_string(),
+        V::Float128(v) => v.to_f64().to_string(),
+        V::Char8(v) => char::from(*v).to_string(),
+        V::Char16(v) => char::from_u32(u32::from(*v)).unwrap_or('?').to_string(),
+        V::String8(v) | V::String16(v) => v.clone(),
+        V::Extended(_) => String::new(),
+    }
+}
+
+/// The annotation parameter value of type `ty` that `text` writes, as
+/// [`value_text`] does (an enum literal also by its name).
+fn parse_value(ty: &Type, text: &str) -> Result<AnnotationParameterValue> {
+    use AnnotationParameterValue as V;
+    fn num<T: std::str::FromStr>(text: &str) -> Result<T> {
+        text.trim()
+            .parse()
+            .map_err(|_| bad(format!("{text:?} is not a value of the parameter's type")))
+    }
+    let one_char = |text: &str| {
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(bad(format!("{text:?} is not one character"))),
+        }
+    };
+    Ok(match resolve(ty) {
+        Type::Primitive(p) => match p {
+            Primitive::Boolean => V::Boolean(num(text)?),
+            Primitive::Byte => V::Byte(num(text)?),
+            Primitive::Int8 => V::Int8(num(text)?),
+            Primitive::Uint8 => V::Uint8(num(text)?),
+            Primitive::Int16 => V::Int16(num(text)?),
+            Primitive::Uint16 => V::Uint16(num(text)?),
+            Primitive::Int32 => V::Int32(num(text)?),
+            Primitive::Uint32 => V::Uint32(num(text)?),
+            Primitive::Int64 => V::Int64(num(text)?),
+            Primitive::Uint64 => V::Uint64(num(text)?),
+            Primitive::Float32 => V::Float32(num(text)?),
+            Primitive::Float64 => V::Float64(num(text)?),
+            Primitive::Float128 => V::Float128(num::<f64>(text)?.into()),
+            Primitive::Char8 => {
+                V::Char8(u8::try_from(u32::from(one_char(text)?)).map_err(|_| bad("not a char8"))?)
+            }
+            Primitive::Char16 => V::Char16(
+                u16::try_from(u32::from(one_char(text)?)).map_err(|_| bad("not a char16"))?,
+            ),
+        },
+        Type::String { wide: false, .. } => V::String8(text.into()),
+        Type::String { wide: true, .. } => V::String16(text.into()),
+        Type::Enum(e) => V::Enumerated(match e.literals.iter().find(|l| l.name == text) {
+            Some(l) => l.value,
+            None => num(text)?,
+        }),
+        _ => return Err(bad("an annotation parameter of this type")),
+    })
 }
 
 /// Whether a union can be discriminated by `ty` (7.2.2.4.4.3).

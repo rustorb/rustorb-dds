@@ -25,8 +25,16 @@
 //! ```
 //!
 //! Types that depend on each other (a struct with a sequence of itself,
-//! 7.3.4.8) are not supported yet: [`TypeObjects::new`] returns
-//! [`Error::Unsupported`].
+//! 7.3.4.8) are made with [`Type::forward`] and [`Type::define`]; their
+//! TypeObjects are identified by their strongly connected component
+//! (7.3.4.9.2). A cycle must go through a sequence, a map or an optional
+//! member, or the type would have no end.
+//!
+//! Bitsets ([`BitsetType`]) have TypeObjects (7.3.4.6) but no
+//! serialization in XTypes 1.3: rustorb writes one as the smallest of
+//! `uint8`, `uint16`, `uint32` and `uint64` that holds its bits, the first
+//! field in the lowest bits. Annotation types ([`AnnotationType`]) have TypeObjects and
+//! no samples.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -79,6 +87,28 @@ impl Primitive {
             Primitive::Char16 => TK_CHAR16,
         }
     }
+
+    /// The primitive type of a type kind, if it is one.
+    pub fn of_kind(kind: TypeKind) -> Option<Primitive> {
+        const ALL: [Primitive; 15] = [
+            Primitive::Boolean,
+            Primitive::Byte,
+            Primitive::Int8,
+            Primitive::Uint8,
+            Primitive::Int16,
+            Primitive::Uint16,
+            Primitive::Int32,
+            Primitive::Uint32,
+            Primitive::Int64,
+            Primitive::Uint64,
+            Primitive::Float32,
+            Primitive::Float64,
+            Primitive::Float128,
+            Primitive::Char8,
+            Primitive::Char16,
+        ];
+        ALL.into_iter().find(|p| p.kind() == kind)
+    }
 }
 
 /// A type.
@@ -115,6 +145,11 @@ pub enum Type {
     Struct(Arc<StructType>),
     /// A `union`.
     Union(Arc<UnionType>),
+    /// A `bitset`.
+    Bitset(Arc<BitsetType>),
+    /// An annotation type (`@annotation`), whose TypeObject describes it
+    /// (7.3.4.3); it is not the type of data.
+    Annotation(Arc<AnnotationType>),
     /// A named type declared before it is defined, for types that depend
     /// on each other (7.3.4.8): it stands for the type it is defined as
     /// ([`Type::define`]).
@@ -173,6 +208,8 @@ impl PartialEq for Type {
             (Type::Bitmask(a), Type::Bitmask(b)) => a == b,
             (Type::Struct(a), Type::Struct(b)) => a == b,
             (Type::Union(a), Type::Union(b)) => a == b,
+            (Type::Bitset(a), Type::Bitset(b)) => a == b,
+            (Type::Annotation(a), Type::Annotation(b)) => a == b,
             _ => false,
         }
     }
@@ -264,6 +301,8 @@ impl Type {
             Type::Alias(t) => Some(&t.name),
             Type::Enum(t) => Some(&t.name),
             Type::Bitmask(t) => Some(&t.name),
+            Type::Bitset(t) => Some(&t.name),
+            Type::Annotation(t) => Some(&t.name),
             Type::Struct(t) => Some(&t.name),
             Type::Union(t) => Some(&t.name),
             _ => None,
@@ -292,6 +331,18 @@ impl From<EnumType> for Type {
 impl From<BitmaskType> for Type {
     fn from(t: BitmaskType) -> Type {
         Type::Bitmask(Arc::new(t))
+    }
+}
+
+impl From<BitsetType> for Type {
+    fn from(t: BitsetType) -> Type {
+        Type::Bitset(Arc::new(t))
+    }
+}
+
+impl From<AnnotationType> for Type {
+    fn from(t: AnnotationType) -> Type {
+        Type::Annotation(Arc::new(t))
     }
 }
 
@@ -458,6 +509,107 @@ impl Default for BitmaskType {
             flags: Vec::new(),
         }
     }
+}
+
+/// A field of a [`BitsetType`]: `bitfield<bitcount, holder> name;`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bitfield {
+    /// The name.
+    pub name: String,
+    /// The first bit, counted from the least significant.
+    pub position: u16,
+    /// The number of bits, 1 to 64.
+    pub bitcount: u8,
+    /// The type its value is read and written as: boolean or an integer
+    /// type.
+    pub holder: Primitive,
+}
+
+/// A `bitset` (IDL 4.2, 7.4.13.4.3.2): fields of bits in an integer.
+///
+/// DDS-XTypes 1.3 has its TypeObject but no serialization of its own: it
+/// is serialized here as the smallest unsigned integer of 8, 16, 32 or
+/// 64 bits that holds every field, as a bitmask is (7.4.3.4.4 for
+/// bitmasks).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BitsetType {
+    /// The qualified name.
+    pub name: String,
+    /// The fields; unnamed ones (padding) are left out.
+    pub fields: Vec<Bitfield>,
+}
+
+impl BitsetType {
+    /// The number of bits that hold the fields: the end of the last one.
+    pub fn bits(&self) -> u32 {
+        self.fields
+            .iter()
+            .map(|f| u32::from(f.position) + u32::from(f.bitcount))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The unsigned integer type it is serialized as.
+    pub fn holder(&self) -> Primitive {
+        match self.bits() {
+            0..=8 => Primitive::Uint8,
+            9..=16 => Primitive::Uint16,
+            17..=32 => Primitive::Uint32,
+            _ => Primitive::Uint64,
+        }
+    }
+
+    /// Checks the fields: at most 64 bits, no field overlapping another,
+    /// holder types that hold their bits.
+    pub fn check(&self) -> Result<()> {
+        let bad = |what: String| Err(Error::InvalidType(format!("bitset {}: {what}", self.name)));
+        if self.bits() > 64 {
+            return bad("more than 64 bits".into());
+        }
+        let mut used = 0u64;
+        for f in &self.fields {
+            if f.bitcount == 0 || f.bitcount > 64 {
+                return bad(format!("{} has {} bits", f.name, f.bitcount));
+            }
+            let width = match f.holder {
+                Primitive::Boolean => 1,
+                Primitive::Byte | Primitive::Int8 | Primitive::Uint8 => 8,
+                Primitive::Int16 | Primitive::Uint16 => 16,
+                Primitive::Int32 | Primitive::Uint32 => 32,
+                Primitive::Int64 | Primitive::Uint64 => 64,
+                _ => return bad(format!("{} is not held by an integer type", f.name)),
+            };
+            if f.bitcount > width {
+                return bad(format!("{} has more bits than its holder type", f.name));
+            }
+            let mask = (u64::MAX >> (64 - u32::from(f.bitcount))) << f.position;
+            if used & mask != 0 {
+                return bad(format!("{} overlaps another field", f.name));
+            }
+            used |= mask;
+        }
+        Ok(())
+    }
+}
+
+/// A member of an [`AnnotationType`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationParameter {
+    /// The name.
+    pub name: String,
+    /// The type: a primitive type, a string, an enum or an alias of one.
+    pub ty: Type,
+    /// The default value, if any.
+    pub default: Option<AnnotationParameterValue>,
+}
+
+/// An annotation type: `@annotation name { members };` (7.2.2.4.6).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnnotationType {
+    /// The qualified name.
+    pub name: String,
+    /// The members.
+    pub members: Vec<AnnotationParameter>,
 }
 
 /// A member of a [`StructType`].
@@ -767,6 +919,8 @@ fn address(ty: &Type) -> Option<usize> {
         Type::Bitmask(t) => Arc::as_ptr(t) as usize,
         Type::Struct(t) => Arc::as_ptr(t) as usize,
         Type::Union(t) => Arc::as_ptr(t) as usize,
+        Type::Bitset(t) => Arc::as_ptr(t) as usize,
+        Type::Annotation(t) => Arc::as_ptr(t) as usize,
         _ => return None,
     })
 }
@@ -813,6 +967,11 @@ impl Graph {
             }
             Type::Union(t) => {
                 named_uses(&t.discriminator, false, &mut uses)?;
+                for m in &t.members {
+                    named_uses(&m.ty, false, &mut uses)?;
+                }
+            }
+            Type::Annotation(t) => {
                 for m in &t.members {
                     named_uses(&m.ty, false, &mut uses)?;
                 }
@@ -936,6 +1095,52 @@ impl Graph {
         }
         Ok(())
     }
+}
+
+/// The value of a parameter of an annotation type that has no default:
+/// zero, false, empty, or the default literal of an enum.
+fn zero_value(ty: &Type) -> Result<AnnotationParameterValue> {
+    use AnnotationParameterValue as V;
+    let mut ty = defined(ty)?;
+    while let Type::Alias(a) = ty {
+        ty = defined(&a.related)?;
+    }
+    Ok(match ty {
+        Type::Primitive(p) => match p {
+            Primitive::Boolean => V::Boolean(false),
+            Primitive::Byte => V::Byte(0),
+            Primitive::Int8 => V::Int8(0),
+            Primitive::Uint8 => V::Uint8(0),
+            Primitive::Int16 => V::Int16(0),
+            Primitive::Uint16 => V::Uint16(0),
+            Primitive::Int32 => V::Int32(0),
+            Primitive::Uint32 => V::Uint32(0),
+            Primitive::Int64 => V::Int64(0),
+            Primitive::Uint64 => V::Uint64(0),
+            Primitive::Float32 => V::Float32(0.0),
+            Primitive::Float64 => V::Float64(0.0),
+            Primitive::Float128 => V::Float128(rustorb_cdr::LongDouble::ZERO),
+            Primitive::Char8 => V::Char8(0),
+            Primitive::Char16 => V::Char16(0),
+        },
+        Type::String { wide: false, .. } => V::String8(String::new()),
+        Type::String { wide: true, .. } => V::String16(String::new()),
+        Type::Enum(e) => V::Enumerated(
+            e.literals
+                .iter()
+                .find(|l| l.default)
+                .or_else(|| e.literals.first())
+                .map_or(0, |l| l.value),
+        ),
+        other => {
+            return Err(Error::InvalidType(format!(
+                "an annotation parameter of type {}",
+                other
+                    .name()
+                    .unwrap_or("other than a primitive, string or enum")
+            )));
+        }
+    })
 }
 
 /// Whether the named type `ty` uses itself, directly or through other
@@ -1177,8 +1382,102 @@ impl Builder {
             Type::Bitmask(t) => self.bitmask(t),
             Type::Struct(t) => self.structure(t),
             Type::Union(t) => self.union(t),
+            Type::Bitset(t) => self.bitset(t),
+            Type::Annotation(t) => self.annotation(t),
             _ => unreachable!("only named types have TypeObjects"),
         }
+    }
+
+    fn bitset(&mut self, t: &BitsetType) -> Result<TypeObject> {
+        t.check()?;
+        let mut fields: Vec<&Bitfield> = t.fields.iter().collect();
+        fields.sort_by_key(|f| f.position);
+        let common = |f: &Bitfield| CommonBitfield {
+            position: f.position,
+            flags: MemberFlag::default(),
+            bitcount: f.bitcount,
+            holder_type: f.holder.kind(),
+        };
+        Ok(if self.complete() {
+            TypeObject::Complete(CompleteTypeObject::Bitset(CompleteBitsetType {
+                bitset_flags: TypeFlag::default(),
+                header: CompleteBitsetHeader {
+                    detail: type_detail(&t.name),
+                },
+                field_seq: fields
+                    .into_iter()
+                    .map(|f| CompleteBitfield {
+                        common: common(f),
+                        detail: member_detail(&f.name, None),
+                    })
+                    .collect(),
+            }))
+        } else {
+            TypeObject::Minimal(MinimalTypeObject::Bitset(MinimalBitsetType {
+                bitset_flags: TypeFlag::default(),
+                header: MinimalBitsetHeader {},
+                field_seq: fields
+                    .into_iter()
+                    .map(|f| MinimalBitfield {
+                        common: common(f),
+                        name_hash: name_hash(&f.name),
+                    })
+                    .collect(),
+            }))
+        })
+    }
+
+    fn annotation(&mut self, t: &AnnotationType) -> Result<TypeObject> {
+        let mut commons = Vec::with_capacity(t.members.len());
+        for m in &t.members {
+            let default_value = match &m.default {
+                Some(v) => v.clone(),
+                None => zero_value(&m.ty)?,
+            };
+            commons.push((
+                CommonAnnotationParameter {
+                    member_flags: MemberFlag::default(),
+                    member_type_id: self.identifier(&m.ty)?,
+                },
+                default_value,
+            ));
+        }
+        Ok(if self.complete() {
+            TypeObject::Complete(CompleteTypeObject::Annotation(CompleteAnnotationType {
+                annotation_flag: TypeFlag::default(),
+                header: CompleteAnnotationHeader {
+                    annotation_name: t.name.clone(),
+                },
+                member_seq: t
+                    .members
+                    .iter()
+                    .zip(commons)
+                    .map(|(m, (common, default_value))| CompleteAnnotationParameter {
+                        common,
+                        name: m.name.clone(),
+                        default_value,
+                    })
+                    .collect(),
+            }))
+        } else {
+            // Ordered by the hash of the names (7.3.4.5).
+            let mut member_seq: Vec<MinimalAnnotationParameter> = t
+                .members
+                .iter()
+                .zip(commons)
+                .map(|(m, (common, default_value))| MinimalAnnotationParameter {
+                    common,
+                    name_hash: name_hash(&m.name),
+                    default_value,
+                })
+                .collect();
+            member_seq.sort_by_key(|m| m.name_hash);
+            TypeObject::Minimal(MinimalTypeObject::Annotation(MinimalAnnotationType {
+                annotation_flag: TypeFlag::default(),
+                header: MinimalAnnotationHeader {},
+                member_seq,
+            }))
+        })
     }
 
     fn alias(&mut self, t: &AliasType) -> Result<TypeObject> {

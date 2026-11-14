@@ -150,6 +150,17 @@ fn bitmask_holder_size(bit_bound: u16) -> usize {
     }
 }
 
+/// The size of the unsigned integer a bitset is serialized as (see
+/// [`BitsetType`]).
+fn bitset_holder_size(b: &BitsetType) -> usize {
+    match b.holder() {
+        Primitive::Uint8 => 1,
+        Primitive::Uint16 => 2,
+        Primitive::Uint32 => 4,
+        _ => 8,
+    }
+}
+
 fn check_string(s: &str, wide: bool, bound: u32) -> Result<()> {
     let len = if wide {
         s.encode_utf16().count()
@@ -266,6 +277,17 @@ fn write(d: &DynamicData, enc: &mut Encoder, key: bool) -> Result<()> {
             4 => enc.write_u32(*v as u32),
             _ => enc.write_u64(*v),
         },
+        (Type::Bitset(b), Value::Bitset(v)) => match bitset_holder_size(b) {
+            1 => enc.write_octet(*v as u8),
+            2 => enc.write_u16(*v as u16),
+            4 => enc.write_u32(*v as u32),
+            _ => enc.write_u64(*v),
+        },
+        (Type::Annotation(_), _) => {
+            return Err(Error::Unsupported(
+                "serializing a value of an annotation type",
+            ));
+        }
         (Type::Sequence(s), Value::Collection(items)) => {
             check_bound(items.len(), s.bound)?;
             let mark = (is_v2(enc) && !is_primitive(&s.element.ty)).then(|| enc.begin_dheader());
@@ -572,6 +594,22 @@ fn read(ty: &Type, dec: &mut Decoder<'_>) -> Result<DynamicData> {
             4 => u64::from(dec.read_u32()?),
             _ => dec.read_u64()?,
         }),
+        // The bits beyond the fields are dropped.
+        Type::Bitset(b) => {
+            let bits = match bitset_holder_size(b) {
+                1 => u64::from(dec.read_octet()?),
+                2 => u64::from(dec.read_u16()?),
+                4 => u64::from(dec.read_u32()?),
+                _ => dec.read_u64()?,
+            };
+            let used = b.fields.iter().fold(0u64, |m, f| {
+                m | ((u64::MAX >> (64 - u32::from(f.bitcount))) << f.position)
+            });
+            Value::Bitset(bits & used)
+        }
+        Type::Annotation(_) => {
+            return Err(Error::Unsupported("reading a value of an annotation type"));
+        }
         Type::Sequence(s) => {
             let delimited = read_delimited(dec, is_v2_in(dec) && !is_primitive(&s.element.ty))?;
             let len = dec.read_len(1)?;
@@ -782,6 +820,11 @@ pub(crate) fn max_key_end(ty: &Type, offset: usize) -> Option<usize> {
             let n = bitmask_holder_size(b.bit_bound);
             align_up(offset, n) + n
         }
+        Type::Bitset(b) => {
+            let n = bitset_holder_size(b);
+            align_up(offset, n) + n
+        }
+        Type::Annotation(_) => return None,
         Type::Sequence(s) => {
             if s.bound == 0 {
                 return None;
