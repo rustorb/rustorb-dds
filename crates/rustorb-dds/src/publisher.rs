@@ -10,7 +10,7 @@ use rustorb_typesupport::{ByteOrder, Encoding};
 use crate::condition::StatusCondition;
 use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
-use crate::listener::DataWriterListener;
+use crate::listener::{DataWriterListener, PublisherEntity, PublisherListener};
 use crate::participant::{Shared, WriteOp, WriterEvent, WriterListener, WriterState};
 use crate::qos::{
     DataWriterQos, DurabilityKind, PublisherQos, data_representation, duration_to_rtps,
@@ -22,9 +22,10 @@ use crate::topic::Topic;
 use crate::typed::SampleType;
 
 /// A DDS publisher (DDS 1.4, 2.2.2.4.1): creates data writers.
+#[derive(Clone)]
 pub struct Publisher {
     shared: Arc<Shared>,
-    qos: PublisherQos,
+    entity: Arc<PublisherEntity>,
 }
 
 impl std::fmt::Debug for Publisher {
@@ -34,13 +35,34 @@ impl std::fmt::Debug for Publisher {
 }
 
 impl Publisher {
-    pub(crate) fn new(shared: Arc<Shared>, qos: PublisherQos) -> Self {
-        Publisher { shared, qos }
+    pub(crate) fn new(shared: Arc<Shared>, entity: Arc<PublisherEntity>) -> Self {
+        Publisher { shared, entity }
     }
 
     /// The publisher's QoS.
     pub fn qos(&self) -> &PublisherQos {
-        &self.qos
+        &self.entity.qos
+    }
+
+    /// Sets the publisher's listener (`set_listener`), replacing any
+    /// earlier one: it is called for the statuses in `mask` of its writers
+    /// that their own listeners do not take (DDS 1.4, 2.2.4.3.1). See
+    /// [`PublisherListener`].
+    pub fn set_listener(&self, listener: impl PublisherListener + 'static, mask: StatusMask) {
+        *self
+            .entity
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((Arc::new(listener), mask));
+    }
+
+    /// Removes the publisher's listener.
+    pub fn clear_listener(&self) {
+        *self
+            .entity
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Creates a writer for `topic` with the default QoS: RELIABLE,
@@ -107,8 +129,14 @@ impl Publisher {
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
-        data.partitions = self.qos.partition.clone();
-        self.shared.add_writer(data, qos, keyed, listener)?;
+        data.partitions = self.entity.qos.partition.clone();
+        self.shared.add_writer(
+            data,
+            qos,
+            topic.samples.key_ops(),
+            listener,
+            self.entity.clone(),
+        )?;
         Ok(DataWriter {
             shared: self.shared.clone(),
             guid,

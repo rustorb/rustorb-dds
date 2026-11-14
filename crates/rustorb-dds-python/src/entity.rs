@@ -13,6 +13,10 @@ use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use rustorb_dds::{
+    AnyDataReader, AnyDataWriter, DomainParticipantListener, InconsistentTopicStatus,
+    PublisherListener, SubscriberListener, TopicListener,
+};
+use rustorb_dds::{
     Condition, ContentFilteredTopic, DataReader, DataReaderListener, DataReaderQos, DataWriter,
     DataWriterListener, DataWriterQos, DeadlineMissedStatus, DomainParticipant, DurabilityKind,
     DynamicData, GuardCondition, Guid, History, IncompatibleQosStatus, InstanceHandle,
@@ -344,6 +348,18 @@ impl Status for IncompatibleQosStatus {
     }
 }
 
+impl Status for InconsistentTopicStatus {
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        dict(
+            py,
+            vec![
+                ("total_count", o(py, self.total_count)?),
+                ("total_count_change", o(py, self.total_count_change)?),
+            ],
+        )
+    }
+}
+
 impl Status for SampleLostStatus {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         dict(
@@ -523,6 +539,20 @@ pub struct PyParticipant {
 
 #[pymethods]
 impl PyParticipant {
+    /// Calls `callback(event, key, status)` for the statuses in `mask` of
+    /// the participant's entities that their own listeners do not take
+    /// (DDS 1.4, 2.2.4.3): `key` is the GUID of the writer or reader, the
+    /// topic name for `"inconsistent_topic"`, or the Subscriber for
+    /// `"data_on_readers"` (`status` None, as for `"data_available"`).
+    fn set_listener(&self, callback: Py<PyAny>, mask: u32) {
+        self.inner
+            .set_listener(GroupCallback(callback), StatusMask(mask));
+    }
+
+    fn clear_listener(&self) {
+        self.inner.clear_listener();
+    }
+
     /// Joins `domain_id`. With `localhost`, discovery and data stay on
     /// the loopback interface (for tests).
     #[new]
@@ -687,6 +717,17 @@ pub struct PyTopic {
 
 #[pymethods]
 impl PyTopic {
+    /// Calls `callback("inconsistent_topic", name, status)`, as for the
+    /// participant.
+    fn set_listener(&self, callback: Py<PyAny>, mask: u32) {
+        self.topic
+            .set_listener(GroupCallback(callback), StatusMask(mask));
+    }
+
+    fn clear_listener(&self) {
+        self.topic.clear_listener();
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.topic.name().to_owned()
@@ -770,6 +811,17 @@ pub struct PyPublisher {
 
 #[pymethods]
 impl PyPublisher {
+    /// Calls `callback(event, guid, status)` for the statuses of its
+    /// writers, as for the participant.
+    fn set_listener(&self, callback: Py<PyAny>, mask: u32) {
+        self.inner
+            .set_listener(GroupCallback(callback), StatusMask(mask));
+    }
+
+    fn clear_listener(&self) {
+        self.inner.clear_listener();
+    }
+
     /// A writer of `topic`; `listener`, a function called as in
     /// `DataWriter.set_listener`, is set before the writer is matched.
     #[pyo3(signature = (topic, qos = None, listener = None, mask = u32::MAX))]
@@ -807,6 +859,27 @@ pub struct PySubscriber {
 
 #[pymethods]
 impl PySubscriber {
+    /// Calls `callback(event, key, status)` for DATA_ON_READERS and the
+    /// statuses of its readers, as for the participant.
+    fn set_listener(&self, callback: Py<PyAny>, mask: u32) {
+        self.inner
+            .set_listener(GroupCallback(callback), StatusMask(mask));
+    }
+
+    fn clear_listener(&self) {
+        self.inner.clear_listener();
+    }
+
+    /// Calls the listeners of its readers that have new data.
+    fn notify_datareaders(&self, py: Python<'_>) {
+        py.detach(|| self.inner.notify_datareaders());
+    }
+
+    /// Whether `other` is a handle of the same subscriber.
+    fn same(&self, other: &PySubscriber) -> bool {
+        self.inner.same_as(&other.inner)
+    }
+
     /// A reader of `topic`; `listener`, a function called as in
     /// `DataReader.set_listener`, is set before the reader is matched.
     #[pyo3(signature = (topic, qos = None, listener = None, mask = u32::MAX))]
@@ -1005,6 +1078,83 @@ impl PyWriter {
     }
 }
 
+/// The listener of a participant, publisher, subscriber or topic: calls
+/// a Python function with the event, a key and the status.
+struct GroupCallback(Py<PyAny>);
+
+impl GroupCallback {
+    fn call(&self, event: &str, key: &str, status: Option<&dyn Status>) {
+        Python::attach(|py| {
+            let r = match status {
+                Some(s) => s
+                    .to_dict(py)
+                    .and_then(|d| self.0.call1(py, (event, key, d))),
+                None => self.0.call1(py, (event, key, py.None())),
+            };
+            if let Err(e) = r {
+                e.print(py);
+            }
+        });
+    }
+}
+
+impl PublisherListener for GroupCallback {
+    fn on_publication_matched(&self, w: &AnyDataWriter, s: MatchedStatus) {
+        self.call("publication_matched", &guid(w.guid()), Some(&s));
+    }
+    fn on_liveliness_lost(&self, w: &AnyDataWriter, s: LivelinessLostStatus) {
+        self.call("liveliness_lost", &guid(w.guid()), Some(&s));
+    }
+    fn on_offered_deadline_missed(&self, w: &AnyDataWriter, s: DeadlineMissedStatus) {
+        self.call("offered_deadline_missed", &guid(w.guid()), Some(&s));
+    }
+    fn on_offered_incompatible_qos(&self, w: &AnyDataWriter, s: IncompatibleQosStatus) {
+        self.call("offered_incompatible_qos", &guid(w.guid()), Some(&s));
+    }
+}
+
+impl SubscriberListener for GroupCallback {
+    fn on_data_on_readers(&self, subscriber: &Subscriber) {
+        Python::attach(|py| {
+            let sub = PySubscriber {
+                inner: subscriber.clone(),
+            };
+            if let Err(e) = self.0.call1(py, ("data_on_readers", sub, py.None())) {
+                e.print(py);
+            }
+        });
+    }
+    fn on_data_available(&self, r: &AnyDataReader) {
+        self.call("data_available", &guid(r.guid()), None);
+    }
+    fn on_subscription_matched(&self, r: &AnyDataReader, s: MatchedStatus) {
+        self.call("subscription_matched", &guid(r.guid()), Some(&s));
+    }
+    fn on_liveliness_changed(&self, r: &AnyDataReader, s: LivelinessChangedStatus) {
+        self.call("liveliness_changed", &guid(r.guid()), Some(&s));
+    }
+    fn on_requested_deadline_missed(&self, r: &AnyDataReader, s: DeadlineMissedStatus) {
+        self.call("requested_deadline_missed", &guid(r.guid()), Some(&s));
+    }
+    fn on_requested_incompatible_qos(&self, r: &AnyDataReader, s: IncompatibleQosStatus) {
+        self.call("requested_incompatible_qos", &guid(r.guid()), Some(&s));
+    }
+    fn on_sample_rejected(&self, r: &AnyDataReader, s: SampleRejectedStatus) {
+        self.call("sample_rejected", &guid(r.guid()), Some(&s));
+    }
+    fn on_sample_lost(&self, r: &AnyDataReader, s: SampleLostStatus) {
+        self.call("sample_lost", &guid(r.guid()), Some(&s));
+    }
+}
+
+impl TopicListener for GroupCallback {
+    fn on_inconsistent_topic(&self, topic_name: &str, s: InconsistentTopicStatus) {
+        self.call("inconsistent_topic", topic_name, Some(&s));
+    }
+}
+
+impl DomainParticipantListener for GroupCallback {}
+
 /// A [`DataWriterListener`] that calls a Python function.
 struct WriterCallback(Py<PyAny>);
 
@@ -1053,8 +1203,9 @@ impl PyReader {
 
     /// Takes (or reads) the samples passing the filter, or those of one
     /// instance when `instance` is given: a list of `(data or None,
-    /// info)`.
-    #[pyo3(signature = (take, sample_states = None, view_states = None, instance_states = None, instance = None))]
+    /// info)`; at most `max_samples`, the first to arrive.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (take, sample_states = None, view_states = None, instance_states = None, instance = None, max_samples = None))]
     fn select<'py>(
         &self,
         py: Python<'py>,
@@ -1063,13 +1214,15 @@ impl PyReader {
         view_states: Option<Vec<String>>,
         instance_states: Option<Vec<String>>,
         instance: Option<&str>,
+        max_samples: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         let f = filter(sample_states, view_states, instance_states)?;
+        let r = self.inner.max_samples(max_samples.unwrap_or(usize::MAX));
         let v = match (instance.map(parse_handle).transpose()?, take) {
-            (None, true) => self.inner.take_with(f),
-            (None, false) => self.inner.read_with(f),
-            (Some(h), true) => self.inner.take_instance(h),
-            (Some(h), false) => self.inner.read_instance(h),
+            (None, true) => r.take_with(f),
+            (None, false) => r.read_with(f),
+            (Some(h), true) => r.take_instance(h),
+            (Some(h), false) => r.read_instance(h),
         };
         samples(py, &v)
     }

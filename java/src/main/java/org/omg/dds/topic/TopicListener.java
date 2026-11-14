@@ -8,7 +8,7 @@ package org.omg.dds.topic;
 import java.util.EventListener;
 import org.omg.dds.core.event.InconsistentTopicEvent;
 
-/** The listener of a Topic (not supported by rustorb-dds yet: setting one throws UnsupportedOperationException). */
+/** The listener of a Topic. The topics of one name in a participant share their listener. */
 public interface TopicListener<TYPE> extends EventListener {
     public void onInconsistentTopic(InconsistentTopicEvent<TYPE> status);
 }

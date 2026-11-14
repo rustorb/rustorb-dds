@@ -8,6 +8,24 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Interoperability tests with OpenDDS 3.31 (`interop/run.sh opendds`, in
+  Docker, and the CI job `opendds`, #68): best effort, reliable,
+  transient-local, large samples, keyed instances, XCDR2, type evolution
+  and TypeLookup, from Rust, Python, C++ and Java.
+- `max_samples` for takes as well as reads (DDS 1.4, 2.2.2.5.3.8, #67):
+  `DataReader::max_samples(n)` in Rust gives the first `n` samples to
+  arrive and leaves the others as they were; `max_samples` of
+  `rdds_reader_select` and `rdds_reader_select_w_condition` in the C ABI
+  (a new argument), `Selector::max_samples` with `take` in C++,
+  `maxSamples` with `take` in Java and `max_samples` in Python. A read
+  with a limit no longer marks the samples beyond it read.
+- Listeners of participants, publishers, subscribers and topics (DDS 1.4,
+  2.2.4.3, #66): a status that an entity's own listener does not take
+  goes to its publisher's or subscriber's listener, then to the
+  participant's; new data goes first to `on_data_on_readers`, and
+  `Subscriber::notify_datareaders` hands it to the readers' listeners.
+  INCONSISTENT_TOPIC goes to the topic's listener, else the
+  participant's. In Rust, the C ABI, C++, Java and Python.
 - DDS Security 1.2 (feature `security`, off by default; docs/security.md,
   #59): the builtin plugins written from the specification with RustCrypto
   in the new crate `rustorb-dds-security`: authentication (DDS:Auth:PKI-DH,
@@ -77,6 +95,16 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
   as streams of values in the order of their type (the library encodes
   them), the DCPS entities with their QoS, statuses and listeners,
   conditions and WaitSets (#44).
+
+### Fixed
+
+- Tests use domain ids of 100 or less, so that their ports stay below the
+  ephemeral port range and do not fail with `AddrInUse` (#64).
+- Readers take samples whose encapsulation counts padding octets that
+  the payload does not have (OpenDDS 3.31 leaves them out of a DATA that
+  ends a message); they were dropped (#68).
+- A dispose or an unregister carries the key payload as well as the key
+  hash when an OpenDDS reader is matched, as OpenDDS 3.31 needs it (#68).
 
 ## [python-0.1.0] - 2026-11-05
 

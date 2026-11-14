@@ -172,6 +172,48 @@ jobs:
             !target/interop/build
           if-no-files-found: ignore
 
+  # The same cases with OpenDDS (RTPS discovery and the RTPS_UDP
+  # transport), built and run in OpenDDS's Docker image.
+  opendds:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "22"
+          cache: maven
+      - name: Install cmake, g++ and tcpdump
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ tcpdump
+      - name: Allow the socket buffers of interop/opendds/rtps.ini
+        run: sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+      - name: Pull OpenDDS
+        run: docker pull -q ghcr.io/opendds/opendds:DDS-3.31
+      - name: Install the Python binding
+        run: pip install ./python
+      - run: interop/run.sh opendds
+        env:
+          PYTHON: python
+          OUT: ${{ github.workspace }}/target/interop-opendds
+          DUMP: 1
+      - name: Keep the logs, versions and captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-opendds
+          path: |
+            target/interop-opendds
+            !target/interop-opendds/build/cpp
+            !target/interop-opendds/build/opendds/cmake
+          if-no-files-found: ignore
+
   # ROS 2's demo talker and listener with rmw_fastrtps_cpp and
   # rmw_cyclonedds_cpp, both ways (interop/ros2.sh). ROS 2 Jazzy comes
   # from the ROS 2 packages for Ubuntu 24.04; see interop/README.md.

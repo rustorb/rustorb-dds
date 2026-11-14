@@ -29,6 +29,7 @@ import enum as _enum
 import threading
 import types as _types
 import typing
+import weakref as _weakref
 
 from . import _native
 from .types import *  # noqa: F401,F403
@@ -42,7 +43,8 @@ __all__ = _types_all + [
     "DataReader", "Qos", "Sample", "SampleInfo", "StatusMask",
     "DataWriterListener", "DataReaderListener", "Condition",
     "GuardCondition", "StatusCondition", "ReadCondition", "WaitSet",
-    "SampleIdentity", "Requester", "Replier",
+    "SampleIdentity", "Requester", "Replier", "PublisherListener",
+    "SubscriberListener", "TopicListener", "DomainParticipantListener",
 ]
 
 
@@ -151,6 +153,12 @@ class DomainParticipant:
 
     def __init__(self, domain_id=0, localhost=False):
         self._native = _native.DomainParticipant(domain_id, localhost)
+        # For the listeners: the writers and readers by GUID, the
+        # subscribers and the topics by name.
+        self._endpoints = _weakref.WeakValueDictionary()
+        self._subscribers = _weakref.WeakSet()
+        self._topics = _weakref.WeakValueDictionary()
+        self._listener = None
 
     @property
     def domain_id(self):
@@ -164,7 +172,9 @@ class DomainParticipant:
         """A topic named ``name`` of ``type``: a class made with
         :func:`struct` or :func:`union`, or a :class:`DynamicType`."""
         spec = spec_of(type)
-        return Topic(self._native.create_topic(name, type_of(type)), spec)
+        t = Topic(self._native.create_topic(name, type_of(type)), spec, self)
+        self._topics.setdefault(name, t)
+        return t
 
     def create_contentfilteredtopic(self, name, related_topic,
                                     filter_expression,
@@ -193,7 +203,9 @@ class DomainParticipant:
     def create_subscriber(self, partition=None):
         """A subscriber in the partitions ``partition``."""
         qos = {"partition": list(partition)} if partition else None
-        return Subscriber(self._native.create_subscriber(qos), self)
+        s = Subscriber(self._native.create_subscriber(qos), self)
+        self._subscribers.add(s)
+        return s
 
     def assert_liveliness(self):
         self._native.assert_liveliness()
@@ -202,13 +214,44 @@ class DomainParticipant:
         """The GUIDs of the remote participants discovered."""
         return self._native.discovered_participants()
 
+    @property
+    def listener(self):
+        return self._listener
+
+    def set_listener(self, listener, mask=StatusMask.ALL):
+        """Sets a :class:`DomainParticipantListener` for the statuses in
+        ``mask`` of the participant's entities that their own listeners
+        do not take; None clears it."""
+        _set_group_listener(self._native, self, listener, mask)
+        self._listener = listener
+
+    def _subscriber_of(self, native):
+        for s in list(self._subscribers):
+            if s._native.same(native):
+                return s
+        return None
+
 
 class Topic:
     """A topic: its name and its type."""
 
-    def __init__(self, native, spec):
+    def __init__(self, native, spec, participant=None):
         self._native = native
         self._spec = spec
+        self.participant = participant
+        self._listener = None
+
+    @property
+    def listener(self):
+        return self._listener
+
+    def set_listener(self, listener, mask=StatusMask.ALL):
+        """Sets a :class:`TopicListener` (INCONSISTENT_TOPIC); None
+        clears it. The topics of one name in a participant share their
+        listener."""
+        _set_group_listener(self._native, self.participant, listener, mask,
+                            topic=self)
+        self._listener = listener
 
     @property
     def name(self):
@@ -265,6 +308,18 @@ class Publisher:
     def __init__(self, native, participant):
         self._native = native
         self.participant = participant
+        self._listener = None
+
+    @property
+    def listener(self):
+        return self._listener
+
+    def set_listener(self, listener, mask=StatusMask.ALL):
+        """Sets a :class:`PublisherListener` for the statuses in ``mask``
+        of its writers that their own listeners do not take; None clears
+        it."""
+        _set_group_listener(self._native, self.participant, listener, mask)
+        self._listener = listener
 
     def create_datawriter(self, topic, qos=None, listener=None,
                           mask=StatusMask.ALL):
@@ -274,6 +329,7 @@ class Publisher:
             topic._native, _qos(qos),
             None if listener is None else _callback(e, listener), int(mask))
         _created(e, native)
+        self.participant._endpoints[e.guid] = e
         return e
 
 
@@ -281,6 +337,23 @@ class Subscriber:
     def __init__(self, native, participant):
         self._native = native
         self.participant = participant
+        self._listener = None
+
+    @property
+    def listener(self):
+        return self._listener
+
+    def set_listener(self, listener, mask=StatusMask.ALL):
+        """Sets a :class:`SubscriberListener` for DATA_ON_READERS and the
+        statuses in ``mask`` of its readers that their own listeners do
+        not take; None clears it."""
+        _set_group_listener(self._native, self.participant, listener, mask)
+        self._listener = listener
+
+    def notify_datareaders(self):
+        """Calls the listeners of its readers that have new data (from
+        ``on_data_on_readers``)."""
+        self._native.notify_datareaders()
 
     def create_datareader(self, topic, qos=None, listener=None,
                           mask=StatusMask.ALL):
@@ -293,6 +366,7 @@ class Subscriber:
             topic._native, _qos(qos),
             None if listener is None else _callback(e, listener), int(mask))
         _created(e, native)
+        self.participant._endpoints[e.guid] = e
         return e
 
 
@@ -337,6 +411,64 @@ class DataReaderListener:
 
     def on_sample_rejected(self, reader, status):
         pass
+
+
+class PublisherListener(DataWriterListener):
+    """The listener of a publisher: the statuses of its writers, each
+    called with the writer and the status."""
+
+
+class SubscriberListener(DataReaderListener):
+    """The listener of a subscriber: ``on_data_on_readers(subscriber)``
+    when some of its readers have new data (then no
+    ``on_data_available`` is called), and the statuses of its readers."""
+
+    def on_data_on_readers(self, subscriber):
+        pass
+
+
+class TopicListener:
+    def on_inconsistent_topic(self, topic, status):
+        pass
+
+
+class DomainParticipantListener(PublisherListener, SubscriberListener,
+                                TopicListener):
+    """The listener of a participant: what the listeners of its
+    entities do not take."""
+
+
+def _set_group_listener(native, participant, listener, mask, topic=None):
+    if listener is None:
+        native.clear_listener()
+        return
+    participant_ref = _weakref.ref(participant)
+    topic_ref = None if topic is None else _weakref.ref(topic)
+
+    def call(event, key, status):
+        f = getattr(listener, "on_" + event, None)
+        p = participant_ref()
+        if f is None or p is None:
+            return
+        if event == "data_on_readers":
+            s = p._subscriber_of(key)
+            if s is not None:
+                f(s)
+            return
+        if event == "inconsistent_topic":
+            t = topic_ref() if topic_ref is not None else p._topics.get(key)
+            if t is not None:
+                f(t, _status(status))
+            return
+        e = p._endpoints.get(key)
+        if e is None:
+            return
+        if status is None:
+            f(e)
+        else:
+            f(e, _status(status))
+
+    native.set_listener(call, int(mask))
 
 
 def _callback(entity, listener):
@@ -471,19 +603,22 @@ class DataReader:
                 for d, i in v]
 
     def take(self, sample_states=_ANY, view_states=_ANY, instance_states=_ANY,
-             instance=None):
+             instance=None, max_samples=None):
         """Takes the samples in the given states (lists of state names:
         ``"read"``/``"not_read"``, ``"new"``/``"not_new"``, ``"alive"``/
         ``"not_alive_disposed"``/``"not_alive_no_writers"``; None for
-        any), or those of the ``instance`` handle."""
+        any), or those of the ``instance`` handle; at most
+        ``max_samples``, the first to arrive."""
         return self._samples(self._native.select(
-            True, sample_states, view_states, instance_states, instance))
+            True, sample_states, view_states, instance_states, instance,
+            max_samples))
 
     def read(self, sample_states=_ANY, view_states=_ANY, instance_states=_ANY,
-             instance=None):
+             instance=None, max_samples=None):
         """Like :meth:`take`, leaving the samples in the reader."""
         return self._samples(self._native.select(
-            False, sample_states, view_states, instance_states, instance))
+            False, sample_states, view_states, instance_states, instance,
+            max_samples))
 
     def take_w_condition(self, condition):
         return self._samples(self._native.select_w_condition(True, condition._native))

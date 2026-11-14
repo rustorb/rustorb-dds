@@ -2,15 +2,18 @@
 # Runs hello world between rustorb-dds and other DDS implementations, in
 # both directions, on this host.
 #
-#   interop/run.sh [peer...]        peers: cyclonedds fastdds (default: both)
+#   interop/run.sh [peer...]        peers: cyclonedds fastdds opendds
+#                                   (default: cyclonedds fastdds)
 #
-# The peers come from distribution packages (see interop/README.md) and
-# are used as black boxes through their public APIs. Results, peer
+# The peers come from distribution packages, and OpenDDS from its Docker
+# image or an installation (see interop/README.md); they are
+# used as black boxes through their public APIs. Results, peer
 # versions and, for failed cases, a packet capture go to $OUT
 # (default target/interop).
 #
 # Environment:
 #   OUT        where to write results
+#   DUMP       1 to print an RTPS trace of each failed case's capture
 #   CAPTURE    1 to capture packets with tcpdump (default: 1 when tcpdump
 #              is there and we are root or have sudo)
 #   COUNT      samples the subscriber must receive (default 3)
@@ -34,6 +37,10 @@
 #              it cannot import rustorb_dds)
 #   SECURITY   0 to skip the DDS Security cases (default 1; they need
 #              openssl, and peers built with their security plugins)
+#   OPENDDS_IMAGE  the OpenDDS Docker image to build and run the OpenDDS
+#              programs in (default ghcr.io/opendds/opendds:DDS-3.31);
+#              OPENDDS_IMAGE= with OpenDDS installed (DDS_ROOT, ACE_ROOT
+#              set) builds and runs them here instead
 #   DROP       in the reliable cases, rustorb-dds drops one in DROP user
 #              datagrams it receives, at random, so that repairs are
 #              exercised in both directions (default 5; 0 drops nothing)
@@ -42,6 +49,7 @@ set -u
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 OUT=${OUT:-$ROOT/target/interop}
+case $OUT in /*) ;; *) OUT=$ROOT/$OUT ;; esac
 BUILD=$OUT/build
 COUNT=${COUNT:-3}
 SEND=${SEND:-20}
@@ -162,6 +170,38 @@ SECURE=(env "${SECURE[@]}")
 mapfile -t SECURE_RTPS < <(secure_env "$OUT/security-ENCRYPT")
 SECURE_RTPS=(env "${SECURE_RTPS[@]}")
 
+# OpenDDS: built (and run) in its Docker image, with cmake and g++ added,
+# or with the OpenDDS installed here when OPENDDS_IMAGE is empty. The
+# programs go to $dir/cmake; $dir/<name> runs one with the RTPS
+# configuration (rtps.ini).
+OPENDDS_IMAGE=${OPENDDS_IMAGE-ghcr.io/opendds/opendds:DDS-3.31}
+build_opendds() {
+  local src=$1 dir=$2 run=()
+  if [ -n "$OPENDDS_IMAGE" ]; then
+    printf 'FROM %s\nRUN (command -v cmake && command -v g++) >/dev/null || (apt-get update -qq && apt-get install -y -qq cmake g++ >/dev/null)\n' \
+      "$OPENDDS_IMAGE" | docker build -q -t rustorb-interop-opendds - || return 1
+    run=(docker run --rm --init --network host -e HELLO_XCDR2 -v "$ROOT:$ROOT" -v "$dir:$dir"
+      rustorb-interop-opendds)
+  fi
+  "${run[@]}" sh -c 'env | grep -E "^(DDS_ROOT|ACE_ROOT|TAO_ROOT)=" ;
+    cmake -S "$1" -B "$2" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${DDS_ROOT:-/usr/local}" &&
+    cmake --build "$2" -j "$(nproc)"' sh "$src" "$dir/cmake" || return 1
+  local name
+  for name in hello keyed evolve_v1 evolve_v2; do
+    {
+      echo '#!/bin/sh'
+      printf 'exec'
+      printf ' %q' "${run[@]}" "$dir/cmake/$name" -DCPSConfigFile "$src/rtps.ini"
+      echo ' "$@"'
+    } >"$dir/$name"
+    chmod +x "$dir/$name"
+  done
+  if [ -n "$OPENDDS_IMAGE" ]; then
+    echo "opendds: $OPENDDS_IMAGE $(docker image inspect -f '{{index .RepoDigests 0}}' "$OPENDDS_IMAGE" 2>/dev/null)" \
+      >>"$OUT/versions.txt"
+  fi
+}
+
 build_peer() {
   local peer=$1 src=$ROOT/interop/$1 dir=$BUILD/$1
   mkdir -p "$dir"
@@ -169,6 +209,9 @@ build_peer() {
     cyclonedds)
       cmake -S "$src" -B "$dir" -DCMAKE_BUILD_TYPE=Release >"$dir/cmake.log" 2>&1 &&
         cmake --build "$dir" >>"$dir/cmake.log" 2>&1
+      ;;
+    opendds)
+      build_opendds "$src" "$dir" >"$dir/cmake.log" 2>&1
       ;;
     fastdds)
       mkdir -p "$dir/gen" &&
@@ -228,6 +271,12 @@ run_case() {
     RESULTS+=("FAIL $name (publisher $pub_rc, subscriber $sub_rc)")
     FAILED+=("$name")
     tail -n 5 "$dir/pub.log" "$dir/sub.log"
+    if [ "${DUMP:-0}" = 1 ] && [ -f "$dir/capture.pcap" ]; then
+      echo "--- $name: RTPS trace (domain $DOMAIN)"
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --trace 2>/dev/null | uniq | head -n "${DUMP_LINES:-200}"
+      echo "--- $name: first user DATA"
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --max 2 2>/dev/null | head -n 40
+    fi
   fi
 }
 
@@ -245,7 +294,7 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer" \
     "$RUST" pub @D@ "$SEND" "$INTERVAL" -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
-  if [ "$SECURITY" = 1 ]; then
+  if [ "$SECURITY" = 1 ] && [ "$peer" != opendds ]; then
     # DDS Security: authentication, access control, and discovery,
     # liveliness and data encrypted; then reliable with whole RTPS
     # messages encrypted too.
@@ -302,10 +351,13 @@ for peer in "${PEERS[@]}"; do
   # Fast DDS's hello_filtered has the type's TypeObject, so that its
   # writer can filter for the rustorb reader.
   PF=$P; [ "$peer" = fastdds ] && PF=${P}_filtered
-  run_case "$peer-to-rustorb-filtered" \
-    "$PF" pub @D@ "$RELIABLE" 20 reliable -- \
-    env RUSTORB_DROP_ONE_IN="$DROP" \
-    timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" filtered
+  # The OpenDDS peer has no filter.
+  if [ "$peer" != opendds ]; then
+    run_case "$peer-to-rustorb-filtered" \
+      "$PF" pub @D@ "$RELIABLE" 20 reliable -- \
+      env RUSTORB_DROP_ONE_IN="$DROP" \
+      timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" filtered
+  fi
   if [ "$peer" = fastdds ]; then
     run_case "rustorb-to-$peer-filtered" \
       env RUSTORB_DROP_ONE_IN="$DROP" "$RUST" pub @D@ "$RELIABLE" 20 filtered -- \
@@ -322,7 +374,7 @@ for peer in "${PEERS[@]}"; do
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
   # XCDR2 data (DATA_REPRESENTATION). The Fast DDS peer requests XCDR
   # only.
-  if [ "$peer" = cyclonedds ]; then
+  if [ "$peer" != fastdds ]; then
     run_case "$peer-to-rustorb-xcdr2" \
       env HELLO_XCDR2=1 "$P" pub @D@ "$RELIABLE" 20 reliable -- \
       timeout $((TIMEOUT + 5)) "$RUST" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
@@ -333,7 +385,7 @@ for peer in "${PEERS[@]}"; do
   # Type evolution through TypeLookup: the two sides have different
   # versions of the type, and rustorb must get the peer's TypeObject from
   # it to match. Fast DDS 2.11.2 has no TypeLookup service.
-  if [ "$peer" = cyclonedds ]; then
+  if [ "$peer" != fastdds ]; then
     E=$BUILD/$peer/evolve
     for kind in appendable mutable; do
       for v in "v1 v2" "v2 v1"; do
@@ -379,7 +431,7 @@ for peer in "${PEERS[@]}"; do
     run_case "python-to-$peer-keyed" \
       "$PYTHON" "$PY/keyed.py" pub @D@ "$KEYED" 20 -- \
       timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
-    if [ "$peer" = cyclonedds ]; then
+    if [ "$peer" != fastdds ]; then
       for v in v1 v2; do
         run_case "$peer-$v-to-python-dynamic-mutable" \
           "$BUILD/$peer/evolve_$v" pub @D@ "$COUNT" mutable -- \
@@ -441,7 +493,9 @@ for peer in "${PEERS[@]}"; do
     timeout $((TIMEOUT + 5)) "$K" sub @D@ "$KEYED" "$TIMEOUT"
   # LIVELINESS: the writer stays alive while asserted, is lost when
   # silent (manual kinds) and comes back when it writes.
+  # The OpenDDS peer has none.
   L=$BUILD/$peer/liveliness
+  [ "$peer" = opendds ] && continue
   for kind in automatic participant topic; do
     run_case "$peer-to-rustorb-liveliness-$kind" \
       "$L" pub @D@ "$kind" "$LEASE" -- \

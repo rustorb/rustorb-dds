@@ -133,8 +133,10 @@ final class Ffi {
     static final MethodHandle rdds_participant_guid = Library.fn("rdds_participant_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_participant_new = Library.fn("rdds_participant_new", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_participant_release = Library.fn("rdds_participant_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_participant_set_listener = Library.fn("rdds_participant_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_publisher_create_writer = Library.fn("rdds_publisher_create_writer", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_publisher_release = Library.fn("rdds_publisher_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_publisher_set_listener = Library.fn("rdds_publisher_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_reader_create_readcondition = Library.fn("rdds_reader_create_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_reader_get_key_value = Library.fn("rdds_reader_get_key_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, Ffi.HANDLE, JAVA_LONG));
     static final MethodHandle rdds_reader_guid = Library.fn("rdds_reader_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
@@ -147,8 +149,8 @@ final class Ffi {
     static final MethodHandle rdds_reader_requested_incompatible_qos_status = Library.fn("rdds_reader_requested_incompatible_qos_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_sample_lost_status = Library.fn("rdds_reader_sample_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_sample_rejected_status = Library.fn("rdds_reader_sample_rejected_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
-    static final MethodHandle rdds_reader_select = Library.fn("rdds_reader_select", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
-    static final MethodHandle rdds_reader_select_w_condition = Library.fn("rdds_reader_select_w_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_reader_select = Library.fn("rdds_reader_select", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_reader_select_w_condition = Library.fn("rdds_reader_select_w_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BOOLEAN, JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_reader_set_listener = Library.fn("rdds_reader_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_reader_status_changes = Library.fn("rdds_reader_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_reader_status_condition = Library.fn("rdds_reader_status_condition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
@@ -176,9 +178,13 @@ final class Ffi {
     static final MethodHandle rdds_struct_builder_release = Library.fn("rdds_struct_builder_release", FunctionDescriptor.ofVoid(JAVA_LONG));
     static final MethodHandle rdds_subscriber_create_filtered_reader = Library.fn("rdds_subscriber_create_filtered_reader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_subscriber_create_reader = Library.fn("rdds_subscriber_create_reader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    static final MethodHandle rdds_subscriber_notify_datareaders = Library.fn("rdds_subscriber_notify_datareaders", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
     static final MethodHandle rdds_subscriber_release = Library.fn("rdds_subscriber_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_subscriber_same = Library.fn("rdds_subscriber_same", FunctionDescriptor.of(JAVA_BOOLEAN, JAVA_LONG, JAVA_LONG));
+    static final MethodHandle rdds_subscriber_set_listener = Library.fn("rdds_subscriber_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_topic_inconsistent_topic_status = Library.fn("rdds_topic_inconsistent_topic_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_topic_release = Library.fn("rdds_topic_release", FunctionDescriptor.ofVoid(JAVA_LONG));
+    static final MethodHandle rdds_topic_set_listener = Library.fn("rdds_topic_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     static final MethodHandle rdds_type_alias = Library.fn("rdds_type_alias", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_type_array = Library.fn("rdds_type_array", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
     static final MethodHandle rdds_type_deserialize = Library.fn("rdds_type_deserialize", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));

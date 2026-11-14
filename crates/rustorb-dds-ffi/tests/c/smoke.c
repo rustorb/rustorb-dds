@@ -99,7 +99,7 @@ int main(void) {
   CHECK(rdds_waitset_wait(ws, wait, active, 1, &n));
   EXPECT(n == 1 && active[0] == 0);
   rdds_samples *samples;
-  CHECK(rdds_reader_select(r, true, RDDS_ANY_SAMPLE_STATE, RDDS_ANY_VIEW_STATE,
+  CHECK(rdds_reader_select(r, true, RDDS_LENGTH_UNLIMITED, RDDS_ANY_SAMPLE_STATE, RDDS_ANY_VIEW_STATE,
                            RDDS_ANY_INSTANCE_STATE, RDDS_SELECT_ANY, NULL, &samples));
   for (size_t i = 0; i < rdds_samples_count(samples); i++) {
     rdds_sample_info info;

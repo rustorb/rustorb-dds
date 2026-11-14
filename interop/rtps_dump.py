@@ -54,7 +54,7 @@ def sn(b, e):
 
 def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
     e = "<" if flags & 1 else ">"
-    if sid == 0x15:
+    if sid in (0x15, 0x16):
         reader, writer, rest = body[4:8], body[8:12], body[12:]
     else:
         reader, writer, rest = body[0:4], body[4:8], body[8:]
@@ -64,15 +64,31 @@ def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
         print(f"domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} SEDP"
               f" {writer.hex()} " + " | ".join(t.decode() for t in text))
         return
-    if writer[3] & 0xC0 == 0xC0 and (reader[3] & 0xC0 == 0xC0 or reader == bytes(4)):
+    # TypeLookup (DDS-XTypes 1.3, 7.6.3.3.4): its requests and replies.
+    typelookup = writer.hex() in ("000300c3", "000301c3") or reader.hex() in (
+        "000300c4", "000301c4")
+    if (writer[3] & 0xC0 == 0xC0 and (reader[3] & 0xC0 == 0xC0 or reader == bytes(4))
+            and not typelookup):
         return
-    what = {0x06: "ACKNACK", 0x07: "HEARTBEAT", 0x08: "GAP", 0x15: "DATA"}[sid]
+    what = {0x06: "ACKNACK", 0x07: "HEARTBEAT", 0x08: "GAP", 0x12: "NACK_FRAG",
+            0x13: "HEARTBEAT_FRAG", 0x15: "DATA", 0x16: "DATA_FRAG"}[sid]
     if sid == 0x15:
-        detail = f"sn {sn(rest, e)} len {len(body)}"
+        shown = 160 if typelookup else 64
+        detail = f"sn {sn(rest, e)} len {len(body)} body {bytes(body[:shown]).hex()}"
     elif sid == 0x06:
         bits = struct.unpack(e + "I", rest[8:12])[0]
         words = rest[12:12 + 4 * ((bits + 31) // 32)]
         detail = f"base {sn(rest, e)} bits {bits} {words.hex()}"
+    elif sid == 0x16:
+        start, count, size, total = struct.unpack(e + "IHHI", rest[8:20])
+        detail = (f"sn {sn(rest, e)} fragments {start}+{count} of {size}"
+                  f" sample {total} len {len(body)}")
+    elif sid == 0x12:
+        base, bits = struct.unpack(e + "II", rest[8:16])
+        words = rest[16:16 + 4 * ((bits + 31) // 32)]
+        detail = f"sn {sn(rest, e)} base {base} bits {bits} {words.hex()}"
+    elif sid == 0x13:
+        detail = f"sn {sn(rest, e)} last fragment {struct.unpack(e + 'I', rest[8:12])[0]}"
     elif sid == 0x07:
         detail = f"first {sn(rest, e)} last {sn(rest[8:], e)}"
     else:
@@ -95,6 +111,10 @@ def main():
     shown = {}
     for sport, dport, u in packets(path):
         dom = domain_of(dport)
+        if dom not in domains:
+            # Replies to ports outside the domain's range (OpenDDS
+            # unicast) come from a port of the domain.
+            dom = domain_of(sport)
         if dom not in domains or u[:4] != b"RTPS":
             continue
         vendor, prefix = u[6:8].hex(), u[8:20].hex()
@@ -104,7 +124,7 @@ def main():
             le = flags & 1
             n = struct.unpack("<H" if le else ">H", u[at + 2:at + 4])[0]
             body = u[at + 4:at + 4 + n] if n else u[at + 4:]
-            if trace and sid in (0x06, 0x07, 0x08, 0x15) and len(body) >= 8:
+            if trace and sid in (0x06, 0x07, 0x08, 0x12, 0x13, 0x15, 0x16) and len(body) >= 8:
                 show_trace(dom, sport, dport, vendor, prefix, sid, flags, body)
             elif sid == 0x15 and len(body) >= 12:
                 writer = body[8:12]

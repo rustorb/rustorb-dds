@@ -6,6 +6,7 @@
 package org.omg.dds.domain;
 
 import org.omg.dds.core.event.DataAvailableEvent;
+import org.omg.dds.core.event.DataOnReadersEvent;
 import org.omg.dds.core.event.InconsistentTopicEvent;
 import org.omg.dds.core.event.LivelinessChangedEvent;
 import org.omg.dds.core.event.LivelinessLostEvent;
@@ -50,6 +51,10 @@ public class DomainParticipantAdapter implements DomainParticipantListener {
 
     @Override
     public void onLivelinessChanged(LivelinessChangedEvent<?> status) {
+    }
+
+    @Override
+    public void onDataOnReaders(DataOnReadersEvent status) {
     }
 
     @Override

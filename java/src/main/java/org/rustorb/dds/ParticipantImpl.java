@@ -62,25 +62,23 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
         this.defaultTopicQos = Qos.TopicQosImpl.defaults(env);
     }
 
-    static void unsupportedListener(Object listener, String what) {
-        if (listener != null) {
-            throw new UnsupportedOperationException("rustorb-dds has no " + what + " listeners yet");
-        }
-    }
+    private volatile DomainParticipantListener listener;
 
     @Override
     public DomainParticipantListener getListener() {
-        return null;
+        return listener;
     }
 
     @Override
     public void setListener(DomainParticipantListener listener) {
-        unsupportedListener(listener, "participant");
+        setListener(listener, null);
     }
 
     @Override
     public void setListener(DomainParticipantListener listener, Collection<Class<? extends Status>> statuses) {
-        unsupportedListener(listener, "participant");
+        GroupListeners.set(this, listener, null, StatusKinds.mask(statuses),
+                (t, m) -> (int) Ffi.rdds_participant_set_listener.invokeExact(handle(), t, m));
+        this.listener = listener;
     }
 
     @Override
@@ -134,9 +132,11 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
     @Override
     public Publisher createPublisher(
             PublisherQos qos, PublisherListener listener, Collection<Class<? extends Status>> statuses) {
-        unsupportedListener(listener, "publisher");
         PublisherImpl p = new PublisherImpl(this, qos == null ? defaultPublisherQos : qos);
         publishers.add(p);
+        if (listener != null) {
+            p.setListener(listener, statuses);
+        }
         return p;
     }
 
@@ -153,9 +153,11 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
     @Override
     public Subscriber createSubscriber(
             SubscriberQos qos, SubscriberListener listener, Collection<Class<? extends Status>> statuses) {
-        unsupportedListener(listener, "subscriber");
         SubscriberImpl s = new SubscriberImpl(this, qos == null ? defaultSubscriberQos : qos);
         subscribers.add(s);
+        if (listener != null) {
+            s.setListener(listener, statuses);
+        }
         return s;
     }
 
@@ -178,12 +180,14 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
     @Override
     public <TYPE> Topic<TYPE> createTopic(String topicName, TypeSupport<TYPE> type, TopicQos qos,
             TopicListener<TYPE> listener, Collection<Class<? extends Status>> statuses) {
-        unsupportedListener(listener, "topic");
         if (!(type instanceof TypeSupportImpl<TYPE> ts)) {
             throw new IllegalArgumentException("a TypeSupport of another DDS implementation");
         }
         TopicImpl<TYPE> t = new TopicImpl<>(this, topicName, ts, qos == null ? defaultTopicQos : qos);
         topics.add(t);
+        if (listener != null) {
+            t.setListener(listener, statuses);
+        }
         return t;
     }
 
@@ -330,12 +334,14 @@ final class ParticipantImpl extends EntityBase<DomainParticipantListener, Domain
         @Override
         public DomainParticipant createParticipant(int domainId, DomainParticipantQos qos,
                 DomainParticipantListener listener, Collection<Class<? extends Status>> statuses) {
-            return create(domainId, qos, listener, 0);
+            ParticipantImpl p = create(domainId, qos, 0);
+            if (listener != null) {
+                p.setListener(listener, statuses);
+            }
+            return p;
         }
 
-        ParticipantImpl create(int domainId, DomainParticipantQos qos, DomainParticipantListener listener,
-                int flags) {
-            unsupportedListener(listener, "participant");
+        ParticipantImpl create(int domainId, DomainParticipantQos qos, int flags) {
             if (domainId < 0) {
                 throw new IllegalArgumentException("a negative domain id");
             }

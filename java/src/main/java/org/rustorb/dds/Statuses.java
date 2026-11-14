@@ -30,6 +30,7 @@ import org.omg.dds.core.policy.WriterDataLifecycle;
 import org.omg.dds.core.status.*;
 import org.omg.dds.pub.DataWriter;
 import org.omg.dds.sub.DataReader;
+import org.omg.dds.sub.Subscriber;
 import org.omg.dds.topic.Topic;
 
 final class Statuses {
@@ -1024,6 +1025,55 @@ final class Statuses {
         @Override
         public SampleLostEv<T> clone() {
             return new SampleLostEv<>(getSource(), status);
+        }
+    }
+
+    static final class DataOnReaders extends DataOnReadersStatus {
+        private static final long serialVersionUID = 1L;
+        private final transient ServiceEnvironment env;
+
+        DataOnReaders(ServiceEnvironment env) {
+            this.env = env;
+        }
+
+        @Override
+        public ServiceEnvironment getEnvironment() {
+            return env;
+        }
+
+        @Override
+        public String toString() {
+            return "DataOnReadersStatus";
+        }
+    }
+
+    static final class DataOnReadersEv extends DataOnReadersEvent {
+        private static final long serialVersionUID = 1L;
+        private final DataOnReadersStatus status;
+
+        DataOnReadersEv(Subscriber source, DataOnReadersStatus status) {
+            super(source);
+            this.status = status;
+        }
+
+        @Override
+        public Subscriber getSource() {
+            return (Subscriber) source;
+        }
+
+        @Override
+        public DataOnReadersStatus getStatus() {
+            return status;
+        }
+
+        @Override
+        public ServiceEnvironment getEnvironment() {
+            return getSource().getEnvironment();
+        }
+
+        @Override
+        public DataOnReadersEv clone() {
+            return new DataOnReadersEv(getSource(), status);
         }
     }
 }

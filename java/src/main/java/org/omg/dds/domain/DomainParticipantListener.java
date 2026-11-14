@@ -7,6 +7,7 @@ package org.omg.dds.domain;
 
 import java.util.EventListener;
 import org.omg.dds.core.event.DataAvailableEvent;
+import org.omg.dds.core.event.DataOnReadersEvent;
 import org.omg.dds.core.event.InconsistentTopicEvent;
 import org.omg.dds.core.event.LivelinessChangedEvent;
 import org.omg.dds.core.event.LivelinessLostEvent;
@@ -19,7 +20,7 @@ import org.omg.dds.core.event.SampleLostEvent;
 import org.omg.dds.core.event.SampleRejectedEvent;
 import org.omg.dds.core.event.SubscriptionMatchedEvent;
 
-/** The listener of a DomainParticipant (not supported by rustorb-dds yet: setting one throws UnsupportedOperationException). */
+/** The listener of a DomainParticipant: what the listeners of its entities do not take. */
 public interface DomainParticipantListener extends EventListener {
     public void onOfferedDeadlineMissed(OfferedDeadlineMissedEvent<?> status);
 
@@ -36,6 +37,8 @@ public interface DomainParticipantListener extends EventListener {
     public void onSampleRejected(SampleRejectedEvent<?> status);
 
     public void onLivelinessChanged(LivelinessChangedEvent<?> status);
+
+    public void onDataOnReaders(DataOnReadersEvent status);
 
     public void onDataAvailable(DataAvailableEvent<?> status);
 

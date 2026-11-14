@@ -588,7 +588,13 @@ fn samples_go_from_a_writer_to_a_reader() {
         assert_eq!((n, active[0]), (1, 0));
 
         let mut samples = null_mut();
-        ok(rdds_reader_select_w_condition(r, true, cond, &mut samples));
+        ok(rdds_reader_select_w_condition(
+            r,
+            true,
+            -1,
+            cond,
+            &mut samples,
+        ));
         assert_eq!(rdds_samples_count(samples), 3);
         let mut got = Vec::new();
         for i in 0..3 {
@@ -639,6 +645,7 @@ fn samples_go_from_a_writer_to_a_reader() {
         ok(rdds_reader_select(
             r,
             true,
+            -1,
             3,
             3,
             7,
@@ -750,6 +757,7 @@ fn content_filtered_topics_filter_samples() {
             ok(rdds_reader_select(
                 r,
                 true,
+                -1,
                 3,
                 3,
                 7,
@@ -906,5 +914,137 @@ fn bad_arguments_fail_with_a_message() {
             rdds_type_hashes(null(), null_mut(), null_mut()),
             BAD_PARAMETER
         );
+    }
+}
+
+static ON_READERS: AtomicUsize = AtomicUsize::new(0);
+static GROUP_MATCHED: AtomicUsize = AtomicUsize::new(0);
+static GROUP_RELEASED: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn group_on_data_on_readers(_: *mut c_void, s: *const rustorb_dds::Subscriber) {
+    ON_READERS.fetch_add(1, Ordering::SeqCst);
+    unsafe {
+        // A handle kept beyond the call is the same subscriber.
+        let mut kept = null_mut();
+        ok(rustorb_dds_ffi::listener::rdds_subscriber_clone(
+            s, &mut kept,
+        ));
+        assert!(rustorb_dds_ffi::listener::rdds_subscriber_same(s, kept));
+        rdds_subscriber_release(kept);
+        ok(rustorb_dds_ffi::listener::rdds_subscriber_notify_datareaders(s));
+    }
+}
+
+unsafe extern "C" fn group_on_publication_matched(
+    _: *mut c_void,
+    w: *const rustorb_dds_ffi::listener::RddsEndpointInfo,
+    s: *const RddsMatchedStatus,
+) {
+    unsafe {
+        let w = &*w;
+        assert_eq!(CStr::from_ptr(w.topic_name).to_str().unwrap(), "grouped");
+        assert_eq!((*s).current_count, 1);
+    }
+    GROUP_MATCHED.fetch_add(1, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn group_release(_: *mut c_void) {
+    GROUP_RELEASED.fetch_add(1, Ordering::SeqCst);
+}
+
+static GROUP_DATA_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn group_reader_data_available(_: *mut c_void) {
+    GROUP_DATA_AVAILABLE.fetch_add(1, Ordering::SeqCst);
+}
+
+#[test]
+fn group_listeners_take_what_endpoint_listeners_do_not() {
+    use rustorb_dds_ffi::listener::*;
+    let inner = inner_type();
+    unsafe {
+        let mut p = null_mut();
+        ok(rdds_participant_new(
+            43,
+            null(),
+            PARTICIPANT_LOCALHOST,
+            &mut p,
+        ));
+        let mut topic = null_mut();
+        ok(rdds_participant_create_topic(
+            p,
+            c("grouped").as_ptr(),
+            inner.0,
+            &mut topic,
+        ));
+        let mut publisher = null_mut();
+        ok(rdds_participant_create_publisher(p, null(), &mut publisher));
+        let mut subscriber = null_mut();
+        ok(rdds_participant_create_subscriber(
+            p,
+            null(),
+            &mut subscriber,
+        ));
+        let mut l: RddsListener = std::mem::zeroed();
+        l.on_publication_matched = Some(group_on_publication_matched);
+        l.on_data_on_readers = Some(group_on_data_on_readers);
+        l.release = Some(group_release);
+        // PUBLICATION_MATCHED (1 << 13) on the participant; DATA_ON_READERS
+        // (1 << 9) on the subscriber.
+        ok(rdds_participant_set_listener(p, &l, 1 << 13));
+        ok(rdds_subscriber_set_listener(subscriber, &l, 1 << 9));
+
+        let reader_listener = RddsReaderListener {
+            self_: null_mut(),
+            on_requested_deadline_missed: None,
+            on_requested_incompatible_qos: None,
+            on_sample_rejected: None,
+            on_liveliness_changed: None,
+            on_data_available: Some(group_reader_data_available),
+            on_subscription_matched: None,
+            on_sample_lost: None,
+            release: None,
+        };
+        let mut rq = std::mem::zeroed();
+        ok(rdds_reader_qos_default(&mut rq));
+        rq.reliability_kind = 1;
+        let mut r = null_mut();
+        ok(rdds_subscriber_create_reader(
+            subscriber,
+            topic,
+            &rq,
+            &reader_listener,
+            1 << 10,
+            &mut r,
+        ));
+        let mut w = null_mut();
+        ok(rdds_publisher_create_writer(
+            publisher,
+            topic,
+            null(),
+            null(),
+            0,
+            &mut w,
+        ));
+        ok(rdds_writer_wait_for_subscriptions(w, 1, WAIT));
+        assert_eq!(GROUP_MATCHED.load(Ordering::SeqCst), 1);
+        write_inner(w, 1, "one");
+        ok(rdds_writer_wait_for_acknowledgments(w, WAIT));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while GROUP_DATA_AVAILABLE.load(Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < end);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ON_READERS.load(Ordering::SeqCst), 1);
+
+        ok(rdds_subscriber_set_listener(subscriber, null(), 0));
+        assert_eq!(GROUP_RELEASED.load(Ordering::SeqCst), 1);
+        rdds_writer_release(w);
+        rdds_reader_release(r);
+        rdds_publisher_release(publisher);
+        rdds_subscriber_release(subscriber);
+        rdds_topic_release(topic);
+        rdds_participant_release(p);
+        assert_eq!(GROUP_RELEASED.load(Ordering::SeqCst), 2);
     }
 }

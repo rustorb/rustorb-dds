@@ -79,8 +79,8 @@ fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
 
 #[test]
 fn automatic_writers_stay_alive() {
-    let a = participant(121);
-    let b = participant(121);
+    let a = participant(31);
+    let b = participant(31);
     let (writer, reader) = pair(
         &a,
         &b,
@@ -98,8 +98,8 @@ fn automatic_writers_stay_alive() {
 
 #[test]
 fn manual_by_topic_is_lost_and_asserted_again() {
-    let a = participant(122);
-    let b = participant(122);
+    let a = participant(32);
+    let b = participant(32);
     let (writer, reader) = pair(
         &a,
         &b,
@@ -171,8 +171,8 @@ fn manual_by_topic_is_lost_and_asserted_again() {
 
 #[test]
 fn manual_by_participant() {
-    let a = participant(123);
-    let b = participant(123);
+    let a = participant(33);
+    let b = participant(33);
     let (writer, reader) = pair(
         &a,
         &b,
@@ -209,8 +209,8 @@ fn manual_by_participant() {
 
 #[test]
 fn deleted_writers_are_not_counted_as_not_alive() {
-    let a = participant(124);
-    let b = participant(124);
+    let a = participant(34);
+    let b = participant(34);
     let (writer, reader) = pair(
         &a,
         &b,
@@ -228,8 +228,8 @@ fn deleted_writers_are_not_counted_as_not_alive() {
 
 #[test]
 fn deadlines() {
-    let a = participant(125);
-    let b = participant(125);
+    let a = participant(35);
+    let b = participant(35);
     // Long enough that a busy CI runner does not stall a writing loop
     // past it.
     let period = Duration::from_millis(400);

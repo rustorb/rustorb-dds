@@ -96,7 +96,7 @@ fn guard_condition_wakes_a_waiting_thread() {
 
 #[test]
 fn status_condition_follows_data_available() {
-    let p = participant(141, None);
+    let p = participant(41, None);
     let (writer, reader) = local_pair(&p, "status");
     let status = reader.status_condition();
     assert!(status == reader.status_condition());
@@ -142,7 +142,7 @@ fn status_condition_follows_data_available() {
 
 #[test]
 fn read_condition_follows_the_sample_states() {
-    let p = participant(142, None);
+    let p = participant(42, None);
     let (writer, reader) = local_pair(&p, "read");
     let other = local_pair(&p, "read-other").1;
     let not_read = reader.create_readcondition(StateFilter::NOT_READ);
@@ -217,8 +217,8 @@ fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
 
 #[test]
 fn listeners_see_matches_across_participants() {
-    let a = participant(143, None);
-    let b = participant(143, None);
+    let a = participant(43, None);
+    let b = participant(43, None);
     let calls = Arc::new(Matches::default());
     let writer = a
         .create_publisher()
@@ -287,9 +287,9 @@ fn listeners_see_matches_across_participants() {
 
 #[test]
 fn sample_lost_counts_what_never_arrived() {
-    let a = participant(144, None);
+    let a = participant(44, None);
     // The reader's participant drops one user datagram in four.
-    let b = participant(144, Some(4));
+    let b = participant(44, Some(4));
     let writer = a
         .create_publisher()
         .unwrap()
@@ -336,7 +336,7 @@ impl DataWriterListener<Greeting> for Deadlines {
 
 #[test]
 fn the_listener_mask_chooses_the_statuses() {
-    let p = participant(145, None);
+    let p = participant(45, None);
     let topic = p.create_topic::<Greeting>("mask").unwrap();
     let missed = Arc::new(AtomicU32::new(0));
     let writer = p
@@ -400,7 +400,7 @@ fn the_listener_mask_chooses_the_statuses() {
 fn listeners_given_at_creation_see_local_matches() {
     // The writer and reader match while they are created: only a
     // listener given then is told.
-    let p = participant(160, None);
+    let p = participant(46, None);
     let topic = p.create_topic::<Greeting>("created").unwrap();
     let calls = Arc::new(Matches::default());
     let reliable = DataReaderQos {

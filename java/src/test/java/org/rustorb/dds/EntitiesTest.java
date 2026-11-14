@@ -35,11 +35,13 @@ import org.omg.dds.core.ServiceEnvironment;
 import org.omg.dds.core.StatusCondition;
 import org.omg.dds.core.WaitSet;
 import org.omg.dds.core.event.DataAvailableEvent;
+import org.omg.dds.core.event.DataOnReadersEvent;
 import org.omg.dds.core.event.PublicationMatchedEvent;
 import org.omg.dds.core.event.SubscriptionMatchedEvent;
 import org.omg.dds.core.policy.PolicyFactory;
 import org.omg.dds.core.policy.Reliability;
 import org.omg.dds.core.status.DataAvailableStatus;
+import org.omg.dds.core.status.DataOnReadersStatus;
 import org.omg.dds.core.status.PublicationMatchedStatus;
 import org.omg.dds.core.status.Status;
 import org.omg.dds.core.status.SubscriptionMatchedStatus;
@@ -57,6 +59,7 @@ import org.omg.dds.sub.ReadCondition;
 import org.omg.dds.sub.Sample;
 import org.omg.dds.sub.SampleState;
 import org.omg.dds.sub.Subscriber;
+import org.omg.dds.sub.SubscriberAdapter;
 import org.omg.dds.sub.ViewState;
 import org.omg.dds.topic.ContentFilteredTopic;
 import org.omg.dds.topic.Topic;
@@ -112,9 +115,55 @@ class EntitiesTest {
         assertTrue(env.getSPI().nilHandle().isNil());
         assertTrue(env.getSPI().infiniteDuration().isInfinite());
         assertEquals(1500, Duration.newDuration(1500, TimeUnit.MILLISECONDS, env).getDuration(TimeUnit.MILLISECONDS));
-        // Only writer and reader listeners.
-        assertThrows(UnsupportedOperationException.class,
-                () -> dp.setListener(new DomainParticipantAdapter()));
+    }
+
+    @Test
+    void groupListeners() throws Exception {
+        CountDownLatch published = new CountDownLatch(1);
+        List<String> calls = new CopyOnWriteArrayList<>();
+        dp.setListener(new DomainParticipantAdapter() {
+            @Override
+            public void onPublicationMatched(PublicationMatchedEvent<?> e) {
+                calls.add("participant:matched " + e.getSource().getTopic().getName());
+                published.countDown();
+            }
+
+            @Override
+            public void onDataAvailable(DataAvailableEvent<?> e) {
+                calls.add("participant:data_available");
+            }
+        }, List.of(PublicationMatchedStatus.class, DataAvailableStatus.class));
+        assertNotNull(dp.getListener());
+        Topic<Greeting> topic = dp.createTopic("grouped", Greeting.class);
+        Publisher pub = dp.createPublisher();
+        CountDownLatch onReaders = new CountDownLatch(1);
+        CountDownLatch readerData = new CountDownLatch(1);
+        Subscriber sub = dp.createSubscriber(dp.getDefaultSubscriberQos(), new SubscriberAdapter() {
+            @Override
+            public void onDataOnReaders(DataOnReadersEvent e) {
+                calls.add("subscriber:data_on_readers");
+                e.getSource().notifyDataReaders();
+                onReaders.countDown();
+            }
+        }, List.of(DataOnReadersStatus.class));
+        DataReader<Greeting> reader = sub.createDataReader(topic, reliableReader(sub),
+                new DataReaderAdapter<Greeting>() {
+                    @Override
+                    public void onDataAvailable(DataAvailableEvent<Greeting> e) {
+                        calls.add("reader:data_available");
+                        readerData.countDown();
+                    }
+                }, List.of(DataAvailableStatus.class));
+        DataWriter<Greeting> writer = pub.createDataWriter(topic, reliableWriter(pub));
+        assertTrue(published.await(10, TimeUnit.SECONDS));
+        assertTrue(calls.contains("participant:matched grouped"));
+        writer.write(new Greeting(1, "g"));
+        assertTrue(onReaders.await(10, TimeUnit.SECONDS));
+        assertTrue(readerData.await(10, TimeUnit.SECONDS));
+        assertFalse(calls.contains("participant:data_available"));
+        assertEquals(1, takeAll(reader).size());
+        dp.setListener(null);
+        assertNull(dp.getListener());
     }
 
     @Test
@@ -221,11 +270,16 @@ class EntitiesTest {
             }
             assertEquals(2, n);
         }
+        // take with max samples: the first to arrive
+        try (Sample.Iterator<Greeting> it = reader.select().maxSamples(1).take()) {
+            assertEquals(1, it.next().getData().index);
+            assertFalse(it.hasNext());
+        }
         List<Sample<Greeting>> taken = takeAll(reader);
-        assertEquals(3, taken.size());
-        for (int i = 0; i < 3; i++) {
-            assertEquals(i + 1, taken.get(i).getData().index);
-            assertEquals("hello " + (i + 1), taken.get(i).getData().message);
+        assertEquals(2, taken.size());
+        for (int i = 0; i < 2; i++) {
+            assertEquals(i + 2, taken.get(i).getData().index);
+            assertEquals("hello " + (i + 2), taken.get(i).getData().message);
         }
         assertTrue(takeAll(reader).isEmpty());
 

@@ -21,7 +21,7 @@ public abstract class DomainParticipantFactory implements DDSObject {
 
     public abstract DomainParticipant createParticipant(int domainId);
 
-    /** listener must be null (participant listeners are not supported yet). */
+    /** The listener, if not null, is set once the participant is made. */
     public abstract DomainParticipant createParticipant(
             int domainId,
             DomainParticipantQos qos,

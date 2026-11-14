@@ -523,6 +523,57 @@ typedef struct rdds_reader_listener {
   void (*release)(void *self);
 } rdds_reader_listener;
 
+typedef struct rdds_subscriber rdds_subscriber;
+
+/* The writer or reader a status is of, given to an rdds_listener; the
+ * strings are valid for the call. */
+typedef struct rdds_endpoint_info {
+  rdds_guid guid;
+  const char *topic_name;
+  const char *type_name;
+} rdds_endpoint_info;
+
+/* The listener of a participant, publisher, subscriber or topic. It takes
+ * the statuses of the writers and readers that their own listeners do
+ * not (DDS 1.4, 2.2.4.3.1): a writer's go to its publisher's listener,
+ * else the participant's; a reader's to its subscriber's, else the
+ * participant's; INCONSISTENT_TOPIC to the topic's, else the
+ * participant's. New data goes to on_data_on_readers of the subscriber's
+ * listener, else the participant's, and only when neither takes
+ * DATA_ON_READERS to on_data_available (2.2.4.3.2); the subscriber passed
+ * to on_data_on_readers is valid for the call (rdds_subscriber_clone
+ * keeps it). Functions that do not fit the entity are not called; any
+ * may be NULL; release as for rdds_writer_listener. */
+typedef struct rdds_listener {
+  void *self;
+  void (*on_offered_deadline_missed)(void *self, const rdds_endpoint_info *w,
+                                     const rdds_deadline_missed_status *s);
+  void (*on_offered_incompatible_qos)(void *self, const rdds_endpoint_info *w,
+                                      const rdds_incompatible_qos_status *s);
+  void (*on_liveliness_lost)(void *self, const rdds_endpoint_info *w,
+                             const rdds_count_status *s);
+  void (*on_publication_matched)(void *self, const rdds_endpoint_info *w,
+                                 const rdds_matched_status *s);
+  void (*on_data_on_readers)(void *self, const rdds_subscriber *s);
+  void (*on_requested_deadline_missed)(void *self, const rdds_endpoint_info *r,
+                                       const rdds_deadline_missed_status *s);
+  void (*on_requested_incompatible_qos)(void *self,
+                                        const rdds_endpoint_info *r,
+                                        const rdds_incompatible_qos_status *s);
+  void (*on_sample_rejected)(void *self, const rdds_endpoint_info *r,
+                             const rdds_sample_rejected_status *s);
+  void (*on_liveliness_changed)(void *self, const rdds_endpoint_info *r,
+                                const rdds_liveliness_changed_status *s);
+  void (*on_data_available)(void *self, const rdds_endpoint_info *r);
+  void (*on_subscription_matched)(void *self, const rdds_endpoint_info *r,
+                                  const rdds_matched_status *s);
+  void (*on_sample_lost)(void *self, const rdds_endpoint_info *r,
+                         const rdds_count_status *s);
+  void (*on_inconsistent_topic)(void *self, const char *topic_name,
+                                const rdds_count_status *s);
+  void (*release)(void *self);
+} rdds_listener;
+
 /* ------------------------------------------------------------------ */
 /* Entities                                                           */
 
@@ -530,7 +581,6 @@ typedef struct rdds_participant rdds_participant;
 typedef struct rdds_topic rdds_topic;
 typedef struct rdds_cftopic rdds_cftopic;
 typedef struct rdds_publisher rdds_publisher;
-typedef struct rdds_subscriber rdds_subscriber;
 typedef struct rdds_writer rdds_writer;
 typedef struct rdds_reader rdds_reader;
 typedef struct rdds_samples rdds_samples;
@@ -581,6 +631,29 @@ rdds_status rdds_participant_create_subscriber(const rdds_participant *p,
                                                const rdds_group_qos *qos,
                                                rdds_subscriber **out);
 void rdds_subscriber_release(rdds_subscriber *s);
+
+/* Listeners of the participant, publisher, subscriber and topic (see
+ * rdds_listener); listener NULL clears it. */
+rdds_status rdds_participant_set_listener(const rdds_participant *p,
+                                          const rdds_listener *listener,
+                                          uint32_t mask);
+rdds_status rdds_publisher_set_listener(const rdds_publisher *p,
+                                        const rdds_listener *listener,
+                                        uint32_t mask);
+rdds_status rdds_subscriber_set_listener(const rdds_subscriber *s,
+                                         const rdds_listener *listener,
+                                         uint32_t mask);
+rdds_status rdds_topic_set_listener(const rdds_topic *t,
+                                    const rdds_listener *listener,
+                                    uint32_t mask);
+/* Calls on_data_available of the listeners of the subscriber's readers
+ * that have new data (notify_datareaders). */
+rdds_status rdds_subscriber_notify_datareaders(const rdds_subscriber *s);
+/* Another handle of the same subscriber, to release on its own. */
+rdds_status rdds_subscriber_clone(const rdds_subscriber *s,
+                                  rdds_subscriber **out);
+/* Whether two handles are of the same subscriber. */
+bool rdds_subscriber_same(const rdds_subscriber *a, const rdds_subscriber *b);
 
 /* Writers. qos and listener may be NULL; the listener is set before the
  * writer is matched. timestamp NULL: now. */
@@ -680,17 +753,20 @@ typedef struct rdds_sample_info {
   bool valid_data;
 } rdds_sample_info;
 
-/* Reads (or takes) the samples in the states of the masks. With
+/* Reads (or takes) at most max_samples (RDDS_LENGTH_UNLIMITED for any
+ * number) of the samples in the states of the masks, the first to arrive.
+ * With
  * RDDS_SELECT_INSTANCE, those of *instance (the masks ignored); with
  * RDDS_SELECT_NEXT_INSTANCE, those of the instance after *instance (NULL
  * or HANDLE_NIL for the first). No samples is RDDS_RETCODE_OK with an
  * empty rdds_samples. */
 rdds_status rdds_reader_select(const rdds_reader *r, bool take,
-                               uint32_t sample_states, uint32_t view_states,
+                               int32_t max_samples, uint32_t sample_states, uint32_t view_states,
                                uint32_t instance_states, int32_t mode,
                                const rdds_instance_handle *instance,
                                rdds_samples **out);
 rdds_status rdds_reader_select_w_condition(const rdds_reader *r, bool take,
+                                           int32_t max_samples,
                                            const rdds_condition *condition,
                                            rdds_samples **out);
 size_t rdds_samples_count(const rdds_samples *s);
