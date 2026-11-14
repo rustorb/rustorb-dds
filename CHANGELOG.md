@@ -96,6 +96,9 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 - Tests use domain ids of 100 or less, so that their ports stay below the
   ephemeral port range and do not fail with `AddrInUse` (#64).
+- Readers take samples whose encapsulation counts padding octets that
+  the payload does not have (OpenDDS 3.31 leaves them out of a DATA that
+  ends a message); they were dropped (#68).
 
 ## [python-0.1.0] - 2026-11-05
 

@@ -498,6 +498,9 @@ impl ReaderState {
         if let (Some(sec), Some(p)) = (&self.payload_security, payload.as_mut()) {
             p.bytes = sec.decode_payload(&c.writer, &p.bytes)?;
         }
+        if let Some(p) = payload.as_mut() {
+            drop_missing_padding(&mut p.bytes);
+        }
         let change = if lifecycle {
             instance::Change::Lifecycle {
                 disposed: status & STATUS_DISPOSED != 0,
@@ -532,6 +535,17 @@ impl ReaderState {
             instance,
             change,
         })
+    }
+}
+
+/// Clears the padding count of an encapsulation (DDS-XTypes 1.3,
+/// 7.6.3.1.2: the last two bits of the options) when the payload does not
+/// have the octets it counts. OpenDDS 3.31 counts the octets that pad its
+/// data to a multiple of 4, but leaves them out of a DATA that ends the
+/// message; read as counted, the data would lose its last octets.
+fn drop_missing_padding(bytes: &mut [u8]) {
+    if bytes.len() > 4 && bytes[3] & 3 != 0 && (bytes.len() - 4) % 4 != 0 {
+        bytes[3] &= !3;
     }
 }
 
@@ -2854,5 +2868,24 @@ fn for_readers(
                 inner.pending.push((*rg, k));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod padding_tests {
+    use super::drop_missing_padding;
+
+    #[test]
+    fn padding_counted_but_not_sent_is_dropped() {
+        // OpenDDS: "Hello, world!" (22 octets of data), 2 counted, none sent.
+        let mut p = vec![0, 1, 0, 2, 1, 0, 0, 0, 14, 0, 0, 0];
+        p.extend_from_slice(b"Hello, world!\0");
+        drop_missing_padding(&mut p);
+        assert_eq!(p[3], 0);
+        // The same with the 2 octets sent: kept as it is.
+        let mut q = vec![0, 1, 0, 2, 1, 0, 0, 0, 14, 0, 0, 0];
+        q.extend_from_slice(b"Hello, world!\0\0\0");
+        drop_missing_padding(&mut q);
+        assert_eq!(q[3], 2);
     }
 }
