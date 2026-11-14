@@ -200,6 +200,7 @@ jobs:
         env:
           PYTHON: python
           OUT: ${{ github.workspace }}/target/interop-opendds
+          DUMP: 1
       - name: Keep the logs, versions and captures
         if: always()
         uses: actions/upload-artifact@v4

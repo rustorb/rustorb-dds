@@ -13,6 +13,7 @@
 #
 # Environment:
 #   OUT        where to write results
+#   DUMP       1 to print an RTPS trace of each failed case's capture
 #   CAPTURE    1 to capture packets with tcpdump (default: 1 when tcpdump
 #              is there and we are root or have sudo)
 #   COUNT      samples the subscriber must receive (default 3)
@@ -270,6 +271,12 @@ run_case() {
     RESULTS+=("FAIL $name (publisher $pub_rc, subscriber $sub_rc)")
     FAILED+=("$name")
     tail -n 5 "$dir/pub.log" "$dir/sub.log"
+    if [ "${DUMP:-0}" = 1 ] && [ -f "$dir/capture.pcap" ]; then
+      echo "--- $name: RTPS trace (domain $DOMAIN)"
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --trace | head -n 120
+      echo "--- $name: first user DATA"
+      python3 "$ROOT/interop/rtps_dump.py" "$dir/capture.pcap" "$DOMAIN" --max 2 | head -n 40
+    fi
   fi
 }
 
