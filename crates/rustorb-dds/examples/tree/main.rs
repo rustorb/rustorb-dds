@@ -28,7 +28,7 @@ use rustorb_xtypes::types::{AliasType, Extensibility, Primitive, StructMember, S
 fn node_type() -> DynamicType {
     let fwd = Type::forward("Tree::Node");
     let seq = Type::from(AliasType {
-        name: "Tree::NodeSeq".into(),
+        name: "Tree::Children".into(),
         related: Type::sequence(fwd.clone()),
     });
     let node = Type::from(StructType {
