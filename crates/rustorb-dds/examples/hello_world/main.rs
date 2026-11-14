@@ -205,16 +205,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             waitset.attach_condition(&status)?;
             println!("rustorb-dds: waiting for greetings...");
             let mut got = 0;
+            let mut without_data = 0;
             while got < count - skip {
                 let left = deadline.saturating_duration_since(Instant::now());
                 match waitset.wait(left) {
                     Err(Error::Timeout) => {
-                        return Err(format!("rustorb-dds: got {got} of {count} samples").into());
+                        let matched = reader.subscription_matched_status().current_count;
+                        return Err(format!(
+                            "rustorb-dds: got {got} of {count} samples \
+                             ({without_data} without data, {matched} writers matched)"
+                        )
+                        .into());
                     }
                     r => r?,
                 };
                 // Samples without data tell that the writer is gone.
-                for s in reader.take().into_iter().filter_map(|s| s.data) {
+                let taken = reader.take();
+                without_data += taken.iter().filter(|s| s.data.is_none()).count();
+                for s in taken.into_iter().filter_map(|s| s.data) {
                     if s.message != message(s.index) {
                         let start: String = s.message.chars().take(40).collect();
                         return Err(format!(

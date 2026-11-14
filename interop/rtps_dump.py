@@ -68,7 +68,7 @@ def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
         return
     what = {0x06: "ACKNACK", 0x07: "HEARTBEAT", 0x08: "GAP", 0x15: "DATA"}[sid]
     if sid == 0x15:
-        detail = f"sn {sn(rest, e)} len {len(body)}"
+        detail = f"sn {sn(rest, e)} len {len(body)} body {bytes(body[:64]).hex()}"
     elif sid == 0x06:
         bits = struct.unpack(e + "I", rest[8:12])[0]
         words = rest[12:12 + 4 * ((bits + 31) // 32)]
@@ -95,6 +95,10 @@ def main():
     shown = {}
     for sport, dport, u in packets(path):
         dom = domain_of(dport)
+        if dom not in domains:
+            # Replies to ports outside the domain's range (OpenDDS
+            # unicast) come from a port of the domain.
+            dom = domain_of(sport)
         if dom not in domains or u[:4] != b"RTPS":
             continue
         vendor, prefix = u[6:8].hex(), u[8:20].hex()
