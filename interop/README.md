@@ -12,6 +12,7 @@ subscriber receives the samples (rustorb-dds#8), best-effort and reliable
 |---|---|---|
 | Cyclone DDS | Ubuntu 24.04 packages `cyclonedds-dev`, `cyclonedds-tools` | `cyclonedds/hello.c`, type code from `idlc` |
 | Fast DDS | Ubuntu 24.04 packages `libfastrtps-dev`, `fastddsgen` | `fastdds/hello.cpp`, type code from `fastddsgen` |
+| OpenDDS 3.31 | the image `ghcr.io/opendds/opendds:DDS-3.31` (`OPENDDS_IMAGE`) | `opendds/hello.cpp`, `keyed.cpp`, `evolve.cpp`, type code from `opendds_idl` |
 
 The peers are black boxes: the programs use their public APIs and the
 code their generators make from `idl/HelloWorld.idl` and `idl/Keyed.idl`.
@@ -27,7 +28,21 @@ sudo apt-get install cmake g++ tcpdump \
   cyclonedds-dev cyclonedds-tools libfastrtps-dev fastddsgen
 interop/run.sh              # every peer
 interop/run.sh fastdds      # one peer
+interop/run.sh opendds      # OpenDDS, in Docker
 ```
+
+OpenDDS has no Ubuntu package: `run.sh opendds` builds its programs in
+a container of `OPENDDS_IMAGE` (with cmake and g++ added) and runs each
+one in a container on the host's network (`--network host`), with
+`opendds/rtps.ini` (RTPS discovery and the RTPS_UDP transport).
+`OPENDDS_IMAGE=` (empty) builds and runs them with an OpenDDS installed
+on the host (`DDS_ROOT`) instead. `opendds/rtps.ini` asks for socket
+buffers of 4 MiB, which `net.core.rmem_max` and `net.core.wmem_max` must
+allow (`sudo sysctl -w net.core.rmem_max=4194304
+net.core.wmem_max=4194304`); with less, the `-large` cases lose most
+fragments on the OpenDDS side and time out. The OpenDDS programs have
+no security, content filter or liveliness cases, so those are skipped
+for it.
 
 Each case is a publisher and a subscriber in their own processes on a
 domain of its own. The publisher waits until it sees the subscriber, waits
@@ -66,8 +81,8 @@ rustorb-dds reader rather than filtering on its side; the Fast DDS reader
 announces its filter in the layout of DDSI-RTPS 2.5, 9.6.3.1 (a capture
 is in the `fast_dds_content_filter` test of `rustorb-rtps`).
 
-The `-v<N>-to-<peer>-v<M>-<kind>` cases (Cyclone DDS only: Fast DDS
-2.11.2 has no TypeLookup service) use the `evolve` programs (the `evolve`
+The `-v<N>-to-<peer>-v<M>-<kind>` cases (Cyclone DDS and OpenDDS: Fast
+DDS 2.11.2 has no TypeLookup service) use the `evolve` programs (the `evolve`
 example on the rustorb-dds side): the publisher has version N of the type
 and the subscriber version M, from `idl/EvolveV1.idl` and
 `idl/EvolveV2.idl`, where version 2 has one more member. `kind` is
@@ -78,7 +93,7 @@ peer's TypeObject with TypeLookup (`RUSTORB_EXPECT_TYPE_LOOKUP`), and the
 peer gets rustorb-dds's from it.
 
 The `-v<N>-to-rustorb-dynamic-<kind>` and `rustorb-dynamic-to-<peer>-v<N>-<kind>`
-cases (Cyclone DDS only, for the same reason) use the `dynamic` example
+cases (Cyclone DDS and OpenDDS, for the same reason) use the `dynamic` example
 on the rustorb-dds side, which is not built with the type: it gets the
 type of the peer's writer or reader with TypeLookup (its COMPLETE
 TypeObjects) and reads or writes DynamicData of it, with the members of
@@ -87,7 +102,7 @@ the evolve programs looked up by name.
 The `python-` cases (rustorb-dds#35) run the Python binding's examples
 in `python/examples` on the rustorb-dds side, with the same command
 lines as the Rust examples: `hello_world.py` (best effort and reliable),
-`keyed.py`, and, with Cyclone DDS, `dynamic.py` (mutable), which takes
+`keyed.py`, and, with Cyclone DDS and OpenDDS, `dynamic.py` (mutable), which takes
 the type from the peer like the `dynamic` example. They need the
 `rustorb_dds` package installed in `PYTHON` (default `python3`): `pip
 install ./python`. Without it they are skipped.
@@ -143,7 +158,10 @@ Results go to `target/interop` (or `$OUT`):
   turns it off). Wireshark decodes RTPS.
 
 The CI job `interop` runs the script on Ubuntu 24.04 and keeps the results
-as an artifact.
+as an artifact; the job `opendds` runs `run.sh opendds`. With `DUMP=1`
+(set in CI), the script prints an RTPS trace of each failed case's
+capture (`rtps_dump.py --trace`: user DATA, DATA_FRAG and their
+acknowledgments, SEDP and TypeLookup).
 
 ## Results
 
@@ -162,7 +180,31 @@ as an artifact.
 | 2026-11-04 | rustorb-dds#35 (Python binding) | 0.10.4 | 2.11.2 (Fast CDR 1.1.0, fastddsgen 2.3.0) | all 74 cases pass (16 Python) |
 | 2026-11-12 | rustorb-dds#59 (DDS Security) | 0.10.4 | 2.11.2 | the 8 `-secure` cases pass (also with RTPS protection SIGN, by hand) |
 
+| Date | rustorb-dds | OpenDDS | Result |
+|---|---|---|---|
+| 2026-11-14 | rustorb-dds#68 | 3.31 (`ghcr.io/opendds/opendds:DDS-3.31`) | all 54 cases pass (Rust, Python, C++, Java) |
+
 Found on the way:
+
+- OpenDDS 3.31 (rustorb-dds#68): `opendds_idl` makes a struct a topic
+  type only with `@topic` or `--no-default-nested`, its default
+  extensibility is APPENDABLE (the other peers make the hello world
+  FINAL, so `--default-extensibility final`), and it puts COMPLETE
+  TypeObjects in the type information only with `-Gxtypes-complete`
+  (without, the dynamic cases never got a type). The programs must be
+  built with the C++ standard of the OpenDDS libraries (another one made
+  them crash). Its writers send DATA to the user multicast locator, with
+  the `octetsToNextHeader` of the last submessage 0, and count in the
+  encapsulation options 1 to 3 octets of padding that the payload does
+  not have; rustorb-dds dropped those samples (the string at the end came
+  out short) until it ignored a padding count larger than what is there.
+  It registers an instance with a DATA of status 0 and a key payload
+  (K flag), and its readers need the key payload with a dispose or an
+  unregister, which rustorb-dds now adds when a reader of OpenDDS
+  (vendor id `0x0103`) is matched; Fast DDS still gets the key hash
+  alone (see Keyed below). For the `-large` cases its default socket
+  buffer lost most of the 12 KiB datagrams of fragments; it asks for
+  them with NACK_FRAG after each HEARTBEAT.
 
 - DDS Security (rustorb-dds#59): Cyclone DDS 0.10.4 starts no handshake
   with a participant that does not announce the secure SPDP endpoints

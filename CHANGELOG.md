@@ -8,6 +8,10 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Interoperability tests with OpenDDS 3.31 (`interop/run.sh opendds`, in
+  Docker, and the CI job `opendds`, #68): best effort, reliable,
+  transient-local, large samples, keyed instances, XCDR2, type evolution
+  and TypeLookup, from Rust, Python, C++ and Java.
 - `max_samples` for takes as well as reads (DDS 1.4, 2.2.2.5.3.8, #67):
   `DataReader::max_samples(n)` in Rust gives the first `n` samples to
   arrive and leaves the others as they were; `max_samples` of
