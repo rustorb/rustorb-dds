@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(rustorb_interop_opendds CXX)
-set(CMAKE_CXX_STANDARD 14)
+# No CMAKE_CXX_STANDARD: the OpenDDS targets carry the standard OpenDDS
+# was built with, and a different one changes its ABI.
 find_package(OpenDDS REQUIRED)
 set(IDL ${CMAKE_CURRENT_SOURCE_DIR}/../idl)
 # HelloWorld.idl and Keyed.idl have no extensibility annotation, and the

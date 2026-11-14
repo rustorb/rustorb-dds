@@ -66,7 +66,10 @@ inline void set_representation(DDS::DataRepresentationIdSeq& seq, bool xcdr1, bo
 // configuration file, rtps.ini), which it removes from argv.
 inline DDS::DomainParticipantFactory_ptr factory(int& argc, char** argv)
 {
-    return TheParticipantFactoryWithArgs(argc, argv);
+    std::fprintf(stderr, "opendds: starting\n");
+    DDS::DomainParticipantFactory_ptr f = TheParticipantFactoryWithArgs(argc, argv);
+    std::fprintf(stderr, "opendds: participant factory %s\n", f ? "ready" : "missing");
+    return f;
 }
 
 inline DDS::DomainParticipant_ptr participant(DDS::DomainParticipantFactory_ptr f, int domain)
