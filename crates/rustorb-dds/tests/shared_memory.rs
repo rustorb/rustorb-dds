@@ -71,13 +71,13 @@ fn exchange(a: &DomainParticipant, b: &DomainParticipant, n: u32, size: usize) {
 
 #[test]
 fn large_samples_through_shared_memory() {
-    let (a, b) = (participant(191, true), participant(191, true));
+    let (a, b) = (participant(91, true), participant(91, true));
     exchange(&a, &b, 30, 200_000);
 }
 
 #[test]
 fn udp_with_a_participant_without_shared_memory() {
-    let (a, b) = (participant(192, true), participant(192, false));
+    let (a, b) = (participant(92, true), participant(92, false));
     exchange(&a, &b, 10, 100_000);
     exchange(&b, &a, 10, 1000);
 }

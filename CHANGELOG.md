@@ -78,6 +78,11 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
   them), the DCPS entities with their QoS, statuses and listeners,
   conditions and WaitSets (#44).
 
+### Fixed
+
+- Tests use domain ids of 100 or less, so that their ports stay below the
+  ephemeral port range and do not fail with `AddrInUse` (#64).
+
 ## [python-0.1.0] - 2026-11-05
 
 ### Added

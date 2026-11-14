@@ -25,3 +25,14 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
+
+## Domains in tests
+
+Tests that open participants use a domain id of 100 or less, a different one
+for each test of a file. With the default port mapping (DDSI-RTPS 9.6.1.1,
+PB 7400 and DG 250) the ports of domain 101 and above fall in the ephemeral
+port range of the operating system (32768 and up on Linux, 49152 and up on
+macOS and Windows), where another socket may already hold them and the test
+fails with `AddrInUse`. The one exception is domain 231 in
+`crates/rustorb-dds/tests/security.rs`, which the test permissions leave out
+on purpose.

@@ -71,7 +71,7 @@ fn exchange(
 
 #[test]
 fn registered_types_match_by_type_information() {
-    let (a, b) = (participant(150), participant(150));
+    let (a, b) = (participant(50), participant(50));
     a.register_type::<Greeting>().unwrap();
     b.register_type::<Greeting>().unwrap();
     // Registering again does nothing.
@@ -94,7 +94,7 @@ fn registered_types_match_by_type_information() {
 
 #[test]
 fn one_side_without_type_information_matches_by_name() {
-    let (a, b) = (participant(151), participant(151));
+    let (a, b) = (participant(51), participant(51));
     a.register_type::<Greeting>().unwrap();
     let writer = a
         .create_publisher()
@@ -114,7 +114,7 @@ fn one_side_without_type_information_matches_by_name() {
 
 #[test]
 fn force_type_validation_needs_type_information() {
-    let (a, b) = (participant(152), participant(152));
+    let (a, b) = (participant(52), participant(52));
     b.register_type::<Greeting>().unwrap();
     let topic_a = a.create_topic::<Greeting>("xt").unwrap();
     let topic_b = b.create_topic::<Greeting>("xt").unwrap();
@@ -147,7 +147,7 @@ fn force_type_validation_needs_type_information() {
 
 #[test]
 fn different_type_names_are_inconsistent_topics() {
-    let (a, b) = (participant(153), participant(153));
+    let (a, b) = (participant(53), participant(53));
     let topic_a = a.create_topic::<Greeting>("xt").unwrap();
     let topic_b = b.create_topic::<Shape>("xt").unwrap();
     let writer = a
@@ -177,7 +177,7 @@ fn types_that_are_not_assignable_do_not_match_locally() {
     // In one participant, every registered type is known: a Shape reader
     // is not assignable from a Greeting writer (FINAL types with other
     // members), whatever their names.
-    let p = participant(154);
+    let p = participant(54);
     p.register_type::<Greeting>().unwrap();
     p.register_type::<Shape>().unwrap();
     let writer = p
@@ -196,7 +196,7 @@ fn types_that_are_not_assignable_do_not_match_locally() {
 
 #[test]
 fn xcdr2_writers() {
-    let (a, b) = (participant(155), participant(155));
+    let (a, b) = (participant(55), participant(55));
     let writer = a
         .create_publisher()
         .unwrap()
@@ -250,7 +250,7 @@ fn xcdr2_writers() {
 
 #[test]
 fn other_versions_of_a_type_come_by_type_lookup() {
-    let (a, b) = (participant(156), participant(156));
+    let (a, b) = (participant(56), participant(56));
     a.register_type::<v1::evolve::Mutable>().unwrap();
     b.register_type::<v2::evolve::Mutable>().unwrap();
     let writer = a
@@ -303,7 +303,7 @@ fn other_versions_of_a_type_come_by_type_lookup() {
 fn types_that_come_by_type_lookup_can_be_inconsistent() {
     // An APPENDABLE writer and a MUTABLE reader: not assignable, which
     // each side finds once it has the other's TypeObject.
-    let (a, b) = (participant(157), participant(157));
+    let (a, b) = (participant(57), participant(57));
     a.register_type::<v1::evolve::Appendable>().unwrap();
     b.register_type::<v1::evolve::Mutable>().unwrap();
     let topic_a = a.create_topic::<v1::evolve::Appendable>("xt").unwrap();
@@ -333,7 +333,7 @@ fn types_that_come_by_type_lookup_can_be_inconsistent() {
 /// included.
 #[test]
 fn dynamic_data_readers_read_types_they_discover() {
-    let (a, b) = (participant(158), participant(158));
+    let (a, b) = (participant(58), participant(58));
     a.register_type::<Shape>().unwrap();
     let writer = a
         .create_publisher()
@@ -399,7 +399,7 @@ fn dynamic_data_readers_read_types_they_discover() {
 #[test]
 fn dynamic_data_writers_write_to_typed_readers() {
     use rustorb_dds::DescribeType;
-    let (a, b) = (participant(159), participant(159));
+    let (a, b) = (participant(59), participant(59));
     // Version 1 written dynamically, version 2 read.
     let ty = DynamicType::from(<v1::evolve::Appendable as DescribeType>::describe_type());
     let topic = a.create_dynamic_topic("dyn", &ty).unwrap();

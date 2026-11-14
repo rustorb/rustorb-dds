@@ -64,8 +64,8 @@ fn reader_qos(durability: DurabilityKind) -> DataReaderQos {
 
 #[test]
 fn transient_local_late_joiners() {
-    let a = participant(111);
-    let b = participant(111);
+    let a = participant(21);
+    let b = participant(21);
     let writer = a
         .create_publisher()
         .unwrap()
@@ -108,8 +108,8 @@ fn transient_local_late_joiners() {
 
 #[test]
 fn partitions_with_wildcards() {
-    let a = participant(112);
-    let b = participant(112);
+    let a = participant(22);
+    let b = participant(22);
     let partition = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let writer = a
         .create_publisher_with_qos(PublisherQos {
@@ -140,8 +140,8 @@ fn partitions_with_wildcards() {
 
 #[test]
 fn incompatible_qos_is_counted() {
-    let a = participant(113);
-    let b = participant(113);
+    let a = participant(23);
+    let b = participant(23);
     let writer_qos = DataWriterQos {
         reliability: Reliability::best_effort(),
         deadline: Some(Duration::from_secs(2)),
@@ -195,7 +195,7 @@ fn incompatible_qos_is_counted() {
 
 #[test]
 fn transient_and_persistent_writers_are_unsupported() {
-    let a = participant(114);
+    let a = participant(24);
     let topic = a.create_topic::<Greeting>("u").unwrap();
     let r = a.create_publisher().unwrap().create_datawriter_with_qos(
         &topic,
@@ -209,7 +209,7 @@ fn transient_and_persistent_writers_are_unsupported() {
 
 #[test]
 fn leaving_tells_the_others() {
-    let mut c = ParticipantConfig::localhost(115);
+    let mut c = ParticipantConfig::localhost(25);
     c.announce_period = Duration::from_millis(200);
     // The lease alone would keep it for a minute.
     c.lease_duration = Duration::from_secs(60);

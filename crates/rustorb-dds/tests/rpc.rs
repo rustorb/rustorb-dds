@@ -45,7 +45,7 @@ fn serve(replier: &Replier<Shape, Shape>, n: usize) {
 
 #[test]
 fn replies_go_to_their_requests() {
-    let (a, b) = (participant(181), participant(181));
+    let (a, b) = (participant(81), participant(81));
     let replier = Replier::<Shape, Shape>::new(&b, "Double").unwrap();
     let requester = Requester::<Shape, Shape>::new(&a, "Double").unwrap();
     assert!(requester.wait_for_service(WAIT));
@@ -69,8 +69,8 @@ fn replies_go_to_their_requests() {
 
 #[test]
 fn requesters_get_only_their_replies() {
-    let p = participant(182);
-    let q = participant(182);
+    let p = participant(82);
+    let q = participant(82);
     let config = RpcConfig::with_topics("rq/addRequest", "rr/addReply");
     let replier = Replier::<Shape, Shape>::with_config(&p, &config).unwrap();
     let first = Requester::<Shape, Shape>::with_config(&q, &config).unwrap();
@@ -99,7 +99,7 @@ fn requesters_get_only_their_replies() {
 
 #[test]
 fn request_waits_for_the_reply() {
-    let p = participant(183);
+    let p = participant(83);
     let replier = Replier::<Shape, Shape>::new(&p, "Echo").unwrap();
     let requester = Requester::<Shape, Shape>::new(&p, "Echo").unwrap();
     assert!(requester.wait_for_service(WAIT));
@@ -110,7 +110,7 @@ fn request_waits_for_the_reply() {
 
 #[test]
 fn no_service_no_match() {
-    let p = participant(184);
+    let p = participant(84);
     let requester = Requester::<Shape, Shape>::new(&p, "Nobody").unwrap();
     assert!(!requester.wait_for_service(Duration::from_millis(500)));
 }

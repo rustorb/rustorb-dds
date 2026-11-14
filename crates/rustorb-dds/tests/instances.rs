@@ -80,7 +80,7 @@ fn take_n(r: &DataReader<Shape>, n: usize) -> Vec<(u32, u32, InstanceState)> {
 #[test]
 fn instances_in_one_participant() {
     use InstanceState::*;
-    let p = participant(101);
+    let p = participant(11);
     let topic = p.create_topic::<Shape>("shapes").unwrap();
     let reader = p
         .create_subscriber()
@@ -173,8 +173,8 @@ fn instances_in_one_participant() {
 #[test]
 fn instances_over_udp() {
     use InstanceState::*;
-    let a = participant(102);
-    let b = participant(102);
+    let a = participant(12);
+    let b = participant(12);
     let writer = a
         .create_publisher()
         .unwrap()
@@ -225,8 +225,8 @@ fn instances_over_udp() {
 
 #[test]
 fn deleting_a_writer_unregisters_its_instances() {
-    let a = participant(103);
-    let b = participant(103);
+    let a = participant(13);
+    let b = participant(13);
     let writer = a
         .create_publisher()
         .unwrap()

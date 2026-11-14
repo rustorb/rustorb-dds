@@ -63,7 +63,7 @@ fn ids(v: &[Shape]) -> Vec<(u32, u32)> {
 
 #[test]
 fn filters_samples_between_participants() {
-    let (a, b) = (participant(171), participant(171));
+    let (a, b) = (participant(61), participant(61));
     a.register_type::<Shape>().unwrap();
     b.register_type::<Shape>().unwrap();
     let topic_a = a.create_topic::<Shape>("Shapes").unwrap();
@@ -114,7 +114,7 @@ fn filters_samples_between_participants() {
 
 #[test]
 fn filters_samples_of_local_writers() {
-    let p = participant(172);
+    let p = participant(62);
     p.register_type::<Shape>().unwrap();
     let topic = p.create_topic::<Shape>("Local").unwrap();
     let cft = p
@@ -139,7 +139,7 @@ fn filters_samples_of_local_writers() {
 
 #[test]
 fn filters_dynamic_data() {
-    let p = participant(173);
+    let p = participant(63);
     let ty = rustorb_dds::DynamicType::new(
         <Shape as rustorb_xtypes::types::DescribeType>::describe_type(),
     );
@@ -179,7 +179,7 @@ fn filters_dynamic_data() {
 
 #[test]
 fn needs_a_registered_type_and_a_valid_filter() {
-    let p = participant(174);
+    let p = participant(64);
     let topic = p.create_topic::<Shape>("Unregistered").unwrap();
     assert!(matches!(
         p.create_contentfilteredtopic("F", &topic, "id = 1", &[]),
