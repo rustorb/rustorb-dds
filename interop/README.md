@@ -12,7 +12,7 @@ subscriber receives the samples (rustorb-dds#8), best-effort and reliable
 |---|---|---|
 | Cyclone DDS | Ubuntu 24.04 packages `cyclonedds-dev`, `cyclonedds-tools` | `cyclonedds/hello.c`, type code from `idlc` |
 | Fast DDS | Ubuntu 24.04 packages `libfastrtps-dev`, `fastddsgen` | `fastdds/hello.cpp`, type code from `fastddsgen` |
-| OpenDDS 3.31 | the image `ghcr.io/opendds/opendds:DDS-3.31` (`OPENDDS_IMAGE`) | `opendds/hello.cpp`, `keyed.cpp`, `evolve.cpp`, type code from `opendds_idl` |
+| OpenDDS 3.31 | the image `ghcr.io/opendds/opendds:DDS-3.31` (`OPENDDS_IMAGE`) | `opendds/hello.cpp`, `keyed.cpp`, `evolve.cpp`, `tree.cpp`, type code from `opendds_idl` |
 
 The peers are black boxes: the programs use their public APIs and the
 code their generators make from `idl/HelloWorld.idl` and `idl/Keyed.idl`.
@@ -98,6 +98,16 @@ on the rustorb-dds side, which is not built with the type: it gets the
 type of the peer's writer or reader with TypeLookup (its COMPLETE
 TypeObjects) and reads or writes DynamicData of it, with the members of
 the evolve programs looked up by name.
+
+The `-tree` cases (OpenDDS only, rustorb-dds#70) send a recursive type,
+`Tree::Node` of `idl/Tree.idl` (a node with a sequence of nodes), with
+the `tree` example on the rustorb-dds side and `opendds/tree.cpp`. Its
+TypeObjects are identified by their strongly connected component (SCC
+identifiers, DDS-XTypes 1.3, 7.3.4.9.2), so the two sides match only if
+they make the same component hash. With `discover` the rustorb-dds side
+is not built with the type and gets it by TypeLookup. Cyclone DDS
+0.10.4's `idlc` does not finish on a recursive type, and Fast DDS 2.11.2
+has no TypeObjects, so they have no `-tree` cases.
 
 The `python-` cases (rustorb-dds#35) run the Python binding's examples
 in `python/examples` on the rustorb-dds side, with the same command
