@@ -64,12 +64,17 @@ def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
         print(f"domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} SEDP"
               f" {writer.hex()} " + " | ".join(t.decode() for t in text))
         return
-    if writer[3] & 0xC0 == 0xC0 and (reader[3] & 0xC0 == 0xC0 or reader == bytes(4)):
+    # TypeLookup (DDS-XTypes 1.3, 7.6.3.3.4): its requests and replies.
+    typelookup = writer.hex() in ("000300c3", "000301c3") or reader.hex() in (
+        "000300c4", "000301c4")
+    if (writer[3] & 0xC0 == 0xC0 and (reader[3] & 0xC0 == 0xC0 or reader == bytes(4))
+            and not typelookup):
         return
     what = {0x06: "ACKNACK", 0x07: "HEARTBEAT", 0x08: "GAP", 0x12: "NACK_FRAG",
             0x13: "HEARTBEAT_FRAG", 0x15: "DATA", 0x16: "DATA_FRAG"}[sid]
     if sid == 0x15:
-        detail = f"sn {sn(rest, e)} len {len(body)} body {bytes(body[:64]).hex()}"
+        shown = 160 if typelookup else 64
+        detail = f"sn {sn(rest, e)} len {len(body)} body {bytes(body[:shown]).hex()}"
     elif sid == 0x06:
         bits = struct.unpack(e + "I", rest[8:12])[0]
         words = rest[12:12 + 4 * ((bits + 31) // 32)]
