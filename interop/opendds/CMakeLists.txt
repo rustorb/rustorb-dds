@@ -5,8 +5,10 @@ find_package(OpenDDS REQUIRED)
 set(IDL ${CMAKE_CURRENT_SOURCE_DIR}/../idl)
 # HelloWorld.idl and Keyed.idl have no extensibility annotation, and the
 # other implementations make them @final; OpenDDS's default is
-# @appendable.
-set(FINAL --default-extensibility final)
+# @appendable. The IDL files have no @topic either: --no-default-nested
+# makes each struct a topic type.
+set(TOPIC --no-default-nested)
+set(FINAL ${TOPIC} --default-extensibility final)
 set(LIBS OpenDDS::Dcps OpenDDS::Rtps OpenDDS::Rtps_Udp)
 foreach(t hello keyed evolve_v1 evolve_v2)
   if(t STREQUAL keyed)
@@ -21,6 +23,6 @@ foreach(t hello keyed evolve_v1 evolve_v2)
 endforeach()
 opendds_target_sources(hello ${IDL}/HelloWorld.idl OPENDDS_IDL_OPTIONS ${FINAL})
 opendds_target_sources(keyed ${IDL}/Keyed.idl OPENDDS_IDL_OPTIONS ${FINAL})
-opendds_target_sources(evolve_v1 ${IDL}/EvolveV1.idl)
-opendds_target_sources(evolve_v2 ${IDL}/EvolveV2.idl)
+opendds_target_sources(evolve_v1 ${IDL}/EvolveV1.idl OPENDDS_IDL_OPTIONS ${TOPIC})
+opendds_target_sources(evolve_v2 ${IDL}/EvolveV2.idl OPENDDS_IDL_OPTIONS ${TOPIC})
 target_compile_definitions(evolve_v2 PRIVATE EVOLVE_V2)
