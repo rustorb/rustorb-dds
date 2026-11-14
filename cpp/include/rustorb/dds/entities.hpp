@@ -37,10 +37,12 @@ class TopicListener;
 template <typename T>
 class ContentFilteredTopic;
 class Filter;
+class AnyTopicListener;
 }  // namespace topic
 namespace pub {
 class Publisher;
 class PublisherListener;
+class AnyDataWriterListener;
 template <typename T>
 class DataWriter;
 template <typename T>
@@ -49,6 +51,7 @@ class DataWriterListener;
 namespace sub {
 class Subscriber;
 class SubscriberListener;
+class AnyDataReaderListener;
 template <typename T>
 class DataReader;
 template <typename T>
@@ -201,6 +204,7 @@ class listener_box {
 
 struct participant_impl {
   handle<rdds_participant, rdds_participant_release> p;
+  ::dds::domain::DomainParticipantListener* listener = nullptr;
   ::dds::domain::qos::DomainParticipantQos qos;
   ::dds::topic::qos::TopicQos default_topic_qos;
   ::dds::pub::qos::PublisherQos default_publisher_qos;
@@ -214,6 +218,7 @@ struct participant_impl {
 
 struct topic_impl {
   handle<rdds_topic, rdds_topic_release> t;
+  void* listener = nullptr;  // a TopicListener<T> of the topic's type
   std::shared_ptr<participant_impl> participant;
   std::string name;
   std::string type_name;
@@ -240,6 +245,7 @@ struct cftopic_impl {
 
 struct publisher_impl {
   handle<rdds_publisher, rdds_publisher_release> p;
+  ::dds::pub::PublisherListener* listener = nullptr;
   std::shared_ptr<participant_impl> participant;
   ::dds::pub::qos::PublisherQos qos;
   ::dds::pub::qos::DataWriterQos default_writer_qos;
@@ -252,6 +258,7 @@ struct publisher_impl {
 
 struct subscriber_impl {
   handle<rdds_subscriber, rdds_subscriber_release> s;
+  ::dds::sub::SubscriberListener* listener = nullptr;
   std::shared_ptr<participant_impl> participant;
   ::dds::sub::qos::SubscriberQos qos;
   ::dds::sub::qos::DataReaderQos default_reader_qos;
@@ -307,6 +314,35 @@ struct condition_impl {
   std::shared_ptr<void> owner;
 };
 
+// The C listener of a participant, publisher or subscriber hands its
+// calls to the C++ listener `listener` (of type L); group_table, defined
+// at the end, fills the C table with the functions L has.
+template <typename L>
+struct group_box {
+  L* listener;
+  std::weak_ptr<participant_impl> participant;
+  std::weak_ptr<subscriber_impl> subscriber;
+
+  static void release(void* self) { delete static_cast<group_box*>(self); }
+};
+
+template <typename L>
+rdds_listener group_table(group_box<L>* b);
+
+// Sets the C listener of a group entity to one that calls `l`; nullptr
+// clears it.
+template <typename L, typename H, typename Set>
+void set_group_listener(H* h, L* l, uint32_t mask, std::weak_ptr<participant_impl> participant,
+                        std::weak_ptr<subscriber_impl> subscriber, Set set) {
+  if (!l) {
+    check(set(h, nullptr, 0));
+    return;
+  }
+  auto* b = new group_box<L>{l, std::move(participant), std::move(subscriber)};
+  rdds_listener c = group_table(b);
+  check(set(h, &c, mask));
+}
+
 }  // namespace detail
 
 // rustorb: a participant that uses only the loopback interface, for tests.
@@ -318,17 +354,154 @@ inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id
 namespace dds {
 
 // ---------------------------------------------------------------------------
+// Listeners of groups (DDS 1.4, 2.2.4.3). A status of a writer or reader
+// that its own listener does not take goes to the listener of its
+// publisher or subscriber, else to the participant's; INCONSISTENT_TOPIC
+// to the topic's, else the participant's. New data goes first to
+// on_data_on_readers (subscriber, else participant), and only when neither
+// takes DATA_ON_READERS to on_data_available.
+
+namespace pub {
+
+// A writer of any type, as given to the listener of its publisher or
+// participant.
+class AnyDataWriter {
+ public:
+  explicit AnyDataWriter(const rdds_endpoint_info& i)
+      : handle_(i.guid), topic_name_(i.topic_name), type_name_(i.type_name) {}
+  const std::string& topic_name() const { return topic_name_; }
+  const std::string& type_name() const { return type_name_; }
+  const ::dds::core::InstanceHandle& instance_handle() const { return handle_; }
+
+ private:
+  ::dds::core::InstanceHandle handle_;
+  std::string topic_name_;
+  std::string type_name_;
+};
+
+class AnyDataWriterListener {
+ public:
+  virtual ~AnyDataWriterListener() = default;
+  virtual void on_offered_deadline_missed(AnyDataWriter& writer,
+                                          const ::dds::core::status::OfferedDeadlineMissedStatus& status) = 0;
+  virtual void on_offered_incompatible_qos(AnyDataWriter& writer,
+                                           const ::dds::core::status::OfferedIncompatibleQosStatus& status) = 0;
+  virtual void on_liveliness_lost(AnyDataWriter& writer, const ::dds::core::status::LivelinessLostStatus& status) = 0;
+  virtual void on_publication_matched(AnyDataWriter& writer,
+                                      const ::dds::core::status::PublicationMatchedStatus& status) = 0;
+};
+
+class NoOpAnyDataWriterListener : public virtual AnyDataWriterListener {
+ public:
+  void on_offered_deadline_missed(AnyDataWriter&, const ::dds::core::status::OfferedDeadlineMissedStatus&) override {}
+  void on_offered_incompatible_qos(AnyDataWriter&,
+                                   const ::dds::core::status::OfferedIncompatibleQosStatus&) override {}
+  void on_liveliness_lost(AnyDataWriter&, const ::dds::core::status::LivelinessLostStatus&) override {}
+  void on_publication_matched(AnyDataWriter&, const ::dds::core::status::PublicationMatchedStatus&) override {}
+};
+
+class PublisherListener : public virtual AnyDataWriterListener {};
+class NoOpPublisherListener : public virtual PublisherListener, public virtual NoOpAnyDataWriterListener {};
+
+}  // namespace pub
+
+namespace sub {
+
+// A reader of any type, as given to the listener of its subscriber or
+// participant.
+class AnyDataReader {
+ public:
+  explicit AnyDataReader(const rdds_endpoint_info& i)
+      : handle_(i.guid), topic_name_(i.topic_name), type_name_(i.type_name) {}
+  const std::string& topic_name() const { return topic_name_; }
+  const std::string& type_name() const { return type_name_; }
+  const ::dds::core::InstanceHandle& instance_handle() const { return handle_; }
+
+ private:
+  ::dds::core::InstanceHandle handle_;
+  std::string topic_name_;
+  std::string type_name_;
+};
+
+class AnyDataReaderListener {
+ public:
+  virtual ~AnyDataReaderListener() = default;
+  virtual void on_requested_deadline_missed(AnyDataReader& reader,
+                                            const ::dds::core::status::RequestedDeadlineMissedStatus& status) = 0;
+  virtual void on_requested_incompatible_qos(AnyDataReader& reader,
+                                             const ::dds::core::status::RequestedIncompatibleQosStatus& status) = 0;
+  virtual void on_sample_rejected(AnyDataReader& reader, const ::dds::core::status::SampleRejectedStatus& status) = 0;
+  virtual void on_liveliness_changed(AnyDataReader& reader,
+                                     const ::dds::core::status::LivelinessChangedStatus& status) = 0;
+  virtual void on_data_available(AnyDataReader& reader) = 0;
+  virtual void on_subscription_matched(AnyDataReader& reader,
+                                       const ::dds::core::status::SubscriptionMatchedStatus& status) = 0;
+  virtual void on_sample_lost(AnyDataReader& reader, const ::dds::core::status::SampleLostStatus& status) = 0;
+};
+
+class NoOpAnyDataReaderListener : public virtual AnyDataReaderListener {
+ public:
+  void on_requested_deadline_missed(AnyDataReader&,
+                                    const ::dds::core::status::RequestedDeadlineMissedStatus&) override {}
+  void on_requested_incompatible_qos(AnyDataReader&,
+                                     const ::dds::core::status::RequestedIncompatibleQosStatus&) override {}
+  void on_sample_rejected(AnyDataReader&, const ::dds::core::status::SampleRejectedStatus&) override {}
+  void on_liveliness_changed(AnyDataReader&, const ::dds::core::status::LivelinessChangedStatus&) override {}
+  void on_data_available(AnyDataReader&) override {}
+  void on_subscription_matched(AnyDataReader&, const ::dds::core::status::SubscriptionMatchedStatus&) override {}
+  void on_sample_lost(AnyDataReader&, const ::dds::core::status::SampleLostStatus&) override {}
+};
+
+// The subscriber given to on_data_on_readers is a handle of the
+// subscriber; one made from a participant's listener has the default QoS
+// in qos().
+class SubscriberListener : public virtual AnyDataReaderListener {
+ public:
+  virtual void on_data_on_readers(Subscriber& sub) = 0;
+};
+class NoOpSubscriberListener : public virtual SubscriberListener, public virtual NoOpAnyDataReaderListener {
+ public:
+  void on_data_on_readers(Subscriber&) override {}
+};
+
+}  // namespace sub
+
+namespace topic {
+
+// A topic of any type, as given to the participant's listener.
+class AnyTopic {
+ public:
+  explicit AnyTopic(const char* name) : name_(name) {}
+  const std::string& name() const { return name_; }
+
+ private:
+  std::string name_;
+};
+
+class AnyTopicListener {
+ public:
+  virtual ~AnyTopicListener() = default;
+  virtual void on_inconsistent_topic(AnyTopic& topic, const ::dds::core::status::InconsistentTopicStatus& status) = 0;
+};
+class NoOpAnyTopicListener : public virtual AnyTopicListener {
+ public:
+  void on_inconsistent_topic(AnyTopic&, const ::dds::core::status::InconsistentTopicStatus&) override {}
+};
+
+}  // namespace topic
+
+// ---------------------------------------------------------------------------
 // Domain
 
 namespace domain {
 
-// Listeners of participants, publishers and subscribers are not supported
-// yet: give nullptr.
-class DomainParticipantListener {
- public:
-  virtual ~DomainParticipantListener() = default;
-};
-class NoOpDomainParticipantListener : public DomainParticipantListener {};
+class DomainParticipantListener : public virtual ::dds::pub::PublisherListener,
+                                  public virtual ::dds::sub::SubscriberListener,
+                                  public virtual ::dds::topic::AnyTopicListener {};
+class NoOpDomainParticipantListener : public virtual DomainParticipantListener,
+                                      public virtual ::dds::pub::NoOpPublisherListener,
+                                      public virtual ::dds::sub::NoOpSubscriberListener,
+                                      public virtual ::dds::topic::NoOpAnyTopicListener {};
 
 class DomainParticipant {
  public:
@@ -368,6 +541,13 @@ class DomainParticipant {
     return *this;
   }
 
+  // Sets the listener (nullptr clears it); the caller keeps it alive.
+  void listener(DomainParticipantListener* l, const ::dds::core::status::StatusMask& mask) {
+    rustorb::dds::detail::set_group_listener(impl().get(), l, mask.c(), impl_, {}, rdds_participant_set_listener);
+    impl().listener = l;
+  }
+  DomainParticipantListener* listener() const { return impl().listener; }
+
   void enable() {}
   void close() { impl().p.reset(); }
   void retain() {}
@@ -389,8 +569,7 @@ class DomainParticipant {
   friend DomainParticipant rustorb::dds::localhost_participant(uint32_t);
 
   DomainParticipant(uint32_t domain_id, const qos::DomainParticipantQos& qos, DomainParticipantListener* listener,
-                    const ::dds::core::status::StatusMask&, uint32_t flags) {
-    if (listener) throw ::dds::core::UnsupportedError("participant listeners are not supported yet");
+                    const ::dds::core::status::StatusMask& mask, uint32_t flags) {
     auto impl = std::make_shared<rustorb::dds::detail::participant_impl>();
     impl->qos = qos;
     const auto& ud = qos.policy<::dds::core::policy::UserData>().value();
@@ -399,6 +578,7 @@ class DomainParticipant {
     rustorb::dds::detail::check(rdds_participant_new(domain_id, &c, flags, &p));
     impl->p.h = p;
     impl_ = impl;
+    if (listener) this->listener(listener, mask);
   }
 
   rustorb::dds::detail::participant_impl& impl() const { return rustorb::dds::detail::deref(impl_); }
@@ -417,6 +597,12 @@ template <typename T>
 class TopicListener {
  public:
   virtual ~TopicListener() = default;
+  virtual void on_inconsistent_topic(Topic<T>& topic, const ::dds::core::status::InconsistentTopicStatus& status) = 0;
+};
+template <typename T>
+class NoOpTopicListener : public virtual TopicListener<T> {
+ public:
+  void on_inconsistent_topic(Topic<T>&, const ::dds::core::status::InconsistentTopicStatus&) override {}
 };
 
 template <typename T>
@@ -432,8 +618,7 @@ class Topic {
       : Topic(dp, name, dp.default_topic_qos()) {}
   Topic(const ::dds::domain::DomainParticipant& dp, const std::string& name, const qos::TopicQos& qos,
         TopicListener<T>* listener = nullptr,
-        const ::dds::core::status::StatusMask& = ::dds::core::status::StatusMask::none()) {
-    if (listener) throw ::dds::core::UnsupportedError("topic listeners are not supported yet");
+        const ::dds::core::status::StatusMask& mask = ::dds::core::status::StatusMask::none()) {
     auto impl = std::make_shared<rustorb::dds::detail::topic_impl>();
     impl->participant = dp.rustorb_impl();
     impl->name = name;
@@ -444,7 +629,34 @@ class Topic {
                                                               name.c_str(), rustorb::dds::codec<T>::type(), &t));
     impl->t.h = t;
     impl_ = impl;
+    if (listener) this->listener(listener, mask);
   }
+
+  // Sets the listener (nullptr clears it); the caller keeps it alive. The
+  // topics of one name in a participant share their listener.
+  void listener(TopicListener<T>* l, const ::dds::core::status::StatusMask& mask) {
+    if (!l) {
+      rustorb::dds::detail::check(rdds_topic_set_listener(impl().get(), nullptr, 0));
+    } else {
+      struct box {
+        TopicListener<T>* l;
+        std::weak_ptr<rustorb::dds::detail::topic_impl> topic;
+      };
+      rdds_listener c{};
+      c.self = new box{l, impl_};
+      c.on_inconsistent_topic = [](void* self, const char*, const rdds_count_status* s) {
+        auto* b = static_cast<box*>(self);
+        if (auto i = b->topic.lock()) {
+          Topic t = Topic::rustorb_from(i);
+          b->l->on_inconsistent_topic(t, ::dds::core::status::InconsistentTopicStatus(*s));
+        }
+      };
+      c.release = [](void* self) { delete static_cast<box*>(self); };
+      rustorb::dds::detail::check(rdds_topic_set_listener(impl().get(), &c, mask.c()));
+    }
+    impl().listener = l;
+  }
+  TopicListener<T>* listener() const { return static_cast<TopicListener<T>*>(impl().listener); }
 
   const std::string& name() const { return impl().name; }
   const std::string& type_name() const { return impl().type_name; }
@@ -573,20 +785,13 @@ inline DomainParticipant rustorb_participant(std::shared_ptr<rustorb::dds::detai
 
 namespace pub {
 
-class PublisherListener {
- public:
-  virtual ~PublisherListener() = default;
-};
-class NoOpPublisherListener : public PublisherListener {};
-
 class Publisher {
  public:
   Publisher(const ::dds::core::null_type&) {}
   explicit Publisher(const ::dds::domain::DomainParticipant& dp) : Publisher(dp, dp.default_publisher_qos()) {}
   Publisher(const ::dds::domain::DomainParticipant& dp, const qos::PublisherQos& qos,
             PublisherListener* listener = nullptr,
-            const ::dds::core::status::StatusMask& = ::dds::core::status::StatusMask::none()) {
-    if (listener) throw ::dds::core::UnsupportedError("publisher listeners are not supported yet");
+            const ::dds::core::status::StatusMask& mask = ::dds::core::status::StatusMask::none()) {
     auto impl = std::make_shared<rustorb::dds::detail::publisher_impl>();
     impl->participant = dp.rustorb_impl();
     impl->qos = qos;
@@ -597,7 +802,16 @@ class Publisher {
         rdds_participant_create_publisher(rustorb::dds::detail::deref(impl->participant).get(), &c, &p));
     impl->p.h = p;
     impl_ = impl;
+    if (listener) this->listener(listener, mask);
   }
+
+  // Sets the listener (nullptr clears it); the caller keeps it alive.
+  void listener(PublisherListener* l, const ::dds::core::status::StatusMask& mask) {
+    rustorb::dds::detail::set_group_listener(impl().get(), l, mask.c(), impl().participant, {},
+                                             rdds_publisher_set_listener);
+    impl().listener = l;
+  }
+  PublisherListener* listener() const { return impl().listener; }
 
   const qos::PublisherQos& qos() const { return impl().qos; }
   const qos::DataWriterQos& default_datawriter_qos() const { return impl().default_writer_qos; }
@@ -951,20 +1165,13 @@ class DataWriter {
 
 namespace sub {
 
-class SubscriberListener {
- public:
-  virtual ~SubscriberListener() = default;
-};
-class NoOpSubscriberListener : public SubscriberListener {};
-
 class Subscriber {
  public:
   Subscriber(const ::dds::core::null_type&) {}
   explicit Subscriber(const ::dds::domain::DomainParticipant& dp) : Subscriber(dp, dp.default_subscriber_qos()) {}
   Subscriber(const ::dds::domain::DomainParticipant& dp, const qos::SubscriberQos& qos,
              SubscriberListener* listener = nullptr,
-             const ::dds::core::status::StatusMask& = ::dds::core::status::StatusMask::none()) {
-    if (listener) throw ::dds::core::UnsupportedError("subscriber listeners are not supported yet");
+             const ::dds::core::status::StatusMask& mask = ::dds::core::status::StatusMask::none()) {
     auto impl = std::make_shared<rustorb::dds::detail::subscriber_impl>();
     impl->participant = dp.rustorb_impl();
     impl->qos = qos;
@@ -975,7 +1182,20 @@ class Subscriber {
         rdds_participant_create_subscriber(rustorb::dds::detail::deref(impl->participant).get(), &c, &s));
     impl->s.h = s;
     impl_ = impl;
+    if (listener) this->listener(listener, mask);
   }
+
+  // Sets the listener (nullptr clears it); the caller keeps it alive.
+  void listener(SubscriberListener* l, const ::dds::core::status::StatusMask& mask) {
+    rustorb::dds::detail::set_group_listener(impl().get(), l, mask.c(), impl().participant, impl_,
+                                             rdds_subscriber_set_listener);
+    impl().listener = l;
+  }
+  SubscriberListener* listener() const { return impl().listener; }
+
+  // Calls on_data_available of the listeners of its readers that have new
+  // data (from on_data_on_readers).
+  void notify_datareaders() { rustorb::dds::detail::check(rdds_subscriber_notify_datareaders(impl().get())); }
 
   const qos::SubscriberQos& qos() const { return impl().qos; }
   const qos::DataReaderQos& default_datareader_qos() const { return impl().default_reader_qos; }
@@ -1668,6 +1888,94 @@ template <typename T>
 
 namespace rustorb {
 namespace dds {
+namespace detail {
+
+template <typename L>
+rdds_listener group_table(group_box<L>* b) {
+  using B = group_box<L>;
+  namespace st = ::dds::core::status;
+  rdds_listener l{};
+  l.self = b;
+  l.release = &B::release;
+  if constexpr (std::is_base_of<::dds::pub::AnyDataWriterListener, L>::value) {
+    l.on_offered_deadline_missed = [](void* self, const rdds_endpoint_info* w, const rdds_deadline_missed_status* s) {
+      ::dds::pub::AnyDataWriter a(*w);
+      static_cast<B*>(self)->listener->on_offered_deadline_missed(a, st::OfferedDeadlineMissedStatus(*s));
+    };
+    l.on_offered_incompatible_qos = [](void* self, const rdds_endpoint_info* w,
+                                       const rdds_incompatible_qos_status* s) {
+      ::dds::pub::AnyDataWriter a(*w);
+      static_cast<B*>(self)->listener->on_offered_incompatible_qos(a, st::OfferedIncompatibleQosStatus(*s));
+    };
+    l.on_liveliness_lost = [](void* self, const rdds_endpoint_info* w, const rdds_count_status* s) {
+      ::dds::pub::AnyDataWriter a(*w);
+      static_cast<B*>(self)->listener->on_liveliness_lost(a, st::LivelinessLostStatus(*s));
+    };
+    l.on_publication_matched = [](void* self, const rdds_endpoint_info* w, const rdds_matched_status* s) {
+      ::dds::pub::AnyDataWriter a(*w);
+      static_cast<B*>(self)->listener->on_publication_matched(a, st::PublicationMatchedStatus(*s));
+    };
+  }
+  if constexpr (std::is_base_of<::dds::sub::AnyDataReaderListener, L>::value) {
+    l.on_requested_deadline_missed = [](void* self, const rdds_endpoint_info* r,
+                                        const rdds_deadline_missed_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_requested_deadline_missed(a, st::RequestedDeadlineMissedStatus(*s));
+    };
+    l.on_requested_incompatible_qos = [](void* self, const rdds_endpoint_info* r,
+                                         const rdds_incompatible_qos_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_requested_incompatible_qos(a, st::RequestedIncompatibleQosStatus(*s));
+    };
+    l.on_sample_rejected = [](void* self, const rdds_endpoint_info* r, const rdds_sample_rejected_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_sample_rejected(a, st::SampleRejectedStatus(*s));
+    };
+    l.on_liveliness_changed = [](void* self, const rdds_endpoint_info* r, const rdds_liveliness_changed_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_liveliness_changed(a, st::LivelinessChangedStatus(*s));
+    };
+    l.on_data_available = [](void* self, const rdds_endpoint_info* r) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_data_available(a);
+    };
+    l.on_subscription_matched = [](void* self, const rdds_endpoint_info* r, const rdds_matched_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_subscription_matched(a, st::SubscriptionMatchedStatus(*s));
+    };
+    l.on_sample_lost = [](void* self, const rdds_endpoint_info* r, const rdds_count_status* s) {
+      ::dds::sub::AnyDataReader a(*r);
+      static_cast<B*>(self)->listener->on_sample_lost(a, st::SampleLostStatus(*s));
+    };
+  }
+  if constexpr (std::is_base_of<::dds::sub::SubscriberListener, L>::value) {
+    l.on_data_on_readers = [](void* self, const rdds_subscriber* s) {
+      auto* b = static_cast<B*>(self);
+      std::shared_ptr<subscriber_impl> impl = b->subscriber.lock();
+      if (!impl || !rdds_subscriber_same(impl->s.h, s)) {
+        auto participant = b->participant.lock();
+        if (!participant) return;
+        rdds_subscriber* kept = nullptr;
+        if (rdds_subscriber_clone(s, &kept) != RDDS_RETCODE_OK) return;
+        impl = std::make_shared<subscriber_impl>();
+        impl->participant = participant;
+        impl->s.h = kept;
+      }
+      ::dds::sub::Subscriber sub = ::dds::sub::Subscriber::rustorb_from(impl);
+      b->listener->on_data_on_readers(sub);
+    };
+  }
+  if constexpr (std::is_base_of<::dds::topic::AnyTopicListener, L>::value) {
+    l.on_inconsistent_topic = [](void* self, const char* name, const rdds_count_status* s) {
+      ::dds::topic::AnyTopic t(name);
+      static_cast<B*>(self)->listener->on_inconsistent_topic(t, st::InconsistentTopicStatus(*s));
+    };
+  }
+  return l;
+}
+
+}  // namespace detail
+
 inline ::dds::domain::DomainParticipant localhost_participant(uint32_t domain_id) {
   return ::dds::domain::DomainParticipant(domain_id, ::dds::domain::qos::DomainParticipantQos(), nullptr,
                                           ::dds::core::status::StatusMask::none(), RDDS_PARTICIPANT_LOCALHOST);

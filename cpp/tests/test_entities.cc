@@ -326,10 +326,63 @@ TEST(errors) {
   dds::pub::DataWriter<HelloWorld::Greeting> writer(pub, topic);
   writer.close();
   CHECK_THROWS(writer << HelloWorld::Greeting(), dds::core::AlreadyClosedError);
-  // Participant listeners are not supported yet.
-  dds::domain::NoOpDomainParticipantListener l;
-  CHECK_THROWS(dds::domain::DomainParticipant(78, dds::domain::qos::DomainParticipantQos(), &l),
-               dds::core::UnsupportedError);
+}
+
+struct GroupListener : dds::domain::NoOpDomainParticipantListener {
+  std::atomic<int> publication_matched{0};
+  std::atomic<int> data_on_readers{0};
+  std::atomic<int> data_available{0};
+  std::atomic<bool> right_topic{false};
+  void on_publication_matched(dds::pub::AnyDataWriter& w,
+                              const dds::core::status::PublicationMatchedStatus&) override {
+    right_topic = w.topic_name() == "grouped" && w.type_name() == "HelloWorld::Greeting";
+    publication_matched++;
+  }
+  void on_data_on_readers(dds::sub::Subscriber& s) override {
+    data_on_readers++;
+    s.notify_datareaders();
+  }
+  void on_data_available(dds::sub::AnyDataReader&) override { data_available++; }
+};
+
+struct TopicListener : dds::topic::NoOpTopicListener<HelloWorld::Greeting> {};
+
+// Statuses that the writers' and readers' own listeners do not take go to
+// the listeners of their publisher, subscriber or participant.
+TEST(group_listeners) {
+  GroupListener pl;
+  auto dp = participant(79);
+  dp.listener(&pl, dds::core::status::StatusMask::publication_matched());
+  CHECK(dp.listener() == &pl);
+  dds::topic::Topic<HelloWorld::Greeting> topic(dp, "grouped");
+  TopicListener tl;
+  topic.listener(&tl, dds::core::status::StatusMask::inconsistent_topic());
+  CHECK(topic.listener() == &tl);
+  dds::pub::Publisher pub(dp);
+  GroupListener sl;
+  dds::sub::Subscriber sub(dp, dp.default_subscriber_qos(), &sl,
+                           dds::core::status::StatusMask::data_on_readers());
+  CHECK(sub.listener() == &sl);
+  ReaderListener rl;
+  dds::sub::DataReader<HelloWorld::Greeting> reader(sub, topic, reliable_reader(sub), &rl,
+                                                    dds::core::status::StatusMask::data_available());
+  dds::pub::DataWriter<HelloWorld::Greeting> writer(pub, topic, reliable_writer(pub));
+  CHECK(eventually([&] { return pl.publication_matched == 1; }));
+  CHECK(pl.right_topic);
+  writer << HelloWorld::Greeting(1, "g");
+  // DATA_ON_READERS first; its notify_datareaders calls the reader's own.
+  CHECK(eventually([&] { return sl.data_on_readers == 1 && rl.taken == 1; }));
+  CHECK(sl.data_available == 0);
+
+  // Without the subscriber's listener, the participant's takes
+  // DATA_AVAILABLE for a reader that has none.
+  sub.listener(nullptr, dds::core::status::StatusMask::none());
+  dp.listener(&pl, dds::core::status::StatusMask::data_available());
+  dds::sub::DataReader<HelloWorld::Greeting> plain(sub, topic, reliable_reader(sub));
+  CHECK(eventually([&] { return writer.publication_matched_status().current_count() == 2; }));
+  writer << HelloWorld::Greeting(2, "g");
+  CHECK(eventually([&] { return pl.data_available >= 1 && rl.taken == 2; }));
+  dp.listener(nullptr, dds::core::status::StatusMask::none());
 }
 
 TEST(content_filtered_topic) {
