@@ -63,6 +63,7 @@ final class SubscriberImpl extends EntityBase<SubscriberListener, SubscriberQos>
         ReaderImpl<TYPE> r = ReaderImpl.create(this, t, cft, (Qos.ReaderQos) (qos == null ? defaultReaderQos : qos),
                 listener, StatusKinds.mask(statuses));
         readers.add(r);
+        GroupListeners.created(r.getInstanceHandle());
         return r;
     }
 

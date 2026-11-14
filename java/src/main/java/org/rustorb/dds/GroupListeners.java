@@ -14,6 +14,9 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -70,7 +73,10 @@ final class GroupListeners {
 
     /** The writer or reader whose rdds_endpoint_info is at p, or null. */
     private static WriterImpl<Object> writer(Group g, long p) {
-        InstanceHandle h = HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(p, 16), 0);
+        return writer(g, HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(p, 16), 0));
+    }
+
+    private static WriterImpl<Object> writer(Group g, InstanceHandle h) {
         for (PublisherImpl pub : g.participant().publishers) {
             for (WriterImpl<?> w : pub.writers) {
                 if (h.equals(w.getInstanceHandle())) {
@@ -84,7 +90,10 @@ final class GroupListeners {
     }
 
     private static ReaderImpl<Object> reader(Group g, long p) {
-        InstanceHandle h = HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(p, 16), 0);
+        return reader(g, HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(p, 16), 0));
+    }
+
+    private static ReaderImpl<Object> reader(Group g, InstanceHandle h) {
         for (SubscriberImpl sub : g.participant().subscribers) {
             for (ReaderImpl<?> r : sub.readers) {
                 if (h.equals(r.getInstanceHandle())) {
@@ -98,38 +107,95 @@ final class GroupListeners {
     }
 
     private interface WriterCall {
-        void accept(Group g, WriterImpl<Object> w) throws Throwable;
+        void accept(Group g, WriterImpl<Object> w, long status) throws Throwable;
     }
 
     private interface ReaderCall {
-        void accept(Group g, ReaderImpl<Object> r) throws Throwable;
+        void accept(Group g, ReaderImpl<Object> r, long status) throws Throwable;
     }
 
-    private static void onWriter(long self, long info, WriterCall c) {
+    // A status of a writer or reader still being made (one matched in its
+    // own participant while created) waits here, by its handle, until
+    // created() is called for it; the status is copied.
+    private static final Object LOCK = new Object();
+    private static final HashMap<InstanceHandle, List<Runnable>> PENDING = new HashMap<>();
+
+    /** Passes on the statuses that came while the writer or reader of handle was being made. */
+    static void created(InstanceHandle handle) {
+        List<Runnable> calls;
+        synchronized (LOCK) {
+            calls = PENDING.remove(handle);
+        }
+        if (calls != null) {
+            calls.forEach(Runnable::run);
+        }
+    }
+
+    private static MemorySegment copy(long p, long size) {
+        MemorySegment c = Arena.ofAuto().allocate(Math.max(size, 1), 8);
+        if (size > 0) {
+            c.copyFrom(Library.MEMORY.asSlice(p, size));
+        }
+        return c;
+    }
+
+    private static void onWriter(long self, long info, long p, long size, WriterCall c) {
         try {
             Group g = GROUPS.get(self);
             if (g == null) {
                 return;
             }
-            WriterImpl<Object> w = writer(g, info);
-            if (w != null) {
-                c.accept(g, w);
+            WriterImpl<Object> w;
+            synchronized (LOCK) {
+                w = writer(g, info);
+                if (w == null) {
+                    InstanceHandle h = HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(info, 16), 0);
+                    MemorySegment status = copy(p, size);
+                    PENDING.computeIfAbsent(h, k -> new ArrayList<>()).add(() -> {
+                        try {
+                            WriterImpl<Object> v = writer(g, h);
+                            if (v != null && GROUPS.containsKey(self)) {
+                                c.accept(g, v, status.address());
+                            }
+                        } catch (Throwable t) {
+                            report(t);
+                        }
+                    });
+                    return;
+                }
             }
+            c.accept(g, w, p);
         } catch (Throwable t) {
             report(t);
         }
     }
 
-    private static void onReader(long self, long info, ReaderCall c) {
+    private static void onReader(long self, long info, long p, long size, ReaderCall c) {
         try {
             Group g = GROUPS.get(self);
             if (g == null) {
                 return;
             }
-            ReaderImpl<Object> r = reader(g, info);
-            if (r != null) {
-                c.accept(g, r);
+            ReaderImpl<Object> r;
+            synchronized (LOCK) {
+                r = reader(g, info);
+                if (r == null) {
+                    InstanceHandle h = HandleImpl.get(g.participant().env, Library.MEMORY.asSlice(info, 16), 0);
+                    MemorySegment status = copy(p, size);
+                    PENDING.computeIfAbsent(h, k -> new ArrayList<>()).add(() -> {
+                        try {
+                            ReaderImpl<Object> v = reader(g, h);
+                            if (v != null && GROUPS.containsKey(self)) {
+                                c.accept(g, v, status.address());
+                            }
+                        } catch (Throwable t) {
+                            report(t);
+                        }
+                    });
+                    return;
+                }
             }
+            c.accept(g, r, p);
         } catch (Throwable t) {
             report(t);
         }
@@ -140,9 +206,9 @@ final class GroupListeners {
     // methods but no common interface.
 
     private static void wDeadline(long self, long info, long p) {
-        onWriter(self, info, (g, w) -> {
+        onWriter(self, info, p, Statuses.DEADLINE_SIZE, (g, w, q) -> {
             OfferedDeadlineMissedEvent<Object> e = new Statuses.OfferedDeadlineMissedEv<>(w,
-                    Statuses.OfferedDeadlineMissed.of(w.env, Library.MEMORY.asSlice(p, Statuses.DEADLINE_SIZE)));
+                    Statuses.OfferedDeadlineMissed.of(w.env, Library.MEMORY.asSlice(q, Statuses.DEADLINE_SIZE)));
             if (g.listener() instanceof PublisherListener l) {
                 l.onOfferedDeadlineMissed(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -152,9 +218,9 @@ final class GroupListeners {
     }
 
     private static void wIncompatible(long self, long info, long p) {
-        onWriter(self, info, (g, w) -> {
+        onWriter(self, info, p, Statuses.INCOMPATIBLE_SIZE, (g, w, q) -> {
             OfferedIncompatibleQosEvent<Object> e = new Statuses.OfferedIncompatibleQosEv<>(w,
-                    Statuses.OfferedIncompatibleQos.of(w.env, Library.MEMORY.asSlice(p, Statuses.INCOMPATIBLE_SIZE)));
+                    Statuses.OfferedIncompatibleQos.of(w.env, Library.MEMORY.asSlice(q, Statuses.INCOMPATIBLE_SIZE)));
             if (g.listener() instanceof PublisherListener l) {
                 l.onOfferedIncompatibleQos(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -164,9 +230,9 @@ final class GroupListeners {
     }
 
     private static void wLivelinessLost(long self, long info, long p) {
-        onWriter(self, info, (g, w) -> {
+        onWriter(self, info, p, Statuses.COUNT_SIZE, (g, w, q) -> {
             LivelinessLostEvent<Object> e = new Statuses.LivelinessLostEv<>(w,
-                    Statuses.LivelinessLost.of(w.env, Library.MEMORY.asSlice(p, Statuses.COUNT_SIZE)));
+                    Statuses.LivelinessLost.of(w.env, Library.MEMORY.asSlice(q, Statuses.COUNT_SIZE)));
             if (g.listener() instanceof PublisherListener l) {
                 l.onLivelinessLost(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -176,9 +242,9 @@ final class GroupListeners {
     }
 
     private static void wMatched(long self, long info, long p) {
-        onWriter(self, info, (g, w) -> {
+        onWriter(self, info, p, Statuses.MATCHED_SIZE, (g, w, q) -> {
             PublicationMatchedEvent<Object> e = new Statuses.PublicationMatchedEv<>(w,
-                    Statuses.PublicationMatched.of(w.env, Library.MEMORY.asSlice(p, Statuses.MATCHED_SIZE)));
+                    Statuses.PublicationMatched.of(w.env, Library.MEMORY.asSlice(q, Statuses.MATCHED_SIZE)));
             if (g.listener() instanceof PublisherListener l) {
                 l.onPublicationMatched(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -212,9 +278,9 @@ final class GroupListeners {
     }
 
     private static void rDeadline(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.DEADLINE_SIZE, (g, r, q) -> {
             RequestedDeadlineMissedEvent<Object> e = new Statuses.RequestedDeadlineMissedEv<>(r,
-                    Statuses.RequestedDeadlineMissed.of(r.env, Library.MEMORY.asSlice(p, Statuses.DEADLINE_SIZE)));
+                    Statuses.RequestedDeadlineMissed.of(r.env, Library.MEMORY.asSlice(q, Statuses.DEADLINE_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onRequestedDeadlineMissed(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -224,9 +290,9 @@ final class GroupListeners {
     }
 
     private static void rIncompatible(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.INCOMPATIBLE_SIZE, (g, r, q) -> {
             RequestedIncompatibleQosEvent<Object> e = new Statuses.RequestedIncompatibleQosEv<>(r,
-                    Statuses.RequestedIncompatibleQos.of(r.env, Library.MEMORY.asSlice(p, Statuses.INCOMPATIBLE_SIZE)));
+                    Statuses.RequestedIncompatibleQos.of(r.env, Library.MEMORY.asSlice(q, Statuses.INCOMPATIBLE_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onRequestedIncompatibleQos(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -236,9 +302,9 @@ final class GroupListeners {
     }
 
     private static void rRejected(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.REJECTED_SIZE, (g, r, q) -> {
             SampleRejectedEvent<Object> e = new Statuses.SampleRejectedEv<>(r,
-                    Statuses.SampleRejected.of(r.env, Library.MEMORY.asSlice(p, Statuses.REJECTED_SIZE)));
+                    Statuses.SampleRejected.of(r.env, Library.MEMORY.asSlice(q, Statuses.REJECTED_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onSampleRejected(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -248,9 +314,9 @@ final class GroupListeners {
     }
 
     private static void rLivelinessChanged(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.LIVELINESS_SIZE, (g, r, q) -> {
             LivelinessChangedEvent<Object> e = new Statuses.LivelinessChangedEv<>(r,
-                    Statuses.LivelinessChanged.of(r.env, Library.MEMORY.asSlice(p, Statuses.LIVELINESS_SIZE)));
+                    Statuses.LivelinessChanged.of(r.env, Library.MEMORY.asSlice(q, Statuses.LIVELINESS_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onLivelinessChanged(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -260,7 +326,7 @@ final class GroupListeners {
     }
 
     private static void rDataAvailable(long self, long info) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, 0, 0, (g, r, q) -> {
             DataAvailableEvent<Object> e = new Statuses.DataAvailableEv<>(r, new Statuses.DataAvailable(r.env));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onDataAvailable(e);
@@ -271,9 +337,9 @@ final class GroupListeners {
     }
 
     private static void rMatched(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.MATCHED_SIZE, (g, r, q) -> {
             SubscriptionMatchedEvent<Object> e = new Statuses.SubscriptionMatchedEv<>(r,
-                    Statuses.SubscriptionMatched.of(r.env, Library.MEMORY.asSlice(p, Statuses.MATCHED_SIZE)));
+                    Statuses.SubscriptionMatched.of(r.env, Library.MEMORY.asSlice(q, Statuses.MATCHED_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onSubscriptionMatched(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {
@@ -283,9 +349,9 @@ final class GroupListeners {
     }
 
     private static void rSampleLost(long self, long info, long p) {
-        onReader(self, info, (g, r) -> {
+        onReader(self, info, p, Statuses.COUNT_SIZE, (g, r, q) -> {
             SampleLostEvent<Object> e = new Statuses.SampleLostEv<>(r,
-                    Statuses.SampleLost.of(r.env, Library.MEMORY.asSlice(p, Statuses.COUNT_SIZE)));
+                    Statuses.SampleLost.of(r.env, Library.MEMORY.asSlice(q, Statuses.COUNT_SIZE)));
             if (g.listener() instanceof SubscriberListener l) {
                 l.onSampleLost(e);
             } else if (g.listener() instanceof DomainParticipantListener l) {

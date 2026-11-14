@@ -63,6 +63,7 @@ final class PublisherImpl extends EntityBase<PublisherListener, PublisherQos> im
         WriterImpl<TYPE> w = WriterImpl.create(this, t, (Qos.WriterQos) (qos == null ? defaultWriterQos : qos),
                 listener, StatusKinds.mask(statuses));
         writers.add(w);
+        GroupListeners.created(w.getInstanceHandle());
         return w;
     }
 
