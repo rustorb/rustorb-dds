@@ -103,6 +103,7 @@ typedef struct rdds_instance_handle {
 typedef struct rdds_type rdds_type;
 typedef struct rdds_enum_builder rdds_enum_builder;
 typedef struct rdds_bitmask_builder rdds_bitmask_builder;
+typedef struct rdds_bitset_builder rdds_bitset_builder;
 typedef struct rdds_struct_builder rdds_struct_builder;
 typedef struct rdds_union_builder rdds_union_builder;
 
@@ -173,6 +174,23 @@ rdds_status rdds_bitmask_builder_build(const rdds_bitmask_builder *b,
                                        rdds_type **out);
 void rdds_bitmask_builder_release(rdds_bitmask_builder *b);
 
+/* A bitset: fields of bitcount bits from position, read and written as
+ * holder (RDDS_TK_BOOLEAN or an integer kind). In a sample stream a
+ * bitset is one integer, as a bitmask (rdds_out_bitmask). */
+rdds_status rdds_bitset_builder_new(const char *name, rdds_bitset_builder **out);
+rdds_status rdds_bitset_builder_add_field(rdds_bitset_builder *b,
+                                          const char *name, uint16_t position,
+                                          uint8_t bitcount, uint8_t holder);
+rdds_status rdds_bitset_builder_build(const rdds_bitset_builder *b,
+                                      rdds_type **out);
+void rdds_bitset_builder_release(rdds_bitset_builder *b);
+
+/* A recursive type: a forward declaration of its name, used inside it
+ * (in a sequence, a map or an optional member), then defined as the type
+ * once it is built. Use the defined type for a topic. */
+rdds_status rdds_type_forward(const char *name, rdds_type **out);
+rdds_status rdds_type_define(const rdds_type *forward, const rdds_type *target);
+
 /* base: NULL for none. */
 rdds_status rdds_struct_builder_new(const char *name, int32_t extensibility,
                                     uint32_t flags, const rdds_type *base,
@@ -205,7 +223,8 @@ rdds_status rdds_type_clone(const rdds_type *t, rdds_type **out);
 void rdds_type_release(rdds_type *t);
 
 /* The 14-octet equivalence hashes of the minimal and complete TypeObjects
- * of a topic type (DDS-XTypes 1.3, 7.3.4.9). */
+ * of a topic type (DDS-XTypes 1.3, 7.3.4.9). A recursive type has none:
+ * it is identified by its strongly connected component (7.3.4.9.2). */
 rdds_status rdds_type_hashes(const rdds_type *t, uint8_t minimal[14],
                              uint8_t complete[14]);
 

@@ -13,8 +13,7 @@
 //!   `T` itself: a nested key struct must be assignable as a whole.
 //! - `@non_serialized` members are not in TypeObjects that rustorb builds
 //!   or reads, so there is nothing to ignore.
-//! - Bitsets, annotations and strongly connected components are only
-//!   assignable from the same type.
+//! - Bitsets and annotations are only assignable from the same type.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -254,7 +253,7 @@ enum View<'a> {
     Bitmask(&'a MinimalBitmaskType),
     Struct(&'a MinimalStructType),
     Union(&'a MinimalUnionType),
-    /// Bitsets, annotations, SCCs, unknown kinds.
+    /// Bitsets, annotations, unknown kinds.
     Other,
 }
 
@@ -324,7 +323,7 @@ impl<'a> Cx<'a> {
                     element: &d.element_identifier,
                     bound: d.bound,
                 },
-                TypeIdentifier::Minimal(_) => {
+                TypeIdentifier::Minimal(_) | TypeIdentifier::StronglyConnectedComponent(_) => {
                     let Some(object) = self.registry.minimal(id) else {
                         return Err(id.clone());
                     };
@@ -1133,42 +1132,54 @@ mod tests {
 
     #[test]
     fn recursive_types() {
-        // struct Node { sequence<Node> children; } is not something the
-        // builder makes (it refuses cycles), so tie the knot by hand: a
-        // struct whose member is a sequence of its own hash.
-        let hash = [7; 14];
-        let id = TypeIdentifier::Minimal(hash);
-        let node = MinimalTypeObject::Struct(MinimalStructType {
-            struct_flags: TypeFlag::IS_APPENDABLE,
-            header: MinimalStructHeader::default(),
-            member_seq: vec![MinimalStructMember {
-                common: CommonStructMember {
-                    member_id: 0,
-                    member_flags: MemberFlag::TRY_CONSTRUCT1,
-                    member_type_id: TypeIdentifier::SeqSmall(PlainSequenceSElemDefn {
-                        header: PlainCollectionHeader {
-                            equiv_kind: EK_MINIMAL,
-                            element_flags: MemberFlag::TRY_CONSTRUCT1,
-                        },
-                        bound: 0,
-                        element_identifier: Box::new(id.clone()),
-                    }),
-                },
-                detail: MinimalMemberDetail {
-                    name_hash: name_hash("children"),
-                },
-            }],
-        });
-        let mut registry = TypeRegistry::new();
-        // Not added with add_pairs: the hash is made up.
-        registry
-            .objects_mut()
-            .insert(id.clone(), TypeObject::Minimal(node));
-        let other = TypeIdentifier::Minimal([8; 14]);
-        let node2 = registry.get(&id).unwrap().clone();
-        registry.objects_mut().insert(other.clone(), node2);
+        // struct Node { long data; sequence<Node> children; [long extra;] }
+        let node = |ext: Extensibility, data: Type, extra: bool| {
+            let fwd = Type::forward("Node");
+            let mut members = vec![
+                m("data", 0, data),
+                m("children", 1, Type::sequence(fwd.clone())),
+            ];
+            if extra {
+                members.push(m("extra", 2, int32()));
+            }
+            let t = st("Node", ext, members);
+            fwd.define(t.clone()).unwrap();
+            t
+        };
+        let v1 = node(Appendable, int32(), false);
+        let v2 = node(Appendable, int32(), true);
+        assert!(yes(&v1, &v2));
+        assert!(yes(&v2, &v1));
+        assert!(yes(&v1, &v1));
+        let other = node(Appendable, Type::string(), false);
         assert_eq!(
-            is_assignable(&id, &other, &registry, &TypeConsistency::default()),
+            check(&v1, &other, &TypeConsistency::default()),
+            Assignable::No
+        );
+        // Only known once the whole component is.
+        let (o1, o2) = (
+            TypeObjects::new(&v1).unwrap(),
+            TypeObjects::new(&v2).unwrap(),
+        );
+        let mut registry = TypeRegistry::new();
+        registry.add_type(&o1);
+        assert_eq!(
+            is_assignable(
+                o1.minimal_id(),
+                o2.minimal_id(),
+                &registry,
+                &TypeConsistency::default()
+            ),
+            Assignable::Unknown(vec![o2.minimal_id().clone()])
+        );
+        registry.add_pairs(&o2.minimal).unwrap();
+        assert_eq!(
+            is_assignable(
+                o1.minimal_id(),
+                o2.minimal_id(),
+                &registry,
+                &TypeConsistency::default()
+            ),
             Assignable::Yes
         );
     }

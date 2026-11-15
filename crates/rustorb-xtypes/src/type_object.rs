@@ -404,6 +404,42 @@ impl TypeIdentifier {
         )
     }
 
+    /// The identifier of the strongly connected component of a type in
+    /// one (its `StronglyConnectedComponentId` with `scc_index` 0, the
+    /// SCCIdentifier of 7.3.4.9.3); `None` for other identifiers.
+    pub fn scc_identifier(&self) -> Option<TypeIdentifier> {
+        match self {
+            TypeIdentifier::StronglyConnectedComponent(c) => {
+                Some(TypeIdentifier::StronglyConnectedComponent(
+                    StronglyConnectedComponentId { scc_index: 0, ..*c },
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether this identifies a whole strongly connected component
+    /// rather than one type (an SCCIdentifier, 7.3.4.9.3).
+    pub fn is_scc_identifier(&self) -> bool {
+        matches!(self, TypeIdentifier::StronglyConnectedComponent(c) if c.scc_index == 0)
+    }
+
+    /// The identifiers of the types of the strongly connected component
+    /// this identifies or is a type of: `scc_index` 1 to `scc_length`.
+    pub fn scc_members(&self) -> Vec<TypeIdentifier> {
+        match self {
+            TypeIdentifier::StronglyConnectedComponent(c) => (1..=c.scc_length.max(0))
+                .map(|scc_index| {
+                    TypeIdentifier::StronglyConnectedComponent(StronglyConnectedComponentId {
+                        scc_index,
+                        ..*c
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The equivalence kind of a plain collection's header, if this is
     /// one.
     pub fn plain_collection_header(&self) -> Option<&PlainCollectionHeader> {
@@ -1583,6 +1619,31 @@ pub fn hash_of(serialized: &[u8]) -> EquivalenceHash {
 }
 
 pub type TypeObjectSeq = Vec<TypeObject>;
+
+/// Whether `objects`, the TypeObjects of the types of a strongly connected
+/// component in the order of their `scc_index`, hash to the component's
+/// hash `hash` (7.3.4.9.2): serialized in sequence, with the identifiers
+/// of the component's types as they were while the hash was not known,
+/// of hash 0.
+pub fn component_hash_matches(objects: &[TypeObject], hash: &EquivalenceHash) -> Result<bool> {
+    let mut seq = Vec::with_capacity(objects.len());
+    for o in objects {
+        let mut bytes = o.to_bytes()?;
+        // The hash in the identifiers of the component's own types; 14
+        // octets that appear by chance elsewhere are not to be feared.
+        let mut i = 0;
+        while i + 14 <= bytes.len() {
+            if bytes[i..i + 14] == *hash {
+                bytes[i..i + 14].fill(0);
+                i += 14;
+            } else {
+                i += 1;
+            }
+        }
+        seq.push(TypeObject::from_bytes(&bytes)?);
+    }
+    Ok(hash_of(&xcdr2::to_bytes(&seq, ByteOrder::Little)?) == *hash)
+}
 /// Ordered by fully qualified type name.
 pub type StronglyConnectedComponent = TypeObjectSeq;
 

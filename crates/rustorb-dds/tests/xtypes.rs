@@ -454,3 +454,67 @@ fn dynamic_data_writers_write_to_typed_readers() {
         }
     );
 }
+
+/// A recursive type (a tree), written with DynamicData and read by a
+/// participant that learns the type by TypeLookup: the types of a
+/// strongly connected component (DDS-XTypes 1.3, 7.3.4.9) come together.
+#[test]
+fn recursive_types_come_by_type_lookup() {
+    use rustorb_xtypes::types::*;
+    let (a, b) = (participant(60), participant(60));
+    let fwd = Type::forward("Tree::Node");
+    let node = Type::from(StructType {
+        name: "Tree::Node".into(),
+        members: vec![
+            StructMember::new("value", 0, Type::Primitive(Primitive::Int32)),
+            StructMember::new("children", 1, Type::sequence(fwd.clone())),
+        ],
+        ..StructType::default()
+    });
+    fwd.define(node.clone()).unwrap();
+    let ty = DynamicType::from(node);
+    let writer = a
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &a.create_dynamic_topic("tree", &ty).unwrap(),
+            DataWriterQos {
+                data_representation: vec![data_representation::XCDR2],
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let found = b
+        .discover_topic_type("tree", WAIT)
+        .unwrap()
+        .expect("the type of the topic");
+    assert!(found.equals(&ty));
+    let reader = b
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(
+            &b.create_dynamic_topic("tree", &found).unwrap(),
+            reliable_reader(),
+        )
+        .unwrap();
+    assert!(writer.wait_for_subscriptions(1, WAIT));
+    assert!(reader.wait_for_publications(1, WAIT));
+    let mut sample = DynamicDataFactory::create_data(&ty);
+    sample.set_int32_value(0, 1).unwrap();
+    let child = sample.loan_value(1).unwrap().loan_value(0).unwrap();
+    child.set_int32_value(0, 2).unwrap();
+    child
+        .loan_value(1)
+        .unwrap()
+        .loan_value(0)
+        .unwrap()
+        .set_int32_value(0, 3)
+        .unwrap();
+    writer.write(&sample).unwrap();
+    let mut got = Vec::new();
+    wait_until("the sample", || {
+        got.extend(reader.take().into_iter().filter_map(|s| s.data));
+        !got.is_empty()
+    });
+    assert_eq!(got[0], sample);
+}

@@ -92,14 +92,15 @@ cat "$OUT/versions.txt"
 
 # --- build -----------------------------------------------------------------
 
-log "building rustorb-dds hello_world, keyed, liveliness, evolve and dynamic"
+log "building rustorb-dds hello_world, keyed, liveliness, evolve, dynamic and tree"
 cargo build --quiet --features rustorb-dds/security --example hello_world --example keyed \
-  --example liveliness --example evolve --example dynamic || exit 1
+  --example liveliness --example evolve --example dynamic --example tree || exit 1
 RUST="$ROOT/target/debug/examples/hello_world"
 RUST_KEYED="$ROOT/target/debug/examples/keyed"
 RUST_LIVELINESS="$ROOT/target/debug/examples/liveliness"
 RUST_EVOLVE="$ROOT/target/debug/examples/evolve"
 RUST_DYNAMIC="$ROOT/target/debug/examples/dynamic"
+RUST_TREE="$ROOT/target/debug/examples/tree"
 log "building the C++ binding's hello_world and keyed"
 CPP_BUILD=$BUILD/cpp
 mkdir -p "$CPP_BUILD"
@@ -187,7 +188,7 @@ build_opendds() {
     cmake -S "$1" -B "$2" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${DDS_ROOT:-/usr/local}" &&
     cmake --build "$2" -j "$(nproc)"' sh "$src" "$dir/cmake" || return 1
   local name
-  for name in hello keyed evolve_v1 evolve_v2; do
+  for name in hello keyed evolve_v1 evolve_v2 tree; do
     {
       echo '#!/bin/sh'
       printf 'exec'
@@ -409,6 +410,20 @@ for peer in "${PEERS[@]}"; do
           timeout $((TIMEOUT + 5)) "${E}_$v" sub @D@ "$COUNT" "$TIMEOUT" "$kind"
       done
     done
+  fi
+  # A recursive type (rustorb-dds#70), whose TypeObjects are identified
+  # by their strongly connected component: matched by the TypeInformation
+  # of both sides. Cyclone DDS 0.10.4's idlc does not finish on a
+  # recursive type, and Fast DDS 2.11.2 has no TypeObjects. OpenDDS 3.31
+  # does not take a getTypes request for a component (see README), so
+  # there is no "discover" case.
+  if [ "$peer" = opendds ]; then
+    run_case "$peer-to-rustorb-tree" \
+      "$BUILD/$peer/tree" pub @D@ "$COUNT" -- \
+      timeout $((TIMEOUT + 5)) "$RUST_TREE" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "rustorb-to-$peer-tree" \
+      "$RUST_TREE" pub @D@ "$COUNT" -- \
+      timeout $((TIMEOUT + 5)) "$BUILD/$peer/tree" sub @D@ "$COUNT" "$TIMEOUT"
   fi
   # The Python binding: hello world (best effort and reliable), keyed
   # instances, and DynamicData with the type from the peer.

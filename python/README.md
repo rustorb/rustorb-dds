@@ -27,7 +27,7 @@ if reader.wait_for_data(5.0):
 
 A topic's type is either:
 
-- a class declared with `@dds.struct` / `@dds.union` (and `@dds.enum` on an `enum.IntEnum`, `@dds.bitmask` on an `enum.IntFlag` for its members), whose annotations are its members:
+- a class declared with `@dds.struct` / `@dds.union` (and `@dds.enum` on an `enum.IntEnum`, `@dds.bitmask` on an `enum.IntFlag`, `@dds.bitset` with `dds.bitfield(bits, holder)` fields, for its members), whose annotations are its members:
 
   ```python
   @dds.struct("Keyed::Shape", extensibility="appendable")
@@ -38,7 +38,7 @@ A topic's type is either:
       note: dds.optional(str)
   ```
 
-  Member types are `bool`, `int` (int32), `float` (float64), `str`, `bytes`, the primitives `dds.int8` ... `dds.float128`, `dds.char8`, `dds.string(bound)`, `dds.wstring(bound)`, `dds.sequence(t, bound)`, `dds.array(t, *dims)`, `dds.map(k, v, bound)`, or another declared type. `dds.key`, `dds.optional` and `dds.member(t, id=, key=, optional=, must_understand=, external=, hash_id=)` give annotations; `dds.typedef(name, t)` is an IDL typedef. Member IDs are sequential from 0 unless given (or hashed with `autoid="hash"`).
+  Member types are `bool`, `int` (int32), `float` (float64), `str`, `bytes`, the primitives `dds.int8` ... `dds.float128`, `dds.char8`, `dds.string(bound)`, `dds.wstring(bound)`, `dds.sequence(t, bound)`, `dds.array(t, *dims)`, `dds.map(k, v, bound)`, or another declared type; the name of a struct or union as a string refers to it before it is declared, for recursive types (`children: dds.sequence("Node")`). `dds.key`, `dds.optional` and `dds.member(t, id=, key=, optional=, must_understand=, external=, hash_id=)` give annotations; `dds.typedef(name, t)` is an IDL typedef. Member IDs are sequential from 0 unless given (or hashed with `autoid="hash"`).
 
   [rustorb-idl](https://github.com/rustorb/rustorb-idl) writes these declarations from IDL: `rustorb-idl -bpython -Wbdds_only Foo.idl` writes `Foo_dds.py` (`from Foo_dds import MyModule`). Their TypeObjects are those other implementations make from the same IDL (checked against Cyclone DDS's idlc in `tests/test_generated.py`).
 

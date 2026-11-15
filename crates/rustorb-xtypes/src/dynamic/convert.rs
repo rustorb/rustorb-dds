@@ -27,6 +27,9 @@ struct Converter<'a> {
     done: RefCell<HashMap<TypeIdentifier, Type>>,
     /// Those being converted, to find types that depend on each other.
     in_progress: RefCell<Vec<TypeIdentifier>>,
+    /// The forward declarations of those being converted that are used
+    /// inside themselves: defined once converted.
+    forwards: RefCell<HashMap<TypeIdentifier, Type>>,
 }
 
 fn extensibility(flags: TypeFlag, default: Extensibility) -> Extensibility {
@@ -53,6 +56,18 @@ fn hex(hash: &[u8]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A field of a bitset.
+fn bitfield(common: &CommonBitfield, name: String) -> Result<Bitfield> {
+    Ok(Bitfield {
+        name,
+        position: common.position,
+        bitcount: common.bitcount,
+        holder: Primitive::of_kind(common.holder_type).ok_or(Error::Invalid(
+            "a bitfield holder that is not a primitive type",
+        ))?,
+    })
+}
+
 /// The name a minimal TypeObject gives no name to: after its
 /// TypeIdentifier.
 fn minimal_name(id: Option<&TypeIdentifier>) -> String {
@@ -60,7 +75,30 @@ fn minimal_name(id: Option<&TypeIdentifier>) -> String {
         Some(TypeIdentifier::Minimal(h) | TypeIdentifier::Complete(h)) => {
             format!("minimal_{}", hex(h))
         }
+        Some(TypeIdentifier::StronglyConnectedComponent(c)) => {
+            let (TypeObjectHashId::Minimal(h) | TypeObjectHashId::Complete(h)) = c.sc_component_id;
+            format!("minimal_{}_{}", hex(&h), c.scc_index)
+        }
         _ => "minimal".into(),
+    }
+}
+
+/// The name of the type `object` describes, as the type it converts to
+/// is named.
+fn object_name(object: &TypeObject, id: &TypeIdentifier) -> String {
+    let complete = match object {
+        TypeObject::Complete(c) => c,
+        TypeObject::Minimal(_) => return minimal_name(Some(id)),
+    };
+    match complete {
+        CompleteTypeObject::Alias(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Struct(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Union(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Enumerated(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Bitmask(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Bitset(t) => t.header.detail.type_name.clone(),
+        CompleteTypeObject::Annotation(t) => t.header.annotation_name.clone(),
+        _ => String::new(),
     }
 }
 
@@ -70,6 +108,7 @@ impl<'a> Converter<'a> {
             registry,
             done: RefCell::new(HashMap::new()),
             in_progress: RefCell::new(Vec::new()),
+            forwards: RefCell::new(HashMap::new()),
         }
     }
 
@@ -122,26 +161,36 @@ impl<'a> Converter<'a> {
                 element: self.element(d.header.element_flags, &d.element_identifier)?,
                 bound: d.bound,
             })),
-            TypeIdentifier::Minimal(_) | TypeIdentifier::Complete(_) => {
+            TypeIdentifier::Minimal(_)
+            | TypeIdentifier::Complete(_)
+            | TypeIdentifier::StronglyConnectedComponent(_) => {
                 if let Some(t) = self.done.borrow().get(id) {
                     return Ok(t.clone());
-                }
-                if self.in_progress.borrow().contains(id) {
-                    return Err(Error::Unsupported("types that depend on each other"));
                 }
                 let object = self
                     .registry
                     .get(id)
                     .ok_or(Error::Unsupported("a type whose TypeObject is not known"))?;
+                if self.in_progress.borrow().contains(id) {
+                    // Used inside itself: a forward declaration, defined
+                    // when the type is done (7.3.4.9).
+                    let fwd = self
+                        .forwards
+                        .borrow_mut()
+                        .entry(id.clone())
+                        .or_insert_with(|| Type::forward(object_name(object, id)))
+                        .clone();
+                    return Ok(fwd);
+                }
                 self.in_progress.borrow_mut().push(id.clone());
                 let ty = self.object(object, Some(id));
                 self.in_progress.borrow_mut().pop();
                 let ty = ty?;
+                if let Some(fwd) = self.forwards.borrow_mut().remove(id) {
+                    fwd.define(ty.clone())?;
+                }
                 self.done.borrow_mut().insert(id.clone(), ty.clone());
                 ty
-            }
-            TypeIdentifier::StronglyConnectedComponent(_) => {
-                return Err(Error::Unsupported("types that depend on each other"));
             }
             TypeIdentifier::Extended(_) => {
                 return Err(Error::Unsupported("an unknown TypeIdentifier kind"));
@@ -251,10 +300,28 @@ impl<'a> Converter<'a> {
                     })
                     .collect(),
             }),
-            CompleteTypeObject::Annotation(_) => {
-                return Err(Error::Unsupported("annotation types"));
-            }
-            CompleteTypeObject::Bitset(_) => return Err(Error::Unsupported("bitset types")),
+            CompleteTypeObject::Annotation(t) => Type::from(AnnotationType {
+                name: t.header.annotation_name.clone(),
+                members: t
+                    .member_seq
+                    .iter()
+                    .map(|m| {
+                        Ok(AnnotationParameter {
+                            name: m.name.clone(),
+                            ty: self.identifier(&m.common.member_type_id)?,
+                            default: Some(m.default_value.clone()),
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            CompleteTypeObject::Bitset(t) => Type::from(BitsetType {
+                name: t.header.detail.type_name.clone(),
+                fields: t
+                    .field_seq
+                    .iter()
+                    .map(|f| bitfield(&f.common, f.detail.name.clone()))
+                    .collect::<Result<_>>()?,
+            }),
             CompleteTypeObject::Extended(_) => {
                 return Err(Error::Unsupported("an unknown type kind"));
             }
@@ -340,10 +407,28 @@ impl<'a> Converter<'a> {
                     })
                     .collect(),
             }),
-            MinimalTypeObject::Annotation(_) => {
-                return Err(Error::Unsupported("annotation types"));
-            }
-            MinimalTypeObject::Bitset(_) => return Err(Error::Unsupported("bitset types")),
+            MinimalTypeObject::Annotation(t) => Type::from(AnnotationType {
+                name,
+                members: t
+                    .member_seq
+                    .iter()
+                    .map(|m| {
+                        Ok(AnnotationParameter {
+                            name: format!("p{}", hex(&m.name_hash)),
+                            ty: self.identifier(&m.common.member_type_id)?,
+                            default: Some(m.default_value.clone()),
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            MinimalTypeObject::Bitset(t) => Type::from(BitsetType {
+                name,
+                fields: t
+                    .field_seq
+                    .iter()
+                    .map(|f| bitfield(&f.common, format!("b{}", f.common.position)))
+                    .collect::<Result<_>>()?,
+            }),
             MinimalTypeObject::Extended(_) => {
                 return Err(Error::Unsupported("an unknown type kind"));
             }

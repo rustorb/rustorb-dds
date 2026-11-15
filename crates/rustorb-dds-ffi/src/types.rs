@@ -1,7 +1,13 @@
 //! Topic types (`rdds_type`), built bottom-up: primitives, strings and
-//! collections from their parts, and enums, bitmasks, structs and unions
-//! with builders that take one literal or member at a time (DDS-XTypes
-//! 1.3, 7.5.2.2 `DynamicTypeBuilder`).
+//! collections from their parts, and enums, bitmasks, bitsets, structs
+//! and unions with builders that take one literal, field or member at a
+//! time (DDS-XTypes 1.3, 7.5.2.2 `DynamicTypeBuilder`).
+//!
+//! A recursive type is built with a forward declaration
+//! (`rdds_type_forward`) used where the type is used inside itself (in a
+//! sequence, a map or an optional member), then defined as the type once
+//! that is built (`rdds_type_define`). The defined type is the one to
+//! use for a topic.
 //!
 //! Every function that makes a type copies what it is given; the caller
 //! keeps and releases its own handles.
@@ -25,6 +31,10 @@ pub struct EnumBuilder(EnumType);
 /// A builder of a bitmask (`rdds_bitmask_builder`).
 #[derive(Debug)]
 pub struct BitmaskBuilder(BitmaskType);
+
+/// A builder of a bitset (`rdds_bitset_builder`).
+#[derive(Debug)]
+pub struct BitsetBuilder(BitsetType);
 
 /// A builder of a struct (`rdds_struct_builder`).
 #[derive(Debug)]
@@ -320,6 +330,87 @@ pub unsafe extern "C" fn rdds_bitmask_builder_release(builder: *mut BitmaskBuild
     unsafe { release(builder) }
 }
 
+/// `rdds_bitset_builder_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_bitset_builder_new(
+    name: *const c_char,
+    out: *mut *mut BitsetBuilder,
+) -> Status {
+    guard(|| {
+        let b = BitsetType {
+            name: unsafe { cstr(name, "the name") }?.to_owned(),
+            fields: Vec::new(),
+        };
+        unsafe { put(out, BitsetBuilder(b)) }
+    })
+}
+
+/// `rdds_bitset_builder_add_field`: `bitcount` bits from `position`,
+/// read and written as `holder`, `TK_BOOLEAN` or an integer type kind.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_bitset_builder_add_field(
+    builder: *mut BitsetBuilder,
+    name: *const c_char,
+    position: u16,
+    bitcount: u8,
+    holder: u8,
+) -> Status {
+    guard(|| {
+        let b = unsafe { builder.as_mut() }.ok_or_else(|| bad("the builder is NULL"))?;
+        let holder = Primitive::of_kind(holder)
+            .ok_or_else(|| bad(format!("{holder:#x} is not a primitive type kind")))?;
+        b.0.fields.push(Bitfield {
+            name: unsafe { cstr(name, "the name") }?.to_owned(),
+            position,
+            bitcount,
+            holder,
+        });
+        Ok(())
+    })
+}
+
+/// `rdds_bitset_builder_build`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_bitset_builder_build(
+    builder: *const BitsetBuilder,
+    out: *mut *mut RddsType,
+) -> Status {
+    guard(|| {
+        let b = unsafe { obj(builder, "the builder") }?;
+        b.0.check().map_err(|e| bad(e.to_string()))?;
+        make(out, Type::from(b.0.clone()))
+    })
+}
+
+/// `rdds_bitset_builder_release`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_bitset_builder_release(builder: *mut BitsetBuilder) {
+    unsafe { release(builder) }
+}
+
+/// `rdds_type_forward`: a forward declaration of the type `name`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_type_forward(name: *const c_char, out: *mut *mut RddsType) -> Status {
+    guard(|| {
+        let name = unsafe { cstr(name, "the name") }?;
+        make(out, Type::forward(name))
+    })
+}
+
+/// `rdds_type_define`: defines the forward declaration `forward` as
+/// `target`, a type of its name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdds_type_define(
+    forward: *const RddsType,
+    target: *const RddsType,
+) -> Status {
+    guard(|| {
+        let f = unsafe { ty(forward) }?;
+        let t = unsafe { ty(target) }?;
+        f.define(t).map_err(|e| bad(e.to_string()))
+    })
+}
+
 /// `rdds_struct_builder_new`: `flags` of `RDDS_TYPE_NESTED` and
 /// `RDDS_TYPE_AUTOID_HASH`; `base` NULL for none.
 #[unsafe(no_mangle)]
@@ -494,7 +585,9 @@ pub unsafe extern "C" fn rdds_type_release(t: *mut RddsType) {
 
 /// `rdds_type_hashes`: the equivalence hashes (14 octets each) of the
 /// minimal and complete TypeObjects of a type that can be a topic type
-/// (DDS-XTypes 1.3, 7.3.4.9). They identify it on the network.
+/// (DDS-XTypes 1.3, 7.3.4.9). They identify it on the network. A
+/// recursive type has none: it is identified by its strongly connected
+/// component (7.3.4.9.2).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdds_type_hashes(
     t: *const RddsType,

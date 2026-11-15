@@ -20,8 +20,12 @@
 //! factories have associated functions instead of singletons, and loans
 //! are borrows ([`DynamicData::loan_value`]).
 //!
-//! Annotation and bitset types are not supported, nor types that depend
-//! on each other (as in [`TypeObjects`](crate::types::TypeObjects)).
+//! A bitset's fields are members whose IDs are their positions, read and
+//! written as their holder types; the whole bitset is read and written as
+//! an unsigned integer with [`MEMBER_ID_INVALID`]. An annotation type's
+//! members are its parameters, with their defaults; it is not
+//! serialized. A [`DynamicTypeBuilder`] of `TK_BITSET` takes the bit
+//! counts of its members as its descriptor's `bound`, in order.
 
 mod cdr;
 mod convert;

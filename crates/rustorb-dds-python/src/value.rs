@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 use rustorb_dds::{DynamicData, DynamicDataFactory, DynamicType, MEMBER_ID_INVALID};
 use rustorb_xtypes::type_object::*;
-use rustorb_xtypes::types::Type;
+use rustorb_xtypes::types::{Primitive, Type};
 
 fn err(e: rustorb_xtypes::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -169,6 +169,41 @@ pub(crate) fn to_py<'py>(py: Python<'py>, d: &DynamicData) -> PyResult<Bound<'py
                     Err(_) => py.None().into_bound(py),
                 };
                 dict.set_item(m.get_name(), v)?;
+            }
+            dict.into_any()
+        }
+        TK_BITSET => {
+            // A dict of the fields.
+            let Type::Bitset(b) = ty.as_type() else {
+                unreachable!("a bitset")
+            };
+            let dict = PyDict::new(py);
+            for f in &b.fields {
+                let id = MemberId::from(f.position);
+                let v = match f.holder {
+                    Primitive::Boolean => d
+                        .get_boolean_value(id)
+                        .map_err(err)?
+                        .into_pyobject(py)?
+                        .to_owned()
+                        .into_any(),
+                    Primitive::Int8 | Primitive::Int16 | Primitive::Int32 | Primitive::Int64 => d
+                        .get_int64_value(id)
+                        .map_err(err)?
+                        .into_pyobject(py)?
+                        .into_any(),
+                    Primitive::Byte => d
+                        .get_byte_value(id)
+                        .map_err(err)?
+                        .into_pyobject(py)?
+                        .into_any(),
+                    _ => d
+                        .get_uint64_value(id)
+                        .map_err(err)?
+                        .into_pyobject(py)?
+                        .into_any(),
+                };
+                dict.set_item(&f.name, v)?;
             }
             dict.into_any()
         }
@@ -331,6 +366,39 @@ fn fill(d: &mut DynamicData, v: &Bound<'_, PyAny>) -> PyResult<()> {
                         )));
                     }
                 }
+            }
+            Ok(())
+        }
+        TK_BITSET => {
+            let Type::Bitset(b) = ty.as_type() else {
+                unreachable!("a bitset")
+            };
+            let dict = v.cast::<PyDict>().ok();
+            for f in &b.fields {
+                let item = match dict {
+                    Some(dict) => dict.get_item(&f.name)?,
+                    None => v.getattr(f.name.as_str()).ok(),
+                };
+                let Some(item) = item else {
+                    return Err(PyValueError::new_err(format!(
+                        "field {:?} of {} is missing",
+                        f.name, b.name
+                    )));
+                };
+                let id = MemberId::from(f.position);
+                match f.holder {
+                    Primitive::Boolean => d.set_boolean_value(id, item.extract()?),
+                    Primitive::Int8 => d.set_int8_value(id, int(&item)?),
+                    Primitive::Int16 => d.set_int16_value(id, int(&item)?),
+                    Primitive::Int32 => d.set_int32_value(id, int(&item)?),
+                    Primitive::Int64 => d.set_int64_value(id, int(&item)?),
+                    Primitive::Uint16 => d.set_uint16_value(id, int(&item)?),
+                    Primitive::Uint32 => d.set_uint32_value(id, int(&item)?),
+                    Primitive::Uint64 => d.set_uint64_value(id, int(&item)?),
+                    Primitive::Byte => d.set_byte_value(id, int(&item)?),
+                    _ => d.set_uint8_value(id, int(&item)?),
+                }
+                .map_err(err)?;
             }
             Ok(())
         }

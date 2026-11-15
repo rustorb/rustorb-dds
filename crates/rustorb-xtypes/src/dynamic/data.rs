@@ -56,6 +56,8 @@ pub(crate) enum Value {
     String(String),
     Enum(i32),
     Bitmask(u64),
+    /// The bits of a bitset.
+    Bitset(u64),
     /// The members, in the order of [`struct_members`]; `None` for an
     /// absent optional member.
     Struct(Vec<Option<DynamicData>>),
@@ -196,8 +198,24 @@ impl DynamicData {
             }
             Type::Map(_) => Value::Map(Vec::new()),
             Type::Alias(_) => unreachable!("resolved"),
+            Type::Forward(f) => super::ty::undefined(f),
             Type::Enum(e) => Value::Enum(enum_default(e)),
             Type::Bitmask(_) => Value::Bitmask(0),
+            Type::Bitset(_) => Value::Bitset(0),
+            // The parameters, at their defaults.
+            Type::Annotation(a) => Value::Struct(
+                a.members
+                    .iter()
+                    .map(|m| {
+                        let mut d = DynamicData::new(&m.ty);
+                        if let Some(v) = &m.default {
+                            // A default that does not fit is left at zero.
+                            let _ = d.set_parameter_value(v);
+                        }
+                        Some(d)
+                    })
+                    .collect(),
+            ),
             Type::Struct(s) => Value::Struct(
                 struct_members(s)
                     .iter()
@@ -266,6 +284,16 @@ impl DynamicData {
                 .iter()
                 .find(|f| f.name == name)
                 .map(|f| MemberId::from(f.position)),
+            Type::Bitset(b) => b
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| MemberId::from(f.position)),
+            Type::Annotation(a) => a
+                .members
+                .iter()
+                .position(|m| m.name == name)
+                .map(|i| i as MemberId),
             _ => None,
         }
         .unwrap_or(MEMBER_ID_INVALID)
@@ -325,6 +353,10 @@ impl DynamicData {
                 Some((i, v)) if u.members[*i].id == id => Ok(v),
                 _ => Err(bad(format!("member {id} is not selected"))),
             },
+            (Type::Annotation(_), Value::Struct(values)) => values
+                .get(id as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| bad(format!("no member {id}"))),
             (_, Value::Collection(v)) => v
                 .get(id as usize)
                 .ok_or_else(|| bad(format!("no element {id}"))),
@@ -348,6 +380,10 @@ impl DynamicData {
                     .ok_or_else(|| bad(format!("no member {id}")))?;
                 Ok(values[i].get_or_insert_with(|| DynamicData::new(&members[i].ty)))
             }
+            (Type::Annotation(_), Value::Struct(values)) => values
+                .get_mut(id as usize)
+                .and_then(Option::as_mut)
+                .ok_or_else(|| bad(format!("no member {id}"))),
             (
                 Type::Union(u),
                 Value::Union {
@@ -615,6 +651,41 @@ impl DynamicData {
         self.set_string(id, value, true)
     }
 
+    /// Sets the value of an annotation parameter of this type.
+    fn set_parameter_value(&mut self, v: &AnnotationParameterValue) -> Result<()> {
+        use AnnotationParameterValue as V;
+        let id = MEMBER_ID_INVALID;
+        let scalar = match v {
+            V::Boolean(v) => Scalar::Bool(*v),
+            V::Byte(v) => Scalar::Byte(*v),
+            V::Int8(v) => Scalar::I8(*v),
+            V::Uint8(v) => Scalar::U8(*v),
+            V::Int16(v) => Scalar::I16(*v),
+            V::Uint16(v) => Scalar::U16(*v),
+            V::Int32(v) | V::Enumerated(v) => Scalar::I32(*v),
+            V::Uint32(v) => Scalar::U32(*v),
+            V::Int64(v) => Scalar::I64(*v),
+            V::Uint64(v) => Scalar::U64(*v),
+            V::Float32(v) => Scalar::F32(*v),
+            V::Float64(v) => Scalar::F64(*v),
+            V::Float128(v) => Scalar::F128(*v),
+            V::Char8(v) => Scalar::C8(char::from(*v)),
+            V::Char16(v) => Scalar::C16(char::from_u32(u32::from(*v)).unwrap_or('\0')),
+            V::String8(v) => return self.set_string(id, v, false),
+            V::String16(v) => return self.set_string(id, v, true),
+            V::Extended(_) => return Err(bad("an unknown kind of value")),
+        };
+        if let (Type::Enum(e), Scalar::I32(v)) = (&self.ty, scalar) {
+            // An enum literal by its value, whatever the enum's bits.
+            if !e.literals.iter().any(|l| l.value == v) {
+                return Err(bad("not a literal of the enum"));
+            }
+            self.value = Value::Enum(v);
+            return Ok(());
+        }
+        self.set_scalar(id, scalar)
+    }
+
     // ---------- primitives -----------------------------------------------
 
     /// The flag `position` of a bitmask, when `id` names one.
@@ -631,16 +702,39 @@ impl DynamicData {
         }
     }
 
+    /// The field of a bitset at position `id`, when `id` names one.
+    fn bitfield(&self, id: MemberId) -> Option<Result<(Bitfield, u64)>> {
+        match (&self.ty, &self.value) {
+            (Type::Bitset(t), Value::Bitset(bits)) if id != MEMBER_ID_INVALID => Some(
+                t.fields
+                    .iter()
+                    .find(|f| MemberId::from(f.position) == id)
+                    .cloned()
+                    .map(|f| (f, *bits))
+                    .ok_or_else(|| bad(format!("no bitfield at {id}"))),
+            ),
+            _ => None,
+        }
+    }
+
     fn get_scalar(&self, id: MemberId, want: TypeKind) -> Result<Scalar> {
         if want == TK_BOOLEAN {
             if let Some(flag) = self.flag(id) {
                 return flag.map(Scalar::Bool);
             }
         }
-        let target = self.member(id)?;
-        let from = target
-            .scalar()
-            .ok_or_else(|| bad("not a primitive value"))?;
+        let from = if let Some(field) = self.bitfield(id) {
+            let (f, bits) = field?;
+            field_scalar(&f, bits)
+        } else {
+            self.member(id)?
+                .scalar()
+                .ok_or_else(|| bad("not a primitive value"))?
+        };
+        let target = match self.bitfield(id) {
+            Some(_) => self,
+            None => self.member(id)?,
+        };
         let allowed = from.kind() == want
             || promotes(from.kind(), want)
             || match &target.ty {
@@ -676,8 +770,44 @@ impl DynamicData {
                 return Ok(());
             }
         }
+        if let Some(field) = self.bitfield(id) {
+            let (f, bits) = field?;
+            let holder = field_scalar(&f, 0).kind();
+            if holder != value.kind() && !promotes(value.kind(), holder) {
+                return Err(bad(format!(
+                    "a value of kind {:#x} set as kind {holder:#x}",
+                    value.kind()
+                )));
+            }
+            let v = value.as_i128().ok_or_else(|| bad("not an integer"))?;
+            let n = u32::from(f.bitcount);
+            let signed = signed_bits(holder).is_some();
+            let fits = if signed {
+                let half = 1i128 << (n - 1);
+                (-half..half).contains(&v)
+            } else {
+                v >= 0 && v >> n == 0
+            };
+            if !fits {
+                return Err(bad(format!("{v} does not fit in {n} bits")));
+            }
+            let mask = (u64::MAX >> (64 - n)) << f.position;
+            let Value::Bitset(b) = &mut self.value else {
+                unreachable!("a bitset");
+            };
+            *b = (bits & !mask) | (((v as u64) << f.position) & mask);
+            return Ok(());
+        }
         let target = self.member_mut(id)?;
         let new = match (&target.ty, &target.value) {
+            (Type::Bitset(t), _) => {
+                let v = value.as_i128().ok_or_else(|| bad("not an integer"))?;
+                let bits = t.bits();
+                if v < 0 || (bits < 64 && v >> bits != 0) {
+                    return Err(bad("beyond the bitset's bits"));
+                }
+                Value::Bitset(v as u64)
+            }
             (Type::Enum(e), _) => {
                 let ok = signed_bits(value.kind()).is_some_and(|b| b <= e.bit_bound.max(8))
                     || value.kind() == TK_BYTE;
@@ -726,8 +856,34 @@ impl DynamicData {
                 17..=32 => Scalar::U32(*v as u32),
                 _ => Scalar::U64(*v),
             }),
+            (Type::Bitset(t), Value::Bitset(v)) => Some(match t.holder() {
+                Primitive::Uint8 => Scalar::U8(*v as u8),
+                Primitive::Uint16 => Scalar::U16(*v as u16),
+                Primitive::Uint32 => Scalar::U32(*v as u32),
+                _ => Scalar::U64(*v),
+            }),
             (_, v) => scalar_of(v),
         }
+    }
+}
+
+/// The value of the field `f` of the bits `bits`, as its holder type.
+fn field_scalar(f: &Bitfield, bits: u64) -> Scalar {
+    let n = u32::from(f.bitcount);
+    let raw = (bits >> f.position) & (u64::MAX >> (64 - n));
+    // Sign-extended for a signed holder.
+    let signed = ((raw << (64 - n)) as i64) >> (64 - n);
+    match f.holder {
+        Primitive::Boolean => Scalar::Bool(raw != 0),
+        Primitive::Byte => Scalar::Byte(raw as u8),
+        Primitive::Int8 => Scalar::I8(signed as i8),
+        Primitive::Uint8 => Scalar::U8(raw as u8),
+        Primitive::Int16 => Scalar::I16(signed as i16),
+        Primitive::Uint16 => Scalar::U16(raw as u16),
+        Primitive::Int32 => Scalar::I32(signed as i32),
+        Primitive::Uint32 => Scalar::U32(raw as u32),
+        Primitive::Int64 => Scalar::I64(signed),
+        _ => Scalar::U64(raw),
     }
 }
 

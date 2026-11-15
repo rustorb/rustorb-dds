@@ -1,5 +1,9 @@
 name: CI
 
+# Linux jobs run on Ubuntu 24.04, not ubuntu-latest: that became 26.04,
+# where setup-python has no Python 3.9 and the Rust cache saved on 24.04
+# made the Python binding link against a Python that is not there.
+
 on:
   push:
     branches: [main]
@@ -18,7 +22,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +31,7 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +56,7 @@ jobs:
       - run: cargo test -p rustorb-dds --features security --locked
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
@@ -61,7 +65,7 @@ jobs:
       - run: cargo build -p rustorb-dds --features security --locked
 
   doc:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
@@ -72,7 +76,7 @@ jobs:
 
   # The C ABI from C and C++ (crates/rustorb-dds-ffi/tests/c).
   c-abi:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -84,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -121,8 +125,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.9" }
-          - { os: ubuntu-latest, python: "3.13" }
+          # The oldest Python the package supports.
+          - { os: ubuntu-24.04, python: "3.9" }
+          - { os: ubuntu-24.04, python: "3.13" }
           - { os: macos-latest, python: "3.13" }
           - { os: windows-latest, python: "3.13" }
     runs-on: ${{ matrix.os }}

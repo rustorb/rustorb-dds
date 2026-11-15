@@ -8,6 +8,21 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Recursive types (DDS-XTypes 1.3, 7.3.4.8 and 7.3.4.9, #70): a type
+  that uses itself through a sequence, a map or an optional member, made
+  with `Type::forward` and `Type::define` in Rust, `rdds_type_forward`
+  and `rdds_type_define` in the C ABI, and the name of the type as a
+  string in Python. Their TypeObjects are identified by their strongly
+  connected component (SCC identifiers), which TypeLookup serves and
+  resolves as a whole, so a reader learns such a type from the network.
+- Bitset types (#70): `BitsetType` with its TypeObjects, DynamicData of
+  its fields and its serialization as the smallest unsigned integer that
+  holds its bits; `rdds_bitset_builder_*` in the C ABI (one integer in
+  the sample streams) and `@dds.bitset` with `dds.bitfield` in Python.
+- Annotation types (#70): `AnnotationType` with its TypeObjects both ways
+  and its DynamicType (members with their defaults); its DynamicData is
+  not serialized.
+
 - DDS Security from the PROPERTY of the participant QoS (DDS Security
   1.2, 7.2.5, #69): the six `dds.sec.*` properties in
   `ParticipantConfig::set_properties` in Rust, `property` of

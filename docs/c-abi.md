@@ -29,7 +29,7 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 
 ### 型
 
-型は DDS-XTypes 1.3 の `DynamicTypeBuilder`（7.5.2.2）と同じく、部品から組み立てる。基本型は TypeKind（`RDDS_TK_INT32` など）、文字列・列・配列・写像・typedef はそれぞれの関数、enum・bitmask・struct・union はビルダーにリテラルやメンバーを一つずつ足す。メンバーの ID、`@key`・`@optional`・`@external`・`@must_understand`・`@try_construct`・`@hashid`、拡張性、`@nested`、`@autoid(HASH)` を渡せる。
+型は DDS-XTypes 1.3 の `DynamicTypeBuilder`（7.5.2.2）と同じく、部品から組み立てる。基本型は TypeKind（`RDDS_TK_INT32` など）、文字列・列・配列・写像・typedef はそれぞれの関数、enum・bitmask・bitset・struct・union はビルダーにリテラル、フィールドやメンバーを一つずつ足す。再帰型（自分自身を sequence・map・`@optional` のメンバーの中に持つ型）は、`rdds_type_forward` で名前だけの前方宣言を作って中で使い、型を組み立てた後 `rdds_type_define` でその型と定める。トピックには定めた型（前方宣言ではなく）を使う。再帰型は強連結成分（XTypes 7.3.4.9.2）で識別されるので `rdds_type_hashes` は失敗する。メンバーの ID、`@key`・`@optional`・`@external`・`@must_understand`・`@try_construct`・`@hashid`、拡張性、`@nested`、`@autoid(HASH)` を渡せる。
 
 生成コード（#45、#46）はこの関数で自分の型を組み立てる。組み立てた型の TypeIdentifier は、同じ IDL を rustorb-idl の Rust 出力が記述したものと一致する（`tests/abi.rs`）。`rdds_type_hashes` で確かめられる。
 
@@ -42,7 +42,7 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 - sequence と map は長さ（`rdds_out_length`）と要素。map は key、value の順
 - 配列は全要素を行の順に
 - 要素が基本型（`float128` 以外）の sequence と配列は、要素をまとめて一度に渡す（`rdds_out_int32_array` など）。sequence では長さの後
-- enum はリテラルの値、bitmask はビット
+- enum はリテラルの値、bitmask はビット。bitset も整数一つ（`rdds_out_bitmask`）で、最初のフィールドが下位のビット
 - typedef と `@external` は透過
 
 **この形にした理由**：符号化（XCDR1 と XCDR2、DHEADER、EMHEADER、mutable の各メンバーのヘッダー、キーハッシュ）を Rust 側に一か所だけ置くため。生成コードは値を順に書くだけで、符号化のことを知らない。C++ と Java の生成器は簡単になり、XCDR の正しさは Rust 側の試験（D3 で生成コードとバイト単位で一致を確かめた DynamicData の直列化）にまかせられる。rustorb の `rorb_out` / `rorb_in`（GIOP の CDR）と同じ使い勝手だが、こちらはストリームが型を知らず、writer が書くときに型と照らし合わせる。型に合わない値は `RETCODE_BAD_PARAMETER` で、どこが合わないかを文で返す。

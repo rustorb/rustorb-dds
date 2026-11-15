@@ -15,6 +15,11 @@
 //! - `("enum", name, bit_bound, extensibility, [(literal, value,
 //!   default)])`;
 //! - `("bitmask", name, bit_bound, extensibility, [(flag, position)])`;
+//! - `("bitset", name, [(field, position, bitcount, holder)])`, the
+//!   holder being `"boolean"` or the name of an integer type;
+//! - `("ref", name)`: the type of that name that this description is
+//!   describing, for a recursive type (only within a sequence, a map or
+//!   an optional member);
 //! - `("struct", name, extensibility, nested, base or None, [(member, id,
 //!   type, key, optional, must_understand, external, hash_id)],
 //!   autoid_hash)`;
@@ -28,6 +33,7 @@
 //!
 //! The extensibility is `"final"`, `"appendable"` or `"mutable"`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -152,43 +158,64 @@ fn opt_item<'py>(t: &Bound<'py, PyTuple>, i: usize) -> Option<Bound<'py, PyAny>>
 
 /// The type a description describes.
 pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
+    let mut refs = HashMap::new();
+    let ty = parse(desc, &mut refs)?;
+    match refs
+        .into_values()
+        .find(|f| matches!(f.resolve(), Type::Forward(_)))
+    {
+        Some(f) => Err(bad(format!(
+            "{} is referred to but not described",
+            f.name().unwrap_or_default()
+        ))),
+        None => Ok(ty),
+    }
+}
+
+/// The type a description describes; `("ref", name)` refers to the type
+/// of that name being described (a recursive type), by a forward
+/// declaration in `refs`.
+fn parse(desc: &Bound<'_, PyAny>, refs: &mut HashMap<String, Type>) -> PyResult<Type> {
     if let Ok(t) = desc.cast::<PyDynamicType>() {
         return Ok(t.get().ty.as_type().clone());
     }
     if let Ok(s) = desc.cast::<PyString>() {
         let s: String = s.extract()?;
         let s = s.as_str();
-        return PRIMITIVES
-            .iter()
-            .find(|(n, _)| *n == s)
-            .map(|(_, p)| Type::Primitive(*p))
-            .ok_or_else(|| bad(format!("unknown primitive type {s:?}")));
+        return primitive(s).map(Type::Primitive);
     }
     let t = desc.cast::<PyTuple>().map_err(|_| {
         PyTypeError::new_err("a type description is a str, a tuple or a DynamicType")
     })?;
     let kind: String = item(t, 0)?.extract()?;
-    Ok(match kind.as_str() {
+    let ty = match kind.as_str() {
+        "ref" => {
+            let name: String = item(t, 1)?.extract()?;
+            return Ok(refs
+                .entry(name.clone())
+                .or_insert_with(|| Type::forward(name))
+                .clone());
+        }
         "string" | "wstring" => Type::String {
             wide: kind == "wstring",
             bound: item(t, 1)?.extract()?,
         },
         "sequence" => Type::Sequence(Arc::new(SequenceType {
-            element: Element::new(type_of(&item(t, 1)?)?),
+            element: Element::new(parse(&item(t, 1)?, refs)?),
             bound: item(t, 2)?.extract()?,
         })),
         "array" => Type::Array(Arc::new(ArrayType {
-            element: Element::new(type_of(&item(t, 1)?)?),
+            element: Element::new(parse(&item(t, 1)?, refs)?),
             dimensions: item(t, 2)?.extract()?,
         })),
         "map" => Type::Map(Arc::new(MapType {
-            key: Element::new(type_of(&item(t, 1)?)?),
-            element: Element::new(type_of(&item(t, 2)?)?),
+            key: Element::new(parse(&item(t, 1)?, refs)?),
+            element: Element::new(parse(&item(t, 2)?, refs)?),
             bound: item(t, 3)?.extract()?,
         })),
         "alias" => Type::from(AliasType {
             name: item(t, 1)?.extract()?,
-            related: type_of(&item(t, 2)?)?,
+            related: parse(&item(t, 2)?, refs)?,
         }),
         "enum" => {
             let literals: Vec<(String, i32, bool)> = item(t, 4)?.extract()?;
@@ -237,7 +264,7 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                     ..StructMember::new(
                         item(m, 0)?.extract::<String>()?,
                         item(m, 1)?.extract()?,
-                        type_of(&item(m, 2)?)?,
+                        parse(&item(m, 2)?, refs)?,
                     )
                 });
             }
@@ -252,7 +279,7 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                 base: if base.is_none() {
                     None
                 } else {
-                    Some(type_of(&base)?)
+                    Some(parse(&base, refs)?)
                 },
                 members,
             })
@@ -267,7 +294,7 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                     ..UnionMember::new(
                         item(m, 0)?.extract::<String>()?,
                         item(m, 1)?.extract()?,
-                        type_of(&item(m, 2)?)?,
+                        parse(&item(m, 2)?, refs)?,
                         item(m, 3)?.extract()?,
                     )
                 });
@@ -280,14 +307,45 @@ pub(crate) fn type_of(desc: &Bound<'_, PyAny>) -> PyResult<Type> {
                     .map(|v| v.extract())
                     .transpose()?
                     .unwrap_or(false),
-                discriminator: type_of(&item(t, 4)?)?,
+                discriminator: parse(&item(t, 4)?, refs)?,
                 discriminator_key: false,
                 discriminator_try_construct: TryConstruct::Discard,
                 members,
             })
         }
+        "bitset" => {
+            let fields: Vec<(String, u16, u8, String)> = item(t, 2)?.extract()?;
+            let fields = fields
+                .into_iter()
+                .map(|(name, position, bitcount, holder)| {
+                    Ok(Bitfield {
+                        name,
+                        position,
+                        bitcount,
+                        holder: primitive(&holder)?,
+                    })
+                })
+                .collect::<PyResult<_>>()?;
+            Type::from(BitsetType {
+                name: item(t, 1)?.extract()?,
+                fields,
+            })
+        }
         _ => return Err(bad(format!("unknown type kind {kind:?}"))),
-    })
+    };
+    if let Some(f) = ty.name().and_then(|n| refs.get(n)) {
+        f.define(ty.clone()).map_err(|e| bad(e.to_string()))?;
+    }
+    Ok(ty)
+}
+
+/// The primitive type of a name.
+fn primitive(s: &str) -> PyResult<Primitive> {
+    PRIMITIVES
+        .iter()
+        .find(|(n, _)| *n == s)
+        .map(|(_, p)| *p)
+        .ok_or_else(|| bad(format!("unknown primitive type {s:?}")))
 }
 
 /// The description of `ty`.
@@ -325,6 +383,31 @@ pub(crate) fn describe<'py>(py: Python<'py>, ty: &Type) -> PyResult<Bound<'py, P
             describe(py, &m.element.ty)?,
             obj(&m.bound)?,
         ]),
+        Type::Bitset(b) => {
+            let fields = b
+                .fields
+                .iter()
+                .map(|f| {
+                    tuple(vec![
+                        obj(&f.name.as_str())?,
+                        obj(&f.position)?,
+                        obj(&u16::from(f.bitcount))?,
+                        describe(py, &Type::Primitive(f.holder))?,
+                    ])
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            tuple(vec![
+                obj(&"bitset")?,
+                obj(&b.name.as_str())?,
+                PyList::new(py, fields)?.into_any(),
+            ])
+        }
+        Type::Annotation(a) => Err(bad(format!(
+            "the annotation type {} has no description",
+            a.name
+        ))),
+        // A reference back to a type being described (a recursive type).
+        Type::Forward(f) => tuple(vec![obj(&"ref")?, obj(&f.name())?]),
         Type::Alias(a) => tuple(vec![
             obj(&"alias")?,
             obj(&a.name.as_str())?,

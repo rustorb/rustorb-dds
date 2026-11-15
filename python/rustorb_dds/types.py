@@ -26,8 +26,11 @@ type. A member's type is one of:
   ``float64``, ``float128``, ``char8``, ``char16``;
 - ``string(bound)``, ``wstring(bound)``, ``sequence(t, bound)``,
   ``array(t, *dims)``, ``map(k, v, bound)``;
-- a class made with :func:`struct`, :func:`union`, :func:`enum` or
-  :func:`bitmask`;
+- a class made with :func:`struct`, :func:`union`, :func:`enum`,
+  :func:`bitmask` or :func:`bitset`;
+- the name (a string) of a struct or union, declared before or after:
+  how a recursive type refers to itself, as in
+  ``children: dds.sequence("Node")``;
 - :func:`key`, :func:`optional` or :func:`member` of one of those, for
   the member's annotations.
 
@@ -55,7 +58,8 @@ __all__ = [
     "uint32", "int64", "uint64", "float32", "float64", "float128",
     "char8", "char16", "string", "wstring", "sequence", "array", "map",
     "key", "optional", "member", "case", "default_case", "struct", "union",
-    "enum", "bitmask", "typedef", "type_of", "DynamicType",
+    "enum", "bitmask", "bitset", "bitfield", "typedef", "type_of",
+    "DynamicType",
 ]
 
 DynamicType = _native.DynamicType
@@ -288,10 +292,69 @@ _BUILTINS = {
 }
 
 
+# The structs and unions declared, by their DDS name and by their Python
+# name, for references by name (recursive types).
+_named = {}
+# The structs and unions being described: one met again inside itself is
+# described as a reference to it.
+_describing = []
+
+
+class _Ref(Spec):
+    """A struct or union named before it is declared: in a recursive type,
+    the type itself (or one that uses it) inside a sequence, a map or an
+    optional member."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def target(self):
+        s = _named.get(self.name)
+        if s is None:
+            raise TypeError("no struct or union is named %r" % self.name)
+        return s
+
+    def desc(self):
+        return self.target().desc()
+
+    def zero(self):
+        return self.target().zero()
+
+    def decode(self, v):
+        return self.target().decode(v)
+
+    def encode(self, v):
+        return self.target().encode(v)
+
+    def __repr__(self):
+        return "rustorb_dds.types._Ref(%r)" % self.name
+
+
+def _declare(spec):
+    _named[spec.name] = spec
+    _named.setdefault(spec.cls.__qualname__, spec)
+
+
+def _described(spec, desc):
+    """The description of a struct or union: ``desc()``, or a reference to
+    it when it is being described already."""
+    if spec in _describing:
+        return ("ref", spec.name)
+    _describing.append(spec)
+    try:
+        return desc()
+    finally:
+        _describing.pop()
+
+
 def spec_of(t):
-    """The :class:`Spec` of a type given as a member annotation."""
+    """The :class:`Spec` of a type given as a member annotation; a string
+    names a struct or union, declared before or after (see
+    :class:`_Ref`)."""
     if isinstance(t, Spec):
         return t
+    if isinstance(t, str):
+        return _Ref(t)
     if isinstance(t, Member):
         return spec_of(t.type)
     if isinstance(t, type) and t in _BUILTINS:
@@ -431,14 +494,14 @@ class _Struct(Spec):
         return base + self.members
 
     def desc(self):
-        return (
+        return _described(self, lambda: (
             "struct", self.name, self.extensibility, self.nested,
             self.base.desc() if self.base else None,
             [(m.name or n, i, s.desc(), m.key, m.optional,
               m.must_understand and not m.key, m.external, m.hash_id)
              for n, i, m, s in self.members],
             self.autoid == "hash",
-        )
+        ))
 
     def zero(self):
         return self.cls()
@@ -481,6 +544,7 @@ def struct(name=None, extensibility="final", nested=False, autoid="sequential"):
         cls = dataclasses.dataclass(cls)
         cls.__dds_spec__ = spec
         spec.cls = cls
+        _declare(spec)
         return cls
 
     return wrap
@@ -507,13 +571,13 @@ class _Union(Spec):
             self.members.append((name_, mid, m, spec_of(m.type)))
 
     def desc(self):
-        return (
+        return _described(self, lambda: (
             "union", self.name, self.extensibility, self.nested,
             self.discriminator.desc(),
             [(m.name or n, i, s.desc(), [_label(x) for x in m.labels], m.default)
              for n, i, m, s in self.members],
             self.autoid == "hash",
-        )
+        ))
 
     def _selected(self, d):
         d = _label(d)
@@ -587,6 +651,7 @@ def union(discriminator, name=None, extensibility="final", nested=False,
         cls.__repr__ = __repr__
         cls.__dds_spec__ = spec
         cls._members = names
+        _declare(spec)
         return cls
 
     return wrap
@@ -674,6 +739,90 @@ def bitmask(name=None, bit_bound=32, extensibility="final", names=None):
             raise TypeError("a bitmask type is an enum.IntFlag")
         cls.__dds_spec__ = _Bitmask(cls, name or cls.__qualname__.replace(".", "::"),
                                     bit_bound, extensibility, names)
+        return cls
+
+    return wrap
+
+
+class _Bitfield:
+    """A field of a bitset: :func:`bitfield`."""
+
+    def __init__(self, bits, holder, name):
+        if not 1 <= bits <= 64:
+            raise ValueError("a bitfield has 1 to 64 bits")
+        self.bits = bits
+        self.holder = holder
+        self.name = name
+
+
+def bitfield(bits, holder=None, name=None):
+    """A field of ``bits`` bits of a :func:`bitset`, read and written as
+    ``holder``: ``bool`` (``boolean``) or an integer type, by default the
+    smallest unsigned one that holds the bits (``boolean`` for one bit),
+    as in IDL. ``name`` is its name in the type, if not the attribute's;
+    ``None`` as the annotation of an attribute named ``_`` (or starting
+    with it) leaves the bits unused."""
+    return _Bitfield(bits, holder, name)
+
+
+_HOLDERS = [(1, "boolean"), (8, "byte"), (16, "uint16"), (32, "uint32"),
+            (64, "uint64")]
+
+
+class _Bitset(Spec):
+    def __init__(self, cls, name):
+        self.cls = cls
+        self.name = name
+        self.fields = []
+        position = 0
+        for n, f in cls.__dict__.get("__annotations__", {}).items():
+            if not isinstance(f, _Bitfield):
+                raise TypeError("bitset member %s is not a bitfield()" % n)
+            if not n.startswith("_"):
+                holder = f.holder
+                if holder is None:
+                    holder = next(h for b, h in _HOLDERS if f.bits <= b)
+                elif holder is bool:
+                    holder = "boolean"
+                else:
+                    holder = spec_of(holder).desc()
+                self.fields.append((n, f.name or n, position, f.bits, holder))
+            position += f.bits
+        if position > 64:
+            raise ValueError("a bitset has at most 64 bits")
+
+    def desc(self):
+        return ("bitset", self.name,
+                [(name, p, b, h) for _, name, p, b, h in self.fields])
+
+    def zero(self):
+        return self.cls()
+
+    def decode(self, v):
+        return self.cls(**{n: v[name] for n, name, _, _, _ in self.fields})
+
+    def encode(self, v):
+        if isinstance(v, dict):
+            return {name: v.get(n, v.get(name)) for n, name, _, _, _ in self.fields}
+        return {name: getattr(v, n) for n, name, _, _, _ in self.fields}
+
+
+def bitset(name=None):
+    """Makes the decorated class a bitset type (IDL ``bitset``): its
+    annotations are its :func:`bitfield` fields, in order from the lowest
+    bit. It becomes a dataclass of the named fields, zero by default."""
+
+    def wrap(cls):
+        spec = _Bitset(cls, name or cls.__qualname__.replace(".", "::"))
+        annotations = {}
+        for n, _, _, _, holder in spec.fields:
+            zero = False if holder == "boolean" else 0
+            annotations[n] = bool if holder == "boolean" else int
+            setattr(cls, n, zero)
+        cls.__annotations__ = annotations
+        cls = dataclasses.dataclass(cls)
+        spec.cls = cls
+        cls.__dds_spec__ = spec
         return cls
 
     return wrap

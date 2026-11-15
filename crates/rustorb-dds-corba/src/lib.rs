@@ -376,6 +376,7 @@ impl ToType<'_> {
 pub fn type_code(ty: &DynamicType) -> Result<TypeCode> {
     ToTypeCode {
         done: HashMap::new(),
+        making: Vec::new(),
     }
     .convert(ty.as_type())
 }
@@ -383,13 +384,17 @@ pub fn type_code(ty: &DynamicType) -> Result<TypeCode> {
 struct ToTypeCode {
     /// Named types already made, by qualified name.
     done: HashMap<String, TypeCode>,
+    /// Named types being made: met again, they are recursive.
+    making: Vec<String>,
 }
 
 fn resolve(mut ty: &Type) -> &Type {
-    while let Type::Alias(a) = ty {
-        ty = &a.related;
+    loop {
+        match ty.resolve() {
+            Type::Alias(a) => ty = &a.related,
+            other => return other,
+        }
     }
-    ty
 }
 
 /// The members of a struct, those of its base types first.
@@ -439,14 +444,26 @@ impl ToTypeCode {
             }
             Type::Map(_) => return unsupported("map"),
             Type::Bitmask(b) => return unsupported(format!("the bitmask {}", b.name)),
+            Type::Bitset(b) => return unsupported(format!("the bitset {}", b.name)),
+            Type::Annotation(a) => return unsupported(format!("the annotation {}", a.name)),
             Type::Alias(a) => &a.name,
             Type::Enum(e) => &e.name,
             Type::Struct(s) => &s.name,
             Type::Union(u) => &u.name,
+            Type::Forward(f) => {
+                return match f.target() {
+                    Some(t) => self.convert(t),
+                    None => unsupported(format!("the undefined type {}", f.name())),
+                };
+            }
         };
         if let Some(tc) = self.done.get(name) {
             return Ok(tc.clone());
         }
+        if self.making.contains(name) {
+            return unsupported(format!("the recursive type {name}"));
+        }
+        self.making.push(name.clone());
         let (id, simple_name) = id_and_name(name);
         let tc = match ty {
             Type::Alias(a) => TypeCode::alias(&id, &simple_name, &self.convert(&a.related)?)?,
@@ -494,6 +511,7 @@ impl ToTypeCode {
             }
             _ => unreachable!("named types"),
         };
+        self.making.pop();
         self.done.insert(name.clone(), tc.clone());
         Ok(tc)
     }
