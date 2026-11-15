@@ -89,6 +89,50 @@ pub struct ResourceLimits {
     pub max_samples_per_instance: Option<usize>,
 }
 
+/// The DURABILITY_SERVICE of a TRANSIENT or PERSISTENT writer (DDS 1.4,
+/// 2.2.3.5): what the participant keeps of the writer's samples once the
+/// writer is deleted, and for how long it keeps a disposed instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurabilityService {
+    /// `service_cleanup_delay`: how long after the writer is deleted the
+    /// samples of the instances it disposed are dropped. Zero, the
+    /// default, drops them at once.
+    pub service_cleanup_delay: Duration,
+    /// `history_kind` and `history_depth`; KEEP_LAST(1) by default.
+    pub history: History,
+    /// `max_samples`, `max_instances` and `max_samples_per_instance`;
+    /// none by default.
+    pub resource_limits: ResourceLimits,
+}
+
+impl Default for DurabilityService {
+    fn default() -> Self {
+        DurabilityService {
+            service_cleanup_delay: Duration::ZERO,
+            history: History::default(),
+            resource_limits: ResourceLimits::default(),
+        }
+    }
+}
+
+impl DurabilityService {
+    pub(crate) fn to_rtps(self) -> rustorb_rtps::qos::DurabilityService {
+        let n = |v: Option<usize>| v.map_or(-1, |n| n.min(i32::MAX as usize) as i32);
+        let (history_kind, history_depth) = match self.history {
+            History::KeepLast(d) => (0, d.min(i32::MAX as usize) as i32),
+            History::KeepAll => (1, 1),
+        };
+        rustorb_rtps::qos::DurabilityService {
+            service_cleanup_delay: rustorb_rtps::Duration::from_std(self.service_cleanup_delay),
+            history_kind,
+            history_depth,
+            max_samples: n(self.resource_limits.max_samples),
+            max_instances: n(self.resource_limits.max_instances),
+            max_samples_per_instance: n(self.resource_limits.max_samples_per_instance),
+        }
+    }
+}
+
 /// The WRITER_DATA_LIFECYCLE of a writer (DDS 1.4, 2.2.3.21).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriterDataLifecycle {
@@ -175,10 +219,19 @@ pub struct DataWriterQos {
     /// the samples its HISTORY and RESOURCE_LIMITS allow, also once they
     /// are acknowledged, and sends them to the TRANSIENT_LOCAL readers
     /// matched later; for now it keeps them also for instances it has
-    /// unregistered. TRANSIENT and PERSISTENT need a durability service,
-    /// which there is not: creating such a writer fails with
-    /// [`crate::Error::Unsupported`].
+    /// unregistered.
+    ///
+    /// A TRANSIENT writer does the same, and its samples outlive it:
+    /// deleting it leaves them with the participant, which keeps what
+    /// [`Self::durability_service`] allows and goes on sending them to
+    /// late readers until it is deleted itself. A PERSISTENT writer also
+    /// keeps them in a file, and a PERSISTENT writer of the same topic
+    /// and type created later, by this program or another, takes them up
+    /// again, also after a restart (see
+    /// [`crate::ParticipantConfig::persistence_directory`]).
     pub durability: DurabilityKind,
+    /// DURABILITY_SERVICE, for a TRANSIENT or PERSISTENT writer.
+    pub durability_service: DurabilityService,
     /// DEADLINE period (DDS 1.4, 2.2.3.7); `None`, infinite, by default.
     /// Each period in which a registered instance is not written counts
     /// in [`crate::DataWriter::offered_deadline_missed_status`]; a
@@ -211,6 +264,7 @@ impl Default for DataWriterQos {
             resource_limits: ResourceLimits::default(),
             writer_data_lifecycle: WriterDataLifecycle::default(),
             durability: DurabilityKind::Volatile,
+            durability_service: DurabilityService::default(),
             deadline: None,
             liveliness: Liveliness::default(),
             user_data: Vec::new(),

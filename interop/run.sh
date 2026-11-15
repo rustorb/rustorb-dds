@@ -327,6 +327,20 @@ for peer in "${PEERS[@]}"; do
   run_case "rustorb-to-$peer-transient-local" \
     "$RUST" pub @D@ "$RELIABLE" 0 transient_local -- \
     timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" transient_local
+  # TRANSIENT: the rustorb-dds writer is deleted once it has written,
+  # and its participant keeps the samples for the late reader.
+  # PERSISTENT: they go through a file, from the writer of a first
+  # participant to that of a second. A Fast DDS reader cannot be
+  # TRANSIENT without its persistence plugin: it is TRANSIENT_LOCAL.
+  late=transient
+  [ "$peer" = fastdds ] && late=transient_local
+  run_case "rustorb-to-$peer-transient" \
+    "$RUST" pub @D@ "$RELIABLE" 0 transient -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" "$late"
+  run_case "rustorb-to-$peer-persistent" \
+    env RUSTORB_DDS_PERSISTENCE_DIR="$OUT/rustorb-to-$peer-persistent/files" \
+    "$RUST" pub @D@ "$RELIABLE" 0 persistent -- \
+    timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" "$late"
   # Large samples, as DATA_FRAG. Best effort: some of them must arrive
   # whole.
   run_case "$peer-to-rustorb-large-best-effort" \

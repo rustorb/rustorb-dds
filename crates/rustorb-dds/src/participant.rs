@@ -41,6 +41,7 @@ use crate::listener::{
     AnyDataReader, AnyDataWriter, DomainParticipantListener, PublisherEntity, PublisherListener,
     SubscriberEntity, SubscriberListener, TopicListener,
 };
+use crate::persistent::{Record, Store};
 use crate::publisher::Publisher;
 use crate::qos::{DataReaderQos, DataWriterQos, History, PublisherQos, SubscriberQos};
 #[cfg(feature = "security")]
@@ -86,6 +87,12 @@ pub struct ParticipantConfig {
     /// on this host through shared memory rather than UDP (feature `shm`;
     /// true by default). Others are reached by UDP either way.
     pub shared_memory: bool,
+    /// The directory of the files in which PERSISTENT writers keep their
+    /// samples. `None`, the default, is the `RUSTORB_DDS_PERSISTENCE_DIR`
+    /// environment variable when it is set, and otherwise
+    /// `rustorb-dds-persistent` in the current directory. The property
+    /// [`Self::PERSISTENCE_DIRECTORY`] sets it too.
+    pub persistence_directory: Option<std::path::PathBuf>,
     /// DDS Security (feature `security`): the participant's identity,
     /// governance and permissions. `None`, the default, joins without
     /// security.
@@ -114,9 +121,22 @@ impl ParticipantConfig {
             drop_one_in: None,
             user_data: Vec::new(),
             shared_memory: true,
+            persistence_directory: None,
             #[cfg(feature = "security")]
             security: None,
         }
+    }
+
+    /// The property that sets [`Self::persistence_directory`].
+    pub const PERSISTENCE_DIRECTORY: &'static str = "rustorb.dds.persistence.directory";
+
+    /// The directory of the files of PERSISTENT writers, as
+    /// [`Self::persistence_directory`] says.
+    pub fn effective_persistence_directory(&self) -> std::path::PathBuf {
+        self.persistence_directory
+            .clone()
+            .or_else(|| std::env::var_os("RUSTORB_DDS_PERSISTENCE_DIR").map(Into::into))
+            .unwrap_or_else(|| "rustorb-dds-persistent".into())
     }
 
     /// Only this host: every socket on the loopback interface.
@@ -129,8 +149,9 @@ impl ParticipantConfig {
     /// Takes the PROPERTY of a DomainParticipantQos (DDS Security 1.2,
     /// 7.2.5), as the bindings for other languages give it: the
     /// `dds.sec.*` properties turn on DDS Security with the builtin
-    /// plugins (`SecurityConfig::from_properties`); the others are
-    /// ignored.
+    /// plugins (`SecurityConfig::from_properties`);
+    /// [`Self::PERSISTENCE_DIRECTORY`] sets
+    /// [`Self::persistence_directory`]; the others are ignored.
     ///
     /// Fails with [`Error::Security`] when some but not all of the
     /// `dds.sec.auth.*` and `dds.sec.access.*` properties are given, and
@@ -141,10 +162,14 @@ impl ParticipantConfig {
         &mut self,
         properties: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<()> {
-        let sec: Vec<(&str, &str)> = properties
-            .into_iter()
-            .filter(|(n, _)| n.starts_with("dds.sec."))
-            .collect();
+        let mut sec: Vec<(&str, &str)> = Vec::new();
+        for (n, v) in properties {
+            if n.starts_with("dds.sec.") {
+                sec.push((n, v));
+            } else if n == Self::PERSISTENCE_DIRECTORY {
+                self.persistence_directory = Some(v.into());
+            }
+        }
         if sec.is_empty() {
             return Ok(());
         }
@@ -589,7 +614,7 @@ impl ReaderState {
 /// data to a multiple of 4, but leaves them out of a DATA that ends the
 /// message; read as counted, the data would lose its last octets.
 fn drop_missing_padding(bytes: &mut [u8]) {
-    if bytes.len() > 4 && bytes[3] & 3 != 0 && (bytes.len() - 4) % 4 != 0 {
+    if bytes.len() > 4 && bytes[3] & 3 != 0 && !(bytes.len() - 4).is_multiple_of(4) {
         bytes[3] &= !3;
     }
 }
@@ -658,6 +683,21 @@ pub(crate) struct WriterState {
     /// Encodes the payloads, when the topic has them protected.
     #[cfg(feature = "security")]
     pub(crate) payload_encoder: Option<Arc<rustorb_dds_security::crypto::Encoder>>,
+    /// The instances whose last change is a dispose.
+    disposed: BTreeSet<InstanceHandle>,
+    /// Whether the writer was deleted, and the participant keeps it for
+    /// its TRANSIENT or PERSISTENT samples.
+    orphan: bool,
+    /// When an orphan writer drops the instances it disposed
+    /// (`service_cleanup_delay`).
+    cleanup_at: Option<Instant>,
+    /// The file of a PERSISTENT writer.
+    store: Option<Store>,
+    /// The changes in the history as the file keeps them, for a
+    /// PERSISTENT writer.
+    persisted: BTreeMap<SequenceNumber, Record>,
+    /// Whether the changes added are taken up from the file, not new.
+    restoring: bool,
 }
 
 impl WriterState {
@@ -712,18 +752,84 @@ impl WriterState {
     /// changed.
     fn check(&mut self, now: Instant) -> StatusMask {
         let mut changes = StatusMask::NONE;
-        if let Some(lease) = self.local_lease() {
-            if self.alive && now > self.last_asserted + lease {
-                self.alive = false;
-                self.liveliness_lost.add();
-                changes |= StatusMask::LIVELINESS_LOST;
-            }
+        if let Some(lease) = self.local_lease()
+            && self.alive
+            && now > self.last_asserted + lease
+        {
+            self.alive = false;
+            self.liveliness_lost.add();
+            changes |= StatusMask::LIVELINESS_LOST;
         }
         let instances = &self.instances;
         if self.deadlines.check(now, |h| instances.contains_key(h)) {
             changes |= StatusMask::OFFERED_DEADLINE_MISSED;
         }
+        if self.cleanup_at.is_some_and(|t| now >= t) {
+            self.cleanup_at = None;
+            self.clean_up();
+        }
         changes
+    }
+
+    /// Drops the changes of the instances disposed, past the
+    /// `service_cleanup_delay` of an orphan writer (DDS 1.4, 2.2.3.4).
+    fn clean_up(&mut self) {
+        let disposed = std::mem::take(&mut self.disposed);
+        let sns: Vec<SequenceNumber> = self
+            .change_instance
+            .iter()
+            .filter(|(_, h)| disposed.contains(h))
+            .map(|(sn, _)| *sn)
+            .collect();
+        for sn in sns {
+            self.rtps.remove_change(sn);
+        }
+        for h in &disposed {
+            self.instances.remove(h);
+        }
+        self.trim();
+    }
+
+    /// Leaves the writer, deleted, to the participant: it keeps the
+    /// samples that its DURABILITY_SERVICE allows, and goes on sending
+    /// them to the readers that match it.
+    fn orphan(&mut self, now: Instant) {
+        self.orphan = true;
+        self.listener = None;
+        self.publisher = None;
+        let ds = self.qos.durability_service;
+        self.qos.history = ds.history;
+        self.qos.resource_limits = ds.resource_limits;
+        self.deadlines = Deadlines::new(None);
+        // A delay too long for an `Instant` is never.
+        self.cleanup_at = now.checked_add(ds.service_cleanup_delay);
+        self.trim();
+    }
+
+    /// Takes up the changes kept in the file of a PERSISTENT writer.
+    fn restore(&mut self, records: Vec<Record>) {
+        self.restoring = true;
+        for r in records {
+            let op = match r.value {
+                Some(v) => WriteOp::Value(v, None),
+                None => WriteOp::Lifecycle {
+                    dispose: r.dispose,
+                    unregister: r.unregister,
+                },
+            };
+            if self.add(r.instance, op, r.timestamp, false).is_ok() {
+                self.trim();
+            }
+        }
+        self.restoring = false;
+        self.compact();
+    }
+
+    /// Writes the file of a PERSISTENT writer anew from its history.
+    fn compact(&mut self) {
+        if let Some(store) = &mut self.store {
+            let _ = store.rewrite(self.persisted.values());
+        }
     }
 
     /// The changes of an instance still in the history.
@@ -761,14 +867,26 @@ impl WriterState {
     /// Drops what the history no longer needs: changes every reader has,
     /// unless the writer is TRANSIENT_LOCAL and keeps them for later
     /// readers, and those beyond the KEEP_LAST depth of their instance.
+    ///
+    /// An orphan writer also keeps to the RESOURCE_LIMITS of its
+    /// DURABILITY_SERVICE, dropping the oldest changes (and instances)
+    /// beyond them.
     fn trim(&mut self) {
         if !self.transient_local() {
             self.rtps.remove_acknowledged();
         }
-        if let History::KeepLast(depth) = self.qos.history {
+        let mut depth = match self.qos.history {
+            History::KeepLast(d) => Some(d.max(1)),
+            History::KeepAll => None,
+        };
+        let limits = self.orphan.then_some(self.qos.resource_limits);
+        if let Some(m) = limits.and_then(|l| l.max_samples_per_instance) {
+            depth = Some(depth.map_or(m, |d| d.min(m)).max(1));
+        }
+        if let Some(depth) = depth {
             let handles: Vec<InstanceHandle> = self.instances.keys().copied().collect();
             for h in handles {
-                while self.instance_changes(&h) > depth.max(1) {
+                while self.instance_changes(&h) > depth {
                     let i = self.instances.get_mut(&h).expect("listed above");
                     if let Some(sn) = i.changes.pop_front() {
                         self.rtps.remove_change(sn);
@@ -776,8 +894,45 @@ impl WriterState {
                 }
             }
         }
+        if let Some(m) = limits.and_then(|l| l.max_instances) {
+            while self.instances.len() > m {
+                // The instance changed longest ago.
+                let rtps = &self.rtps;
+                let Some(h) = self
+                    .instances
+                    .iter_mut()
+                    .map(|(h, i)| {
+                        i.changes.retain(|sn| rtps.contains(*sn));
+                        (*h, i.changes.back().copied())
+                    })
+                    .min_by_key(|(_, sn)| *sn)
+                    .map(|(h, _)| h)
+                else {
+                    break;
+                };
+                if let Some(i) = self.instances.remove(&h) {
+                    for sn in i.changes {
+                        self.rtps.remove_change(sn);
+                    }
+                }
+            }
+        }
+        if let Some(m) = limits.and_then(|l| l.max_samples) {
+            while self.rtps.len() > m.max(1) {
+                if self.rtps.remove_oldest().is_none() {
+                    break;
+                }
+            }
+        }
         let rtps = &self.rtps;
         self.change_instance.retain(|sn, _| rtps.contains(*sn));
+        if self.store.is_some() {
+            self.persisted.retain(|sn, _| rtps.contains(*sn));
+            let records = self.store.as_ref().map_or(0, Store::records);
+            if records > 2 * self.persisted.len() + 64 {
+                self.compact();
+            }
+        }
     }
 
     /// Registers an instance, if it is not already.
@@ -825,6 +980,35 @@ impl WriterState {
                 return Err(Error::PreconditionNotMet);
             }
             self.register(h)?;
+        }
+        let restoring = self.restoring;
+        let record = self.store.as_mut().map(|store| {
+            let (value, dispose) = match &op {
+                WriteOp::Value(v, _) => (Some(v.clone()), false),
+                WriteOp::Lifecycle { dispose, .. } => (None, *dispose),
+            };
+            let r = Record {
+                instance: h,
+                timestamp,
+                value,
+                dispose,
+                unregister,
+            };
+            if restoring {
+                Ok(r)
+            } else {
+                store.append(&r).map(|()| r)
+            }
+        });
+        let record = record.transpose()?;
+        match &op {
+            WriteOp::Value(..) => {
+                self.disposed.remove(&h);
+            }
+            WriteOp::Lifecycle { dispose: true, .. } => {
+                self.disposed.insert(h);
+            }
+            WriteOp::Lifecycle { .. } => {}
         }
         let mut q = ParameterList::new();
         if self.keyed {
@@ -911,6 +1095,9 @@ impl WriterState {
             .rtps
             .add_change_at(inline_qos, payload, Some(timestamp));
         self.change_instance.insert(sn, h);
+        if let Some(r) = record {
+            self.persisted.insert(sn, r);
+        }
         if unregister {
             self.instances.remove(&h);
         } else {
@@ -950,6 +1137,8 @@ pub(crate) struct Inner {
     manual_pending: bool,
     /// The earliest time for the next manual liveliness message.
     next_manual: Instant,
+    /// Where PERSISTENT writers keep their files.
+    persistence_directory: std::path::PathBuf,
     writer_config: WriterConfig,
     reader_config: ReaderConfig,
     next_entity: u32,
@@ -1272,12 +1461,12 @@ impl Shared {
                             .as_ref()
                             .filter(|(_, m)| m.contains(bit))
                             .map(|(l, _)| l.clone());
-                        if let Some(l) = own {
-                            if let Some(ev) = w.take_event(bit) {
-                                w.changes = w.changes & !bit;
-                                calls.push(Box::new(move |s| l(s, guid, ev)));
-                                continue;
-                            }
+                        if let Some(l) = own
+                            && let Some(ev) = w.take_event(bit)
+                        {
+                            w.changes = w.changes & !bit;
+                            calls.push(Box::new(move |s| l(s, guid, ev)));
+                            continue;
                         }
                         let group = w.publisher.as_ref().and_then(|p| p.listener_for(bit));
                         let call: Option<ListenerCall> = if let Some(l) = group {
@@ -1333,12 +1522,12 @@ impl Shared {
                             .as_ref()
                             .filter(|(_, m)| m.contains(bit))
                             .map(|(l, _)| l.clone());
-                        if let Some(l) = own {
-                            if let Some(ev) = r.take_event(bit) {
-                                r.changes = r.changes & !bit;
-                                calls.push(Box::new(move |s| l(s, guid, ev)));
-                                continue;
-                            }
+                        if let Some(l) = own
+                            && let Some(ev) = r.take_event(bit)
+                        {
+                            r.changes = r.changes & !bit;
+                            calls.push(Box::new(move |s| l(s, guid, ev)));
+                            continue;
                         }
                         let group = r.subscriber.as_ref().and_then(|p| p.listener_for(bit));
                         let call: Option<ListenerCall> = if let Some(l) = group {
@@ -1466,7 +1655,7 @@ impl Shared {
         x ^= x >> 7;
         x ^= x << 17;
         self.drop_state.store(x, Ordering::Relaxed);
-        x % u64::from(n) == 0
+        x.is_multiple_of(u64::from(n))
     }
 
     pub(crate) fn new_guid(&self, kind: u8) -> Result<Guid> {
@@ -1536,7 +1725,22 @@ impl Shared {
                 publisher: Some(publisher),
                 #[cfg(feature = "security")]
                 payload_encoder,
+                disposed: BTreeSet::new(),
+                orphan: false,
+                cleanup_at: None,
+                store: None,
+                persisted: BTreeMap::new(),
+                restoring: false,
             };
+            if w.qos.durability == DurabilityKind::Persistent {
+                let (store, records) = Store::open(
+                    &inner.persistence_directory,
+                    &data.topic_name,
+                    &data.type_name,
+                )?;
+                w.store = Some(store);
+                w.restore(records);
+            }
             let lease = w.local_lease();
             let mut changes = StatusMask::NONE;
             for (rg, r) in inner.readers.iter_mut() {
@@ -1550,6 +1754,17 @@ impl Shared {
                         }
                         if r.writer_matched(guid, liveliness_kind, lease, now) {
                             k |= StatusMask::LIVELINESS_CHANGED;
+                        }
+                        // What a PERSISTENT writer took up from its file.
+                        if w.transient_local()
+                            && r.data.durability >= DurabilityKind::TransientLocal
+                        {
+                            let kept: Vec<Change> = w.rtps.changes().cloned().collect();
+                            for c in kept {
+                                if let Some(c) = r.incoming(c) {
+                                    k |= r.accept(c);
+                                }
+                            }
                         }
                         inner.pending.push((*rg, k));
                     }
@@ -1692,7 +1907,23 @@ impl Shared {
     /// instances (DDS 1.4, 2.2.3.21), disposing them too when
     /// `autodispose_unregistered_instances` is set; then its readers lose
     /// it.
+    ///
+    /// A TRANSIENT or PERSISTENT writer is not unregistered nor removed:
+    /// the participant keeps it, with its samples, until it is deleted
+    /// itself (DDS 1.4, 2.2.3.4).
     pub(crate) fn remove_writer(&self, guid: &Guid) {
+        {
+            let mut g = self.lock_any();
+            let deleted = g.deleted;
+            if let Some(w) = g.writers.get_mut(guid)
+                && !deleted
+                && !w.orphan
+                && w.qos.durability >= DurabilityKind::Transient
+            {
+                w.orphan(Instant::now());
+                return;
+            }
+        }
         let handles: Vec<InstanceHandle> = {
             let g = self.lock_any();
             match g.writers.get(guid) {
@@ -1989,19 +2220,19 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
         match e {
             SedpEvent::Matched { local, remote } => {
                 #[cfg(feature = "security")]
-                if let Some(sec) = &inner.security {
-                    if remote.prefix != local.prefix {
-                        let writer = inner.writers.contains_key(&local);
-                        let data = if writer {
-                            inner.sedp.remote_reader(&remote)
-                        } else {
-                            inner.sedp.remote_writer(&remote)
-                        };
-                        if !data.is_some_and(|d| sec.remote_allowed(d, !writer)) {
-                            continue;
-                        }
-                        sec.matched(local, remote, writer);
+                if let Some(sec) = &inner.security
+                    && remote.prefix != local.prefix
+                {
+                    let writer = inner.writers.contains_key(&local);
+                    let data = if writer {
+                        inner.sedp.remote_reader(&remote)
+                    } else {
+                        inner.sedp.remote_writer(&remote)
+                    };
+                    if !data.is_some_and(|d| sec.remote_allowed(d, !writer)) {
+                        continue;
                     }
+                    sec.matched(local, remote, writer);
                 }
                 if let Some(w) = inner.writers.get_mut(&local) {
                     if w.add_match(remote) {
@@ -2026,15 +2257,15 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                     if r.add_match(remote) {
                         k |= StatusMask::SUBSCRIPTION_MATCHED;
                     }
-                    if let Some(d) = inner.sedp.remote_writer(&remote) {
-                        if r.writer_matched(
+                    if let Some(d) = inner.sedp.remote_writer(&remote)
+                        && r.writer_matched(
                             remote,
                             d.liveliness.kind,
                             d.liveliness.lease_duration.to_std(),
                             now,
-                        ) {
-                            k |= StatusMask::LIVELINESS_CHANGED;
-                        }
+                        )
+                    {
+                        k |= StatusMask::LIVELINESS_CHANGED;
                     }
                     if !k.is_empty() {
                         inner.pending.push((local, k));
@@ -2342,6 +2573,7 @@ impl DomainParticipant {
             next_automatic: None,
             manual_pending: false,
             next_manual: Instant::now(),
+            persistence_directory: config.effective_persistence_directory(),
             writer_config: config.writer,
             reader_config: config.reader,
             next_entity: 1,
@@ -2669,6 +2901,12 @@ impl Drop for DomainParticipant {
         }
         let mut g = self.shared.lock_any();
         g.deleted = true;
+        // The files of PERSISTENT writers are let go of now, for the
+        // writers of a participant created next, rather than when the
+        // last handle of an entity of this one is dropped.
+        for w in g.writers.values_mut() {
+            w.store = None;
+        }
         // Tell the others at once, rather than letting the lease run out
         // (8.5.3.1).
         let (bytes, to) = g.spdp.dispose();
@@ -2858,10 +3096,10 @@ fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {
     match e {
         ParticipantEvent::Discovered(p) | ParticipantEvent::Updated(p) => {
             #[cfg(feature = "security")]
-            if let Some(sec) = &inner.security {
-                if !sec.participant_discovered(&p, now) {
-                    return;
-                }
+            if let Some(sec) = &inner.security
+                && !sec.participant_discovered(&p, now)
+            {
+                return;
             }
             participant_ready(inner, &p, now);
         }

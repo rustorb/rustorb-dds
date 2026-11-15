@@ -565,12 +565,11 @@ impl Spdp {
     /// in-line `PID_KEY_HASH`, which for a GUID key is the GUID itself
     /// (9.6.4.8 step 5.1).
     fn disposed_key(&self, d: &Data) -> Option<GuidPrefix> {
-        if let Some(p) = &d.serialized_payload {
-            if let Ok((list, e)) = decode_pl_payload(&p.bytes) {
-                if let Some(g) = list.get(pid::PARTICIPANT_GUID) {
-                    return PlValues::new(e).guid(g).ok().map(|g| g.prefix);
-                }
-            }
+        if let Some(p) = &d.serialized_payload
+            && let Ok((list, e)) = decode_pl_payload(&p.bytes)
+            && let Some(g) = list.get(pid::PARTICIPANT_GUID)
+        {
+            return PlValues::new(e).guid(g).ok().map(|g| g.prefix);
         }
         let hash = d.inline_qos.as_ref()?.get(pid::KEY_HASH)?;
         let mut prefix = [0u8; 12];

@@ -24,7 +24,7 @@ impl CdrWriter {
     }
 
     fn align(&mut self, n: usize) {
-        while self.out.len() % n != 0 {
+        while !self.out.len().is_multiple_of(n) {
             self.out.push(0);
         }
     }

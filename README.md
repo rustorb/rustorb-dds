@@ -5,8 +5,8 @@ A DDS (Data Distribution Service) implementation in Rust, from the
 
 **Status: early.** Participants discover each other (SPDP/SEDP) and
 exchange samples with reliable or best-effort writers and readers over
-UDPv4, with keyed instances, large samples (DATA_FRAG), TRANSIENT_LOCAL
-durability, partitions, LIVELINESS and DEADLINE, and WaitSets, conditions
+UDPv4, with keyed instances, large samples (DATA_FRAG), TRANSIENT_LOCAL,
+TRANSIENT and PERSISTENT durability ([docs/durability.md](docs/durability.md)), partitions, LIVELINESS and DEADLINE, and WaitSets, conditions
 and listeners for the communication statuses, content filtered topics, and requests and replies (DDS-RPC). Hello world works both ways with Cyclone DDS
 and Fast DDS, reliable transient-local and liveliness too, with OpenDDS (reliable, keyed,
 large samples, TypeLookup), and `std_msgs/msg/String` both ways

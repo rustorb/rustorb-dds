@@ -75,8 +75,10 @@ impl Publisher {
     ///
     /// A VOLATILE writer sends a reader the samples written after it was
     /// matched; a TRANSIENT_LOCAL one also those it kept from before, to
-    /// TRANSIENT_LOCAL readers. TRANSIENT and PERSISTENT fail with
-    /// [`Error::Unsupported`]. A RELIABLE writer keeps samples until its reliable
+    /// TRANSIENT_LOCAL readers. A TRANSIENT or PERSISTENT one also, and
+    /// its samples outlive it (see [`DataWriterQos::durability`]); a
+    /// PERSISTENT one fails with [`Error::Io`] when its file cannot be
+    /// written. A RELIABLE writer keeps samples until its reliable
     /// readers acknowledge them, and sends them again when asked; it also
     /// serves BEST_EFFORT readers. A BEST_EFFORT writer sends each sample
     /// once and matches only BEST_EFFORT readers.
@@ -115,9 +117,6 @@ impl Publisher {
         } else {
             entity_kind::USER_WRITER_NO_KEY
         };
-        if qos.durability > DurabilityKind::TransientLocal {
-            return Err(Error::Unsupported("TRANSIENT and PERSISTENT durability"));
-        }
         let encoding = encoding_of(&qos)?;
         let guid = self.shared.new_guid(kind)?;
         let type_name = topic.type_name();
@@ -126,6 +125,9 @@ impl Publisher {
         data.data_representation = qos.data_representation.clone();
         data.reliability = qos.reliability.to_rtps();
         data.durability = qos.durability;
+        if qos.durability >= DurabilityKind::Transient {
+            data.durability_service = Some(qos.durability_service.to_rtps());
+        }
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();

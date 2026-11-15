@@ -9,6 +9,7 @@ import org.omg.dds.core.EntityQos;
 import org.omg.dds.core.policy.DataRepresentation;
 import org.omg.dds.core.policy.Deadline;
 import org.omg.dds.core.policy.Durability;
+import org.omg.dds.core.policy.DurabilityService;
 import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.QosPolicy;
@@ -20,6 +21,8 @@ import org.omg.dds.core.policy.WriterDataLifecycle;
 /** The QoS of a DataWriter. */
 public interface DataWriterQos extends EntityQos<QosPolicy.ForDataWriter> {
     public Durability getDurability();
+
+    public DurabilityService getDurabilityService();
 
     public Deadline getDeadline();
 

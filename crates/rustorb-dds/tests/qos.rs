@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use greeting::Greeting;
 use rustorb_dds::{
-    DataReader, DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, Error, History,
+    DataReader, DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, History,
     ParticipantConfig, PublisherQos, QosPolicyId, Reliability, SubscriberQos,
 };
 
@@ -191,20 +191,6 @@ fn incompatible_qos_is_counted() {
     let s = writer.offered_incompatible_qos_status();
     assert_eq!(s.total_count, 2);
     assert!(writer.matched_subscriptions().is_empty());
-}
-
-#[test]
-fn transient_and_persistent_writers_are_unsupported() {
-    let a = participant(24);
-    let topic = a.create_topic::<Greeting>("u").unwrap();
-    let r = a.create_publisher().unwrap().create_datawriter_with_qos(
-        &topic,
-        DataWriterQos {
-            durability: DurabilityKind::Transient,
-            ..DataWriterQos::default()
-        },
-    );
-    assert!(matches!(r, Err(Error::Unsupported(_))));
 }
 
 #[test]

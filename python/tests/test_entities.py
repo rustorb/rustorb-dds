@@ -1,9 +1,10 @@
 """Entities, QoS, instances, conditions and listeners.
 
-The Python tests use domains 20 to 38.
+The Python tests use domains 20 to 40, and 88.
 Domains above 166 have ports in the range Windows may reserve (49152 and
 up), where binding fails with WSAEACCES."""
 
+import gc
 import os
 import threading
 
@@ -318,3 +319,40 @@ def test_security_from_properties():
     w.write(Shape(1, 1, "secret"))
     assert r.wait_for_data(10.0)
     assert [s.data.message for s in r.take()] == ["secret"]
+
+
+def _take_indices(r, n):
+    got = []
+    deadline = 50
+    while len(got) < n and deadline:
+        r.wait_for_data(0.1)
+        got += [s for s in r.take() if s.data is not None]
+        deadline -= 1
+    return sorted((s.data.id, s.data.index) for s in got)
+
+
+def test_transient_and_persistent(tmp_path):
+    props = {"rustorb.dds.persistence.directory": str(tmp_path)}
+    late = dds.Qos(reliability="reliable", durability="transient", history="keep_all")
+    p = dds.DomainParticipant(88, localhost=True, properties=props)
+    topic = p.create_topic("Durable", Shape)
+    qos = dds.Qos(durability="transient", history=5, service_history=2)
+    w = p.create_publisher().create_datawriter(topic, qos)
+    for i in range(4):
+        w.write(Shape(1, i, ""))
+    del w
+    gc.collect()
+    r = p.create_subscriber().create_datareader(topic, late)
+    assert _take_indices(r, 2) == [(1, 2), (1, 3)]
+    # PERSISTENT: taken up by a writer of a participant created later.
+    qos = dds.Qos(durability="persistent", history=5, service_history=2)
+    w = p.create_publisher().create_datawriter(topic, qos)
+    w.write(Shape(2, 7, ""))
+    del w, r, topic, p
+    gc.collect()
+    q = dds.DomainParticipant(88, localhost=True, properties=props)
+    topic = q.create_topic("Durable", Shape)
+    w = q.create_publisher().create_datawriter(topic, qos)
+    assert list(tmp_path.iterdir())
+    r = q.create_subscriber().create_datareader(topic, late)
+    assert _take_indices(r, 1) == [(2, 7)]

@@ -718,10 +718,10 @@ impl DynamicData {
     }
 
     fn get_scalar(&self, id: MemberId, want: TypeKind) -> Result<Scalar> {
-        if want == TK_BOOLEAN {
-            if let Some(flag) = self.flag(id) {
-                return flag.map(Scalar::Bool);
-            }
+        if want == TK_BOOLEAN
+            && let Some(flag) = self.flag(id)
+        {
+            return flag.map(Scalar::Bool);
         }
         let from = if let Some(field) = self.bitfield(id) {
             let (f, bits) = field?;
@@ -756,19 +756,19 @@ impl DynamicData {
     }
 
     fn set_scalar(&mut self, id: MemberId, value: Scalar) -> Result<()> {
-        if let Scalar::Bool(on) = value {
-            if let Some(flag) = self.flag(id) {
-                flag?;
-                let Value::Bitmask(b) = &mut self.value else {
-                    unreachable!("a bitmask");
-                };
-                if on {
-                    *b |= 1 << id;
-                } else {
-                    *b &= !(1 << id);
-                }
-                return Ok(());
+        if let Scalar::Bool(on) = value
+            && let Some(flag) = self.flag(id)
+        {
+            flag?;
+            let Value::Bitmask(b) = &mut self.value else {
+                unreachable!("a bitmask");
+            };
+            if on {
+                *b |= 1 << id;
+            } else {
+                *b &= !(1 << id);
             }
+            return Ok(());
         }
         if let Some(field) = self.bitfield(id) {
             let (f, bits) = field?;

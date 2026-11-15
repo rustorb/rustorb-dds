@@ -1286,3 +1286,50 @@ fn recursive_types_and_bitsets() {
         rdds_out_release(out);
     }
 }
+
+#[test]
+fn persistent_writers_keep_files_where_the_property_says() {
+    let dir = std::env::temp_dir().join(format!("rustorb-dds-ffi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let inner = inner_type();
+    unsafe {
+        let mut wq = std::mem::zeroed();
+        ok(rdds_writer_qos_default(&mut wq));
+        // DURABILITY_SERVICE: KEEP_LAST 1, no limits.
+        assert_eq!((wq.service_history_kind, wq.service_history_depth), (0, 1));
+        assert_eq!(wq.service_max_samples, -1);
+        assert_eq!(wq.service_cleanup_delay.sec, 0);
+        let props = [(
+            c("rustorb.dds.persistence.directory"),
+            CString::new(dir.to_str().unwrap()).unwrap(),
+        )];
+        let mut p = null_mut();
+        ok(secure_participant(89, &props, &mut p));
+        let mut topic = null_mut();
+        ok(rdds_participant_create_topic(
+            p,
+            c("kept").as_ptr(),
+            inner.0,
+            &mut topic,
+        ));
+        let mut publisher = null_mut();
+        ok(rdds_participant_create_publisher(p, null(), &mut publisher));
+        wq.durability_kind = 3;
+        wq.service_history_depth = 4;
+        let mut w = null_mut();
+        ok(rdds_publisher_create_writer(
+            publisher,
+            topic,
+            &wq,
+            null(),
+            0,
+            &mut w,
+        ));
+        write_inner(w, 1, "kept");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].as_ref().unwrap().metadata().unwrap().len() > 40);
+        rdds_participant_release(p);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

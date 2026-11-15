@@ -165,6 +165,48 @@ class ResourceLimits {
   int32_t max_samples_, max_instances_, max_samples_per_instance_;
 };
 
+// DURABILITY_SERVICE (DDS 1.4, 2.2.3.5): what the participant keeps of
+// a TRANSIENT or PERSISTENT writer once it is deleted.
+class DurabilityService {
+ public:
+  DurabilityService() = default;
+  DurabilityService(const Duration& service_cleanup_delay, HistoryKind::Type history_kind,
+                    int32_t history_depth, int32_t max_samples, int32_t max_instances,
+                    int32_t max_samples_per_instance)
+      : service_cleanup_delay_(service_cleanup_delay),
+        history_kind_(history_kind),
+        history_depth_(history_depth),
+        max_samples_(max_samples),
+        max_instances_(max_instances),
+        max_samples_per_instance_(max_samples_per_instance) {}
+  const Duration& service_cleanup_delay() const { return service_cleanup_delay_; }
+  DurabilityService& service_cleanup_delay(const Duration& d) { service_cleanup_delay_ = d; return *this; }
+  HistoryKind::Type history_kind() const { return history_kind_; }
+  DurabilityService& history_kind(HistoryKind::Type k) { history_kind_ = k; return *this; }
+  int32_t history_depth() const { return history_depth_; }
+  DurabilityService& history_depth(int32_t v) { history_depth_ = v; return *this; }
+  int32_t max_samples() const { return max_samples_; }
+  DurabilityService& max_samples(int32_t v) { max_samples_ = v; return *this; }
+  int32_t max_instances() const { return max_instances_; }
+  DurabilityService& max_instances(int32_t v) { max_instances_ = v; return *this; }
+  int32_t max_samples_per_instance() const { return max_samples_per_instance_; }
+  DurabilityService& max_samples_per_instance(int32_t v) { max_samples_per_instance_ = v; return *this; }
+  friend bool operator==(const DurabilityService& a, const DurabilityService& b) {
+    return a.service_cleanup_delay_ == b.service_cleanup_delay_ && a.history_kind_ == b.history_kind_ &&
+           a.history_depth_ == b.history_depth_ && a.max_samples_ == b.max_samples_ &&
+           a.max_instances_ == b.max_instances_ &&
+           a.max_samples_per_instance_ == b.max_samples_per_instance_;
+  }
+
+ private:
+  Duration service_cleanup_delay_ = Duration::zero();
+  HistoryKind::Type history_kind_ = HistoryKind::KEEP_LAST;
+  int32_t history_depth_ = 1;
+  int32_t max_samples_ = LENGTH_UNLIMITED;
+  int32_t max_instances_ = LENGTH_UNLIMITED;
+  int32_t max_samples_per_instance_ = LENGTH_UNLIMITED;
+};
+
 class Partition {
  public:
   Partition() = default;
@@ -342,6 +384,7 @@ RUSTORB_DDS_POLICY_ID(Partition, 10)
 RUSTORB_DDS_POLICY_ID(History, 13)
 RUSTORB_DDS_POLICY_ID(ResourceLimits, 14)
 RUSTORB_DDS_POLICY_ID(WriterDataLifecycle, 16)
+RUSTORB_DDS_POLICY_ID(DurabilityService, 22)
 RUSTORB_DDS_POLICY_ID(DataRepresentation, 23)
 RUSTORB_DDS_POLICY_ID(TypeConsistencyEnforcement, 24)
 #undef RUSTORB_DDS_POLICY_ID
@@ -410,7 +453,7 @@ class DataWriterQos
           ::dds::core::policy::Durability, ::dds::core::policy::Deadline,
           ::dds::core::policy::Liveliness, ::dds::core::policy::ResourceLimits,
           ::dds::core::policy::UserData, ::dds::core::policy::DataRepresentation,
-          ::dds::core::policy::WriterDataLifecycle> {
+          ::dds::core::policy::WriterDataLifecycle, ::dds::core::policy::DurabilityService> {
  public:
   // The defaults of rustorb-dds (RELIABLE, KEEP_LAST 1...).
   DataWriterQos() {

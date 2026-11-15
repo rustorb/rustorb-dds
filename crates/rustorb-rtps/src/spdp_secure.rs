@@ -238,10 +238,10 @@ impl SpdpSecure {
                 let Some(p) = c.payload.filter(|p| p.kind == PayloadKind::Data) else {
                     continue;
                 };
-                if let Ok(d) = Self::data_from_payload(&p.bytes) {
-                    if d.guid_prefix == from {
-                        out.push(SecureParticipantEvent::Data(Box::new(d)));
-                    }
+                if let Ok(d) = Self::data_from_payload(&p.bytes)
+                    && d.guid_prefix == from
+                {
+                    out.push(SecureParticipantEvent::Data(Box::new(d)));
                 }
             }
         }

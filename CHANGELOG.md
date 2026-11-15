@@ -8,6 +8,18 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- TRANSIENT and PERSISTENT durability, with DURABILITY_SERVICE (DDS 1.4,
+  2.2.3.4 and 2.2.3.5, #71): a deleted TRANSIENT or PERSISTENT writer
+  stays with its participant, which keeps what its DURABILITY_SERVICE
+  allows and sends it to late readers; a PERSISTENT writer also keeps its
+  changes in a file, which a PERSISTENT writer of the same topic and type
+  created later takes up, also after a restart. `DurabilityService` and
+  `ParticipantConfig::persistence_directory` (or the property
+  `rustorb.dds.persistence.directory`, or `RUSTORB_DDS_PERSISTENCE_DIR`);
+  `service_*` in `rdds_writer_qos`, `Qos` in Python,
+  `dds::core::policy::DurabilityService` in C++ and `DurabilityService`
+  in Java. See [docs/durability.md](docs/durability.md).
+
 - Recursive types (DDS-XTypes 1.3, 7.3.4.8 and 7.3.4.9, #70): a type
   that uses itself through a sequence, a map or an optional member, made
   with `Type::forward` and `Type::define` in Rust, `rdds_type_forward`
@@ -122,6 +134,10 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
   as streams of values in the order of their type (the library encodes
   them), the DCPS entities with their QoS, statuses and listeners,
   conditions and WaitSets (#44).
+
+### Changed
+
+- The minimum supported Rust version is 1.89, for `File::try_lock` (#71).
 
 ### Fixed
 

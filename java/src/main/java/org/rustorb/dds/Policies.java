@@ -21,6 +21,7 @@ import org.omg.dds.core.ServiceEnvironment;
 import org.omg.dds.core.policy.DataRepresentation;
 import org.omg.dds.core.policy.Deadline;
 import org.omg.dds.core.policy.Durability;
+import org.omg.dds.core.policy.DurabilityService;
 import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.Partition;
@@ -229,6 +230,108 @@ final class Policies {
         @Override
         public Durability withPersitent() {
             return withKind(Kind.PERSISTENT);
+        }
+    }
+
+    static final class DurabilityServiceImpl extends Base implements DurabilityService {
+        private static final long serialVersionUID = 1L;
+        final long cleanupDelay;
+        final History.Kind historyKind;
+        final int historyDepth;
+        final int maxSamples;
+        final int maxInstances;
+        final int maxSamplesPerInstance;
+
+        DurabilityServiceImpl(ServiceEnvironment env, long cleanupDelay, History.Kind historyKind, int historyDepth,
+                int maxSamples, int maxInstances, int maxSamplesPerInstance) {
+            super(env);
+            this.cleanupDelay = cleanupDelay;
+            this.historyKind = Objects.requireNonNull(historyKind);
+            this.historyDepth = historyDepth;
+            this.maxSamples = maxSamples;
+            this.maxInstances = maxInstances;
+            this.maxSamplesPerInstance = maxSamplesPerInstance;
+        }
+
+        @Override
+        Class<? extends QosPolicy> id() {
+            return DurabilityService.class;
+        }
+
+        @Override
+        List<Object> state() {
+            return List.of(cleanupDelay, historyKind, historyDepth, maxSamples, maxInstances, maxSamplesPerInstance);
+        }
+
+        @Override
+        public Duration getServiceCleanupDelay() {
+            return duration(env, cleanupDelay);
+        }
+
+        @Override
+        public History.Kind getHistoryKind() {
+            return historyKind;
+        }
+
+        @Override
+        public int getHistoryDepth() {
+            return historyDepth;
+        }
+
+        @Override
+        public int getMaxSamples() {
+            return maxSamples;
+        }
+
+        @Override
+        public int getMaxInstances() {
+            return maxInstances;
+        }
+
+        @Override
+        public int getMaxSamplesPerInstance() {
+            return maxSamplesPerInstance;
+        }
+
+        @Override
+        public DurabilityService withServiceCleanupDelay(Duration d) {
+            return new DurabilityServiceImpl(env, DurationImpl.nanos(d), historyKind, historyDepth, maxSamples,
+                    maxInstances, maxSamplesPerInstance);
+        }
+
+        @Override
+        public DurabilityService withServiceCleanupDelay(long d, TimeUnit unit) {
+            return withServiceCleanupDelay(DurationImpl.of(env, d, unit));
+        }
+
+        @Override
+        public DurabilityService withHistoryKind(History.Kind k) {
+            return new DurabilityServiceImpl(env, cleanupDelay, k, historyDepth, maxSamples, maxInstances,
+                    maxSamplesPerInstance);
+        }
+
+        @Override
+        public DurabilityService withHistoryDepth(int n) {
+            return new DurabilityServiceImpl(env, cleanupDelay, historyKind, n, maxSamples, maxInstances,
+                    maxSamplesPerInstance);
+        }
+
+        @Override
+        public DurabilityService withMaxSamples(int n) {
+            return new DurabilityServiceImpl(env, cleanupDelay, historyKind, historyDepth, n, maxInstances,
+                    maxSamplesPerInstance);
+        }
+
+        @Override
+        public DurabilityService withMaxInstances(int n) {
+            return new DurabilityServiceImpl(env, cleanupDelay, historyKind, historyDepth, maxSamples, n,
+                    maxSamplesPerInstance);
+        }
+
+        @Override
+        public DurabilityService withMaxSamplesPerInstance(int n) {
+            return new DurabilityServiceImpl(env, cleanupDelay, historyKind, historyDepth, maxSamples, maxInstances,
+                    n);
         }
     }
 
@@ -617,6 +720,12 @@ final class Policies {
         @Override
         public WriterDataLifecycle WriterDataLifecycle() {
             return new WriterDataLifecycleImpl(env, true);
+        }
+
+        @Override
+        public DurabilityService DurabilityService() {
+            return new DurabilityServiceImpl(env, 0, History.Kind.KEEP_LAST, 1, ResourceLimits.LENGTH_UNLIMITED,
+                    ResourceLimits.LENGTH_UNLIMITED, ResourceLimits.LENGTH_UNLIMITED);
         }
 
         @Override

@@ -399,6 +399,14 @@ typedef struct rdds_writer_qos {
   const int16_t *data_representation;
   size_t data_representation_len;
   bool autodispose_unregistered_instances;
+  /* DURABILITY_SERVICE of a TRANSIENT or PERSISTENT writer: what its
+   * participant keeps once it is deleted. */
+  rdds_duration service_cleanup_delay;
+  int32_t service_history_kind;
+  int32_t service_history_depth;
+  int32_t service_max_samples;
+  int32_t service_max_instances;
+  int32_t service_max_samples_per_instance;
 } rdds_writer_qos;
 
 typedef struct rdds_reader_qos {
@@ -441,8 +449,11 @@ typedef struct rdds_property {
    (dds.sec.auth.identity_ca, dds.sec.auth.identity_certificate,
    dds.sec.auth.private_key, dds.sec.access.permissions_ca,
    dds.sec.access.governance, dds.sec.access.permissions; values are
-   file: or data:, URIs) turn on DDS Security; all six are needed. Other
-   properties are ignored. */
+   file: or data:, URIs) turn on DDS Security; all six are needed.
+   rustorb.dds.persistence.directory is where PERSISTENT writers keep
+   their files (by default $RUSTORB_DDS_PERSISTENCE_DIR, or
+   rustorb-dds-persistent in the current directory). Other properties
+   are ignored. */
 typedef struct rdds_participant_qos {
   const uint8_t *user_data;
   size_t user_data_len;

@@ -3,7 +3,7 @@
  * its public C API only. Used by interop/run.sh.
  *
  *   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
- *   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
+ *   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|transient [size]]
  *
  * The publisher waits for a matched reader, then writes <count> samples.
  * The subscriber exits with 0 after <count> valid samples, with 1 on
@@ -16,6 +16,8 @@
  * transient_local is reliable and TRANSIENT_LOCAL: the publisher writes at
  * once, before any subscriber is there, then waits for one and for its
  * acknowledgments; the subscriber creates its reader two seconds late.
+ * transient (subscriber only) is the same with a TRANSIENT reader, for
+ * the samples of a writer that is gone, kept by its participant.
  *
  * With HELLO_XCDR2 set in the environment, the publisher writes XCDR2.
  *
@@ -33,6 +35,7 @@
 
 static int reliable = 0;
 static int transient_local = 0;
+static int transient = 0;
 static long size = -1;
 
 /* The message of sample <index>, to be freed. */
@@ -53,7 +56,7 @@ static void set_reliability(dds_qos_t *qos)
     dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
     dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, 0);
     if (transient_local) {
-      dds_qset_durability(qos, DDS_DURABILITY_TRANSIENT_LOCAL);
+      dds_qset_durability(qos, transient ? DDS_DURABILITY_TRANSIENT : DDS_DURABILITY_TRANSIENT_LOCAL);
       /* Without this, Cyclone DDS keeps only the last sample of each
          instance for late joiners: its DURABILITY_SERVICE history (by
          default KEEP_LAST 1) bounds TRANSIENT_LOCAL too. */
@@ -179,10 +182,11 @@ static int subscribe(dds_entity_t pp, dds_entity_t topic, int count, int timeout
 int main(int argc, char **argv)
 {
   if (argc < 5 || argc > 7) {
-    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable|transient_local [size]]\n", argv[0]);
+    fprintf(stderr, "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> [best_effort|reliable|transient_local|transient [size]]\n", argv[0]);
     return 2;
   }
-  transient_local = argc >= 6 && strcmp(argv[5], "transient_local") == 0;
+  transient = argc >= 6 && strcmp(argv[5], "transient") == 0;
+  transient_local = transient || (argc >= 6 && strcmp(argv[5], "transient_local") == 0);
   reliable = transient_local || (argc >= 6 && strcmp(argv[5], "reliable") == 0);
   if (argc == 7)
     size = atol(argv[6]);

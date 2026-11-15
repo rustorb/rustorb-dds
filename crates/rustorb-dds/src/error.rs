@@ -6,7 +6,8 @@ use std::fmt;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The network could not be set up or a datagram could not be sent.
+    /// The network could not be set up, a datagram could not be sent, or
+    /// the file of a PERSISTENT writer could not be read or written.
     Io(std::io::Error),
     /// A sample could not be serialized.
     Serialize(rustorb_typesupport::Error),
@@ -24,8 +25,7 @@ pub enum Error {
     /// The operation is not allowed in this state: unregistering an
     /// instance that is not registered.
     PreconditionNotMet,
-    /// The QoS asks for something not implemented: TRANSIENT or
-    /// PERSISTENT durability.
+    /// Something not implemented or not built in was asked for.
     Unsupported(&'static str),
     /// DDS Security refused: the security documents could not be loaded
     /// or verified, or the permissions do not allow the operation.
@@ -35,7 +35,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Io(e) => write!(f, "network error: {e}"),
+            Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Serialize(e) => write!(f, "cannot serialize the sample: {e}"),
             Error::Dynamic(e) => write!(f, "dynamic type or data: {e}"),
             Error::AlreadyDeleted => f.write_str("the participant was deleted"),

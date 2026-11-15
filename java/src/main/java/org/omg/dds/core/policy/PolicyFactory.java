@@ -16,6 +16,8 @@ public abstract class PolicyFactory implements DDSObject {
 
     public abstract Durability Durability();
 
+    public abstract DurabilityService DurabilityService();
+
     public abstract Deadline Deadline();
 
     public abstract Liveliness Liveliness();

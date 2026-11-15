@@ -115,6 +115,13 @@ inline void to_c(const ::dds::pub::qos::DataWriterQos& q, rdds_writer_qos& c) {
   c.data_representation = dr.data();
   c.data_representation_len = dr.size();
   c.autodispose_unregistered_instances = q.policy<p::WriterDataLifecycle>().autodispose();
+  const auto& ds = q.policy<p::DurabilityService>();
+  c.service_cleanup_delay = ds.service_cleanup_delay().c();
+  c.service_history_kind = ds.history_kind();
+  c.service_history_depth = ds.history_depth();
+  c.service_max_samples = ds.max_samples();
+  c.service_max_instances = ds.max_instances();
+  c.service_max_samples_per_instance = ds.max_samples_per_instance();
 }
 
 inline void to_c(const ::dds::sub::qos::DataReaderQos& q, rdds_reader_qos& c) {

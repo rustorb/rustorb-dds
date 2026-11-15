@@ -30,7 +30,8 @@
 //!
 //! What works now (rustorb/rustorb#111, stages D1 and part of D2):
 //! discovery with SPDP and SEDP, and RELIABLE or BEST_EFFORT, VOLATILE or
-//! TRANSIENT_LOCAL writers and readers, in partitions (with wildcards),
+//! TRANSIENT_LOCAL writers and readers (and TRANSIENT and PERSISTENT ones,
+//! whose samples outlive the writer), in partitions (with wildcards),
 //! over UDPv4. Endpoints whose QoS do not match are counted in the
 //! incompatible QoS statuses; readers reject samples beyond their
 //! RESOURCE_LIMITS. LIVELINESS (with the Writer Liveliness Protocol) and
@@ -80,6 +81,7 @@ mod error;
 mod instance;
 mod listener;
 mod participant;
+mod persistent;
 mod publisher;
 mod qos;
 pub mod rpc;
@@ -106,9 +108,9 @@ pub use listener::{
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher, WriteParams};
 pub use qos::{
-    DataReaderQos, DataWriterQos, DurabilityKind, History, Liveliness, LivelinessKind,
-    PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos, TypeConsistency,
-    TypeConsistencyKind, WriterDataLifecycle, data_representation,
+    DataReaderQos, DataWriterQos, DurabilityKind, DurabilityService, History, Liveliness,
+    LivelinessKind, PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos,
+    TypeConsistency, TypeConsistencyKind, WriterDataLifecycle, data_representation,
 };
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
