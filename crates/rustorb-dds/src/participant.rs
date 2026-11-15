@@ -164,7 +164,7 @@ impl ParticipantConfig {
     ) -> Result<()> {
         let mut sec: Vec<(&str, &str)> = Vec::new();
         for (n, v) in properties {
-            if n.starts_with("dds.sec.") {
+            if n.starts_with("dds.sec.") || n.starts_with("rustorb.dds.sec.") {
                 sec.push((n, v));
             } else if n == Self::PERSISTENCE_DIRECTORY {
                 self.persistence_directory = Some(v.into());

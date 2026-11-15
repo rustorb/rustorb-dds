@@ -23,15 +23,33 @@ config.security = Some(SecurityConfig {
     permissions_ca: "file:/etc/dds/permissions_ca.pem".into(),
     governance: "file:/etc/dds/governance.p7s".into(),
     permissions: "file:/etc/dds/permissions.p7s".into(),
+    password: None,
+    crl: None,
 });
 let participant = DomainParticipant::with_config(config)?;
 ```
 
-仕様の property 名（`dds.sec.auth.identity_ca` など）の組からは `SecurityConfig::from_properties`、または `ParticipantConfig::set_properties`（DomainParticipantQos の PROPERTY、7.2.5。`dds.sec.` で始まらない名前は無視し、6 つのうち欠けたものがあれば `Error::Security`）。例 `hello_world` は、環境変数 `RUSTORB_DDS_SECURITY` で名前を指したファイル（1 行に `名前=値`）から読む。`RUSTORB_DDS_SECURITY_LOG=1` で、handshake の失敗などを stderr に出す。
+仕様の property 名（`dds.sec.auth.identity_ca` など）の組からは `SecurityConfig::from_properties`、または `ParticipantConfig::set_properties`（DomainParticipantQos の PROPERTY、7.2.5。`dds.sec.` で始まらない名前は無視し、6 つのうち欠けたものがあれば `Error::Security`。`rustorb.dds.sec.` で始まる名前も取る）。例 `hello_world` は、環境変数 `RUSTORB_DDS_SECURITY` で名前を指したファイル（1 行に `名前=値`）から読む。`RUSTORB_DDS_SECURITY_LOG=1` で、handshake の失敗などを stderr に出す。
+
+### 暗号化された秘密鍵と CRL
+
+#73 で足した。どちらも省ける。
+
+- `dds.sec.auth.password`（`SecurityConfig::password`）: 暗号化された秘密鍵のパスワード。読める形は次のとおり。
+  - PKCS #8 の `ENCRYPTED PRIVATE KEY`（PBES2。`openssl pkcs8 -topk8 -v2 aes-256-cbc` が書くもの）。
+  - `Proc-Type: 4,ENCRYPTED` と `DEK-Info`（RFC 1421）の付いた `EC PRIVATE KEY`、`RSA PRIVATE KEY`、`PRIVATE KEY`。暗号は AES-128/192/256-CBC で、`openssl ec -aes256` などが書くもの。
+- パスワードの扱い:
+  - パスワードはパスフレーズとして使う。Cyclone DDS 0.10.4 で確かめたとおり、`openssl` で暗号化した鍵はそのまま読める。
+  - 表 50 は「AES-128 の鍵そのものの Base64 で、AES128-CBC で復号する」と書く。そこで `DEK-Info` が AES-128-CBC のときは、パスフレーズとして復号できなければ、その読み方も試す。
+  - property がなければ、`file:` の URI の問い合わせ部分の `password=`（表 50 の例 `file:key.pem?password=OpenSesame`）を使う。
+- `rustorb.dds.sec.auth.crl`（`SecurityConfig::crl`）: identity CA の CRL（PEM の `X509 CRL` をいくつでも、または DER）の URI。この property は仕様に名前がないので、rustorb-dds 独自の名前にした（Cyclone DDS は `org.eclipse.cyclonedds.sec.auth.crl`）。
+  - CRL は identity CA の署名があり、`thisUpdate` を過ぎていて、`nextUpdate` を過ぎていないものに限る。どれかを欠けば参加者を作れない。
+  - 自分の証明書が失効していれば参加者を作れない（validate_local_identity）。handshake の相手の証明書が失効していれば、認証しない（validate_remote_identity、10.3.3）。
+  - CRL は参加者を作るときに一度だけ読む。
 
 ### ほかの言語から
 
-どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*` を入れる。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
+どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`）を入れる。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
 
 - C ABI: `rdds_participant_qos` の `property`（`rdds_property` の配列）と `property_len`。
 - C++: `dds::core::policy::Property`（`set(name, value)`）を `DomainParticipantQos` に入れる。
@@ -52,12 +70,12 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
-- `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。相手ごとに合わせたことは `interop/README.md` にある。
+- `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
 ## 未対応
 
 - secure SPDP の `identity_status_token`（読み飛ばすだけで、送らない）。
-- 証明書の失効（CRL、OCSP）、暗号化された秘密鍵、PSK（DDS:Auth:PSK）、ログ（DDS:Logging）、data tagging。
+- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）、ログ（DDS:Logging）、data tagging。
 - 鍵の更新（key revision）。

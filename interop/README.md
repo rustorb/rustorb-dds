@@ -167,8 +167,11 @@ the same and whole RTPS messages encrypted too (`rtps_protection_kind`
 ENCRYPT). The Python and C++ `hello_world` examples take the same
 `RUSTORB_DDS_SECURITY` file and pass it as the PROPERTY of the
 participant QoS (rustorb-dds#69): `-to-python-secure`,
-`python-to-*-secure` and `*-cpp-secure-rtps-reliable`. `SECURITY=0`
-skips them.
+`python-to-*-secure` and `*-cpp-secure-rtps-reliable`. rustorb's private
+key is encrypted (PKCS #8, `dds.sec.auth.password`), and rustorb-dds is
+given a CRL of the identity CA (`rustorb.dds.sec.auth.crl`) that revokes
+a third certificate, so it checks the peer's against it (rustorb-dds#73).
+`SECURITY=0` skips them.
 
 Results go to `target/interop` (or `$OUT`):
 
