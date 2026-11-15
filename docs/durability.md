@@ -41,5 +41,5 @@ D6（rustorb-dds#63）の #71 をまとめる。DURABILITY の TRANSIENT と PER
 - `crates/rustorb-dds/tests/durability.rs`: 削除の後に別の参加者と同じ参加者の遅れた reader が DURABILITY_SERVICE の分を受け取る、VOLATILE の reader は受け取らない、インスタンスが ALIVE のまま、`max_instances` と `service_cleanup_delay`、参加者を作りなおした後の PERSISTENT、二つの writer が別のファイルを取る。
 - `crates/rustorb-dds/src/persistent.rs` の単体テスト: 追記、書きなおし、ロック、切れた変更、別トピックの同名ファイル。
 - Python（`test_transient_and_persistent`）、C ABI（`persistent_writers_keep_files_where_the_property_says`）、C++（`transient_samples_outlive_the_writer`）、Java（`transientSamplesOutliveTheWriter`）。
-- 相互接続（`interop/run.sh` の `rustorb-to-<peer>-transient`、`-persistent`）: rustorb-dds の writer が書いて削除され（PERSISTENT は参加者ごと削除して二つ目の参加者の writer がファイルから取りなおし）、2 秒遅れて作られた相手の TRANSIENT の reader（Fast DDS は TRANSIENT_LOCAL）が 50 個を順に受け取る。Cyclone DDS 0.10.4 と Fast DDS 2.11.2 はこのコンテナで通った。OpenDDS 3.31 は CI で確かめる。
+- 相互接続（`interop/run.sh` の `rustorb-to-<peer>-transient`、`-persistent`）: rustorb-dds の writer が書いて削除され（PERSISTENT は参加者ごと削除して二つ目の参加者の writer がファイルから取りなおし）、2 秒遅れて作られた相手の TRANSIENT の reader（Fast DDS は TRANSIENT_LOCAL）が 50 個を順に受け取る。Cyclone DDS 0.10.4、Fast DDS 2.11.2、OpenDDS 3.31 のどれとも、ローカルと CI（PR #79）で通った（OpenDDS は CI だけ）。
 - Fast DDS 2.11.2 の reader は、persistence plugin の設定なしには TRANSIENT で作れない（"Persistence GUID not specified"）。
