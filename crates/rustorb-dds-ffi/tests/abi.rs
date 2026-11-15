@@ -1328,7 +1328,10 @@ fn persistent_writers_keep_files_where_the_property_says() {
         write_inner(w, 1, "kept");
         let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(files.len(), 1);
-        assert!(files[0].as_ref().unwrap().metadata().unwrap().len() > 40);
+        // Not the DirEntry's metadata: on Windows, that is the size the
+        // directory recorded, which lags while the file is open.
+        let path = files[0].as_ref().unwrap().path();
+        assert!(std::fs::metadata(path).unwrap().len() > 40);
         rdds_participant_release(p);
     }
     let _ = std::fs::remove_dir_all(&dir);
