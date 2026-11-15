@@ -1,0 +1,17 @@
+#include "../../src/rpc/DdsRpc.idl"
+
+// A request and a reply of the Basic Service Mapping (DDS-RPC 1.0,
+// 7.3.1.4): each starts with its header. rustorb-idl implements
+// BasicRequest and BasicReply of rustorb-dds for them.
+module Calc {
+    @final @RPCRequestType struct Sum_Request {
+        dds::rpc::RequestHeader header;
+        long a;
+        long b;
+    };
+
+    @final @RPCReplyType struct Sum_Reply {
+        dds::rpc::ReplyHeader header;
+        long sum;
+    };
+};

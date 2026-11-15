@@ -287,6 +287,9 @@ pub struct ReliableWriter {
     history: BTreeMap<SequenceNumber, Change>,
     last_sn: SequenceNumber,
     readers: HashMap<Guid, ReaderProxy>,
+    /// The changes directed to one reader: the others are sent a GAP
+    /// instead (as for a filtered change, 8.7.3.4).
+    directed: BTreeMap<SequenceNumber, Guid>,
     heartbeat_count: i32,
     next_heartbeat: Option<Instant>,
 }
@@ -301,6 +304,7 @@ impl ReliableWriter {
             history: BTreeMap::new(),
             last_sn: SequenceNumber(0),
             readers: HashMap::new(),
+            directed: BTreeMap::new(),
             heartbeat_count: 0,
             next_heartbeat: None,
         }
@@ -344,6 +348,32 @@ impl ReliableWriter {
         sn
     }
 
+    /// Directs the change `sn` to the reader `reader` only: the other
+    /// readers are sent a GAP for it.
+    pub fn direct(&mut self, sn: SequenceNumber, reader: Guid) {
+        if self.history.contains_key(&sn) {
+            self.directed.insert(sn, reader);
+        }
+    }
+
+    /// Whether the change `sn` is for the reader `reader`: it is not
+    /// directed to another one.
+    pub fn is_for(&self, sn: SequenceNumber, reader: &Guid) -> bool {
+        self.directed.get(&sn).is_none_or(|r| r == reader)
+    }
+
+    /// Forgets the directions of the changes no longer in the history.
+    fn prune_directed(&mut self) {
+        match self.history.keys().next() {
+            Some(first) => {
+                self.directed = self.directed.split_off(first);
+                let history = &self.history;
+                self.directed.retain(|sn, _| history.contains_key(sn));
+            }
+            None => self.directed.clear(),
+        }
+    }
+
     /// The sequence number of the last change added (0 if none).
     pub fn last_sn(&self) -> SequenceNumber {
         self.last_sn
@@ -361,7 +391,9 @@ impl ReliableWriter {
 
     /// Removes the oldest change; returns its sequence number.
     pub fn remove_oldest(&mut self) -> Option<SequenceNumber> {
-        self.history.pop_first().map(|(sn, _)| sn)
+        let sn = self.history.pop_first().map(|(sn, _)| sn);
+        self.directed.remove(&sn?);
+        sn
     }
 
     /// Removes the changes that every matched reader has acknowledged
@@ -377,12 +409,16 @@ impl ReliableWriter {
         let keep = self.history.split_off(&SequenceNumber(acked.0 + 1));
         let removed = self.history.len();
         self.history = keep;
+        if removed > 0 {
+            self.prune_directed();
+        }
         removed
     }
 
     /// Removes a change from the history. Readers that have not got it
     /// yet are sent a GAP instead.
     pub fn remove_change(&mut self, sn: SequenceNumber) -> bool {
+        self.directed.remove(&sn);
         self.history.remove(&sn).is_some()
     }
 
@@ -562,8 +598,10 @@ impl ReliableWriter {
                 // Best effort: each new change once, nothing else.
                 if p.highest_sent < self.last_sn {
                     let from = SequenceNumber(p.highest_sent.0 + 1);
-                    for c in self.history.range(from..).map(|(_, c)| c) {
-                        b.push_change(g.entity_id, c, &frag, None);
+                    for (sn, c) in self.history.range(from..) {
+                        if self.directed.get(sn).is_none_or(|r| *r == g) {
+                            b.push_change(g.entity_id, c, &frag, None);
+                        }
                     }
                     p.highest_sent = self.last_sn;
                     p.acked = self.last_sn;
@@ -578,7 +616,8 @@ impl ReliableWriter {
                 let mut missing = Vec::new();
                 let requested = std::mem::take(&mut p.requested);
                 for sn in &requested {
-                    match self.history.get(sn).filter(|_| *sn >= p.start) {
+                    let for_it = self.directed.get(sn).is_none_or(|r| *r == g);
+                    match self.history.get(sn).filter(|_| *sn >= p.start && for_it) {
                         Some(c) => b.push_change(g.entity_id, c, &frag, None),
                         None => missing.push(*sn),
                     }
@@ -587,7 +626,8 @@ impl ReliableWriter {
                     if requested.contains(&sn) {
                         continue;
                     }
-                    match self.history.get(&sn).filter(|_| sn >= p.start) {
+                    let for_it = self.directed.get(&sn).is_none_or(|r| *r == g);
+                    match self.history.get(&sn).filter(|_| sn >= p.start && for_it) {
                         Some(c) => b.push_change(g.entity_id, c, &frag, Some(&fragments)),
                         None => missing.push(sn),
                     }
@@ -602,6 +642,10 @@ impl ReliableWriter {
             if p.highest_sent < self.last_sn {
                 let mut next = SequenceNumber(p.highest_sent.0 + 1);
                 for (sn, c) in self.history.range(next..) {
+                    // Directed to another reader: a GAP, with the next.
+                    if self.directed.get(sn).is_some_and(|r| *r != g) {
+                        continue;
+                    }
                     if *sn > next {
                         b.push(
                             gap(g.entity_id, writer_id, next, SequenceNumber(sn.0 - 1)),
@@ -1318,6 +1362,56 @@ mod tests {
         let s = subs(&w.poll(t));
         assert!(matches!(&s[0], Submessage::Gap(g) if g.gap_start == SequenceNumber(3)));
         assert!(matches!(&s[1], Submessage::Heartbeat(_)));
+    }
+
+    #[test]
+    fn directed_changes_go_to_their_reader_only() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        let mut r2 = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        let mut r3 = ReliableReader::new(rguid(3), VendorId::UNKNOWN, ReaderConfig::default());
+        r2.add_writer(wguid(), loc(1), vec![], t);
+        r3.add_writer(wguid(), loc(1), vec![], t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_reader(rguid(3), loc(3), vec![]);
+        for i in 1..=4 {
+            let sn = w.add_change(None, payload(i));
+            if i % 2 == 0 {
+                w.direct(sn, rguid(2 + (i / 2) % 2));
+            }
+        }
+        assert!(w.is_for(SequenceNumber(2), &rguid(3)));
+        assert!(!w.is_for(SequenceNumber(2), &rguid(2)));
+        let out = w.poll(t);
+        let to = |port| -> Vec<Outgoing> {
+            out.iter()
+                .filter(|o| o.locators == loc(port))
+                .cloned()
+                .collect()
+        };
+        let sns =
+            |got: Vec<Change>| -> Vec<i64> { got.iter().map(|c| c.sequence_number.0).collect() };
+        assert_eq!(sns(deliver(&mut r2, &to(2), &[], t)), [1, 3, 4]);
+        assert_eq!(sns(deliver(&mut r3, &to(3), &[], t)), [1, 2, 3]);
+        // A repair of a change for another reader is a GAP.
+        let mut set = SequenceNumberSet::new(SequenceNumber(2), 8).unwrap();
+        set.insert(SequenceNumber(2));
+        w.handle_acknack(
+            rguid(2),
+            &AckNack {
+                final_flag: false,
+                reader_id: rguid(2).entity_id,
+                writer_id: wguid().entity_id,
+                reader_sn_state: set,
+                count: Count(9),
+            },
+            t,
+        );
+        let s = subs(&w.poll(t + Duration::from_secs(1)));
+        assert!(s.iter().any(|s| matches!(s, Submessage::Gap(_))));
+        assert!(!s.iter().any(|s| matches!(s, Submessage::Data(_))));
+        w.remove_change(SequenceNumber(2));
+        assert!(w.is_for(SequenceNumber(2), &rguid(2)));
     }
 
     #[test]

@@ -93,7 +93,18 @@ impl Subscriber {
         topic: &impl TopicDescription<T>,
         qos: DataReaderQos,
     ) -> Result<DataReader<T>> {
-        self.create(topic, qos, None)
+        self.create(topic, qos, None, |_| {})
+    }
+
+    /// Creates a reader whose announcement `f` changes before it is
+    /// matched (as with the topic aliases of DDS-RPC).
+    pub(crate) fn create_datareader_with<T>(
+        &self,
+        topic: &impl TopicDescription<T>,
+        qos: DataReaderQos,
+        f: impl FnOnce(&mut EndpointData),
+    ) -> Result<DataReader<T>> {
+        self.create(topic, qos, None, f)
     }
 
     /// Creates a reader for `topic` with a listener for the statuses in
@@ -108,7 +119,7 @@ impl Subscriber {
         mask: StatusMask,
     ) -> Result<DataReader<T>> {
         let l = reader_listener(topic.topic().samples.clone(), listener);
-        self.create(topic, qos, Some((l, mask)))
+        self.create(topic, qos, Some((l, mask)), |_| {})
     }
 
     fn create<T>(
@@ -116,6 +127,7 @@ impl Subscriber {
         description: &impl TopicDescription<T>,
         qos: DataReaderQos,
         listener: Option<(ReaderListener, StatusMask)>,
+        f: impl FnOnce(&mut EndpointData),
     ) -> Result<DataReader<T>> {
         let topic = description.topic();
         let cft = description.content_filter();
@@ -143,6 +155,7 @@ impl Subscriber {
             data.content_filter = Some(property);
             filter
         });
+        f(&mut data);
         self.shared.add_reader(
             data,
             qos,

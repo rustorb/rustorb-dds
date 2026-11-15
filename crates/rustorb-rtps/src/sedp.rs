@@ -118,6 +118,11 @@ pub struct EndpointData {
     /// `service_instance_name` (`PID_SERVICE_INSTANCE_NAME`, DDS-RPC 1.0,
     /// 7.6.2.1), of the endpoints of a service.
     pub service_instance_name: Option<String>,
+    /// `topic_aliases` (`PID_TOPIC_ALIASES`, DDS-RPC 1.0, 7.4.3,
+    /// 7.6.2.1): other names the topic is known by, as the topic of a
+    /// derived interface is by those of its bases. An endpoint matches
+    /// those of a topic named by one of these too.
+    pub topic_aliases: Vec<String>,
     /// The parameters of DDS Security, such as the endpoint security
     /// info.
     pub security: SecurityParameters,
@@ -193,6 +198,7 @@ impl EndpointData {
             content_filter: None,
             related_entity_guid: None,
             service_instance_name: None,
+            topic_aliases: Vec::new(),
             security: SecurityParameters::default(),
         }
     }
@@ -311,6 +317,9 @@ impl EndpointData {
         if let Some(n) = &self.service_instance_name {
             l.push(b.string(pid::SERVICE_INSTANCE_NAME, n));
         }
+        if !self.topic_aliases.is_empty() {
+            l.push(b.strings(pid::TOPIC_ALIASES, &self.topic_aliases));
+        }
         if let Some(info) = &self.type_information {
             // An XCDR2 stream of its own, as Cyclone DDS 0.10 writes it.
             if let Ok(mut v) = info.to_bytes(order) {
@@ -393,6 +402,7 @@ impl EndpointData {
                 // DDS-RPC's extensions are optional too.
                 pid::RELATED_ENTITY_GUID => d.related_entity_guid = v.guid(p).ok(),
                 pid::SERVICE_INSTANCE_NAME => d.service_instance_name = v.string(p).ok(),
+                pid::TOPIC_ALIASES => d.topic_aliases = v.strings(p).unwrap_or_default(),
                 id if SecurityParameters::is_security(id) => d.security.push(p.clone(), endianness),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
@@ -453,7 +463,7 @@ pub fn match_endpoints(
     reader: &EndpointData,
     registry: &TypeRegistry,
 ) -> Match {
-    if writer.topic_name != reader.topic_name {
+    if !same_topic(writer, reader) {
         return Match::Unrelated;
     }
     match check_consistency(
@@ -478,6 +488,14 @@ pub fn match_endpoints(
     } else {
         Match::Incompatible(bad)
     }
+}
+
+/// Whether two endpoints are of the same topic: of the same name, or one
+/// of a topic that the other knows by an alias (DDS-RPC 1.0, 7.4.3).
+pub fn same_topic(a: &EndpointData, b: &EndpointData) -> bool {
+    a.topic_name == b.topic_name
+        || a.topic_aliases.contains(&b.topic_name)
+        || b.topic_aliases.contains(&a.topic_name)
 }
 
 /// Whether a writer and a reader match, with no TypeObjects known: the
@@ -1516,6 +1534,7 @@ mod tests {
         });
         d.related_entity_guid = Some(rguid(2));
         d.service_instance_name = Some("robot".into());
+        d.topic_aliases = vec!["Adder_Service_Request".into(), "Sub_Service_Request".into()];
         d.durability_service = Some(DurabilityService {
             service_cleanup_delay: Duration::from_std(std::time::Duration::from_millis(1500)),
             history_kind: 1,
@@ -1569,6 +1588,13 @@ mod tests {
         let mut r2 = r.clone();
         r2.topic_name = "U".into();
         assert!(!endpoints_match(&w, &r2));
+        // A topic known by an alias (DDS-RPC 1.0, 7.4.3), on either side.
+        r2.topic_aliases = vec!["V".into(), "T".into()];
+        assert!(endpoints_match(&w, &r2));
+        let mut w2 = w.clone();
+        w2.topic_name = "U".into();
+        w2.topic_aliases = vec!["T".into()];
+        assert!(endpoints_match(&w2, &r));
         let mut r2 = r.clone();
         r2.type_name = "Y".into();
         assert!(!endpoints_match(&w, &r2));

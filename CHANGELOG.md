@@ -8,6 +8,27 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- The rest of DDS-RPC 1.0 (#72):
+  - The function-call style: rustorb-idl (`-brust -Wbdds_only -Wbxtypes`)
+    writes a trait, `<I>Client` and `<I>Server<S>` for each `@DDSService`
+    interface, over the Enhanced Service Mapping, with `RpcError` and
+    `GENERATED_CODE_VERSION_1` of `rustorb_dds::rpc`.
+  - The Basic Service Mapping: `RequestHeader`, `ReplyHeader` and
+    `RemoteExceptionCode` (`rustorb_dds::rpc::idl`, from `DdsRpc.idl`),
+    the traits `BasicRequest` and `BasicReply`, and `Requester::basic` and
+    `Replier::basic`, which correlate by the headers and honour the
+    instance name. The requester reads the replies through a content
+    filtered topic on the header.
+  - Topic aliases (`PID_TOPIC_ALIASES`): announced from
+    `RpcConfig::request_topic_aliases` and `reply_topic_aliases`, read, and
+    used in matching, so that a client of a base interface finds a service
+    of a derived one.
+  - A replier sends a reply only to the reply reader of the requester that
+    asked. The others get a GAP (`WriteParams::directed_to`,
+    `ReliableWriter::direct` in rustorb-rtps).
+
+  See [docs/rpc.md](docs/rpc.md).
+
 - TRANSIENT and PERSISTENT durability, with DURABILITY_SERVICE (DDS 1.4,
   2.2.3.4 and 2.2.3.5, #71): a deleted TRANSIENT or PERSISTENT writer
   stays with its participant, which keeps what its DURABILITY_SERVICE
