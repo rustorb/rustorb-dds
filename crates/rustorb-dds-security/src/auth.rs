@@ -8,7 +8,7 @@ use rsa::BigUint;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
-use crate::pki::{Cert, PrivateKey, read_uri};
+use crate::pki::{Cert, Crl, PrivateKey, read_uri, uri_password};
 use crate::token::{BinaryProperty, DataHolder, binary_properties_cdr};
 
 /// The class of the plugin's tokens, without a version.
@@ -40,19 +40,47 @@ pub struct Identity {
     ca: Cert,
     cert: Cert,
     key: PrivateKey,
+    crls: Vec<Crl>,
     /// The key agreement this side asks for when it starts a handshake.
     pub key_agreement: KeyAgreement,
 }
 
 impl Identity {
     /// From the PEM of the identity CA, the identity certificate and the
-    /// private key; checks the certificate against the CA.
+    /// private key (unencrypted); checks the certificate against the CA.
     pub fn new(ca_pem: &[u8], cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, Error> {
+        Self::with_options(ca_pem, cert_pem, key_pem, &IdentityOptions::default())
+    }
+
+    /// As [`Self::new`], with a password for an encrypted private key and
+    /// CRLs. The CRLs must be the identity CA's and current; the
+    /// certificate must not be revoked by them, nor will a peer's be
+    /// accepted if it is (10.3.3, validate_local_identity and
+    /// validate_remote_identity).
+    pub fn with_options(
+        ca_pem: &[u8],
+        cert_pem: &[u8],
+        key_pem: &[u8],
+        options: &IdentityOptions,
+    ) -> Result<Self, Error> {
         let ca = Cert::parse(ca_pem)?;
+        let crls = match &options.crl {
+            Some(b) => Crl::parse_all(b)?,
+            None => Vec::new(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for crl in &crls {
+            crl.verify_signed_by(&ca, now)?;
+        }
         let cert = Cert::parse(cert_pem)?;
         cert.verify_signed_by(&ca)?;
-        let key = PrivateKey::from_pem(
+        check_revocation(&crls, &cert)?;
+        let key = PrivateKey::from_pem_with_password(
             std::str::from_utf8(key_pem).map_err(|_| Error::new("the private key is not PEM"))?,
+            options.password.as_deref(),
         )?;
         if !key.matches(cert.public_key()) {
             return Err(Error::new("the private key is not the certificate's"));
@@ -61,6 +89,7 @@ impl Identity {
             ca,
             cert,
             key,
+            crls,
             key_agreement: KeyAgreement::EcdhP256,
         })
     }
@@ -68,7 +97,24 @@ impl Identity {
     /// From the URIs of the properties `dds.sec.auth.identity_ca`,
     /// `dds.sec.auth.identity_certificate` and `dds.sec.auth.private_key`.
     pub fn from_uris(ca: &str, cert: &str, key: &str) -> Result<Self, Error> {
-        Self::new(&read_uri(ca)?, &read_uri(cert)?, &read_uri(key)?)
+        Self::from_uris_with(ca, cert, key, None, None)
+    }
+
+    /// As [`Self::from_uris`], with the property `dds.sec.auth.password`
+    /// (or else a `password` in the query of a `file:` URI of the key) and
+    /// the URI of a file of CRLs.
+    pub fn from_uris_with(
+        ca: &str,
+        cert: &str,
+        key: &str,
+        password: Option<&str>,
+        crl: Option<&str>,
+    ) -> Result<Self, Error> {
+        let options = IdentityOptions {
+            password: password.or_else(|| uri_password(key)).map(str::to_string),
+            crl: crl.map(read_uri).transpose()?,
+        };
+        Self::with_options(&read_uri(ca)?, &read_uri(cert)?, &read_uri(key)?, &options)
     }
 
     /// The identity certificate.
@@ -117,8 +163,28 @@ impl Identity {
     pub fn verify_peer(&self, cert: &[u8]) -> Result<Cert, Error> {
         let c = Cert::parse(cert)?;
         c.verify_signed_by(&self.ca)?;
+        check_revocation(&self.crls, &c)?;
         Ok(c)
     }
+}
+
+/// What [`Identity::with_options`] takes besides the documents.
+#[derive(Clone, Debug, Default)]
+pub struct IdentityOptions {
+    /// The password of an encrypted private key (`dds.sec.auth.password`).
+    pub password: Option<String>,
+    /// CRLs of the identity CA, PEM (`X509 CRL` blocks) or DER.
+    pub crl: Option<Vec<u8>>,
+}
+
+fn check_revocation(crls: &[Crl], cert: &Cert) -> Result<(), Error> {
+    if crls.iter().any(|c| c.revokes(cert)) {
+        return Err(Error::new(format!(
+            "the certificate of {} is revoked",
+            cert.subject()
+        )));
+    }
+    Ok(())
 }
 
 /// Checks that `prefix` is what a holder of `cert` may use: bit 0 set and

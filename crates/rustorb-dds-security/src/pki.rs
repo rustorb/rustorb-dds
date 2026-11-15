@@ -2,6 +2,7 @@
 //! 1.2, 8.2): RSA 2048 (RSASSA-PSS and PKCS #1 v1.5, SHA-256) and ECDSA
 //! P-256 with SHA-256.
 
+use base64ct::Encoding as _;
 use der::{Decode, DecodePem, Encode};
 use p256::ecdsa::signature::{Signer, Verifier};
 use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -9,6 +10,7 @@ use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use sha2::{Digest, Sha256};
 use spki::SubjectPublicKeyInfoOwned;
 use x509_cert::Certificate;
+use x509_cert::crl::CertificateList;
 
 use crate::Error;
 
@@ -163,25 +165,80 @@ impl PrivateKey {
     /// From PEM: `PRIVATE KEY` (PKCS #8), `EC PRIVATE KEY` (SEC 1) or
     /// `RSA PRIVATE KEY` (PKCS #1), unencrypted.
     pub fn from_pem(pem: &str) -> Result<Self, Error> {
-        let (label, der) = pem_rfc7468(pem)?;
+        Self::from_pem_with_password(pem, None)
+    }
+
+    /// From PEM, encrypted or not. `password` decrypts an encrypted key
+    /// (the property `dds.sec.auth.password`, 10.3.1):
+    ///
+    /// - `ENCRYPTED PRIVATE KEY` (PKCS #8, PBES2 of RFC 8018), with the
+    ///   password as its passphrase;
+    /// - an `EC PRIVATE KEY`, `RSA PRIVATE KEY` or `PRIVATE KEY` with the
+    ///   headers `Proc-Type: 4,ENCRYPTED` and `DEK-Info` (RFC 1421) and
+    ///   AES-128, -192 or -256 in CBC mode: the key is derived from the
+    ///   password as a passphrase, with MD5 and the first 8 octets of the
+    ///   IV (as OpenSSL writes these, and as Cyclone DDS and Fast DDS read
+    ///   them); failing that, with AES-128-CBC, the password is taken as
+    ///   the Base64 of the key itself, as Table 50 words it.
+    ///
+    /// The password is ignored for an unencrypted key.
+    pub fn from_pem_with_password(pem: &str, password: Option<&str>) -> Result<Self, Error> {
+        let block = PemBlock::parse(pem)?;
         let bad = |e: &dyn std::fmt::Display| Error::new(format!("the private key: {e}"));
-        match label.as_str() {
+        let need = || Error::new("the private key is encrypted: dds.sec.auth.password is needed");
+        if block.label == "ENCRYPTED PRIVATE KEY" {
+            let password = password.ok_or_else(need)?;
+            let info = pkcs8::EncryptedPrivateKeyInfo::try_from(block.der.as_slice())
+                .map_err(|e| bad(&e))?;
+            let doc = info
+                .decrypt(password)
+                .map_err(|_| Error::new("the private key: the password does not decrypt it"))?;
+            return Self::from_der("PRIVATE KEY", doc.as_bytes());
+        }
+        match block.dek_info()? {
+            None => Self::from_der(&block.label, &block.der),
+            Some((cipher, iv)) => {
+                let password = password.ok_or_else(need)?;
+                let mut keys = vec![bytes_to_key(password.as_bytes(), &iv, cipher.key_len())];
+                if cipher == Cbc::Aes128
+                    && let Ok(k) = base64ct::Base64::decode_vec(password.trim())
+                    && k.len() == 16
+                {
+                    keys.push(k);
+                }
+                for key in keys {
+                    if let Some(der) = cipher.decrypt(&key, &iv, &block.der)
+                        && let Ok(k) = Self::from_der(&block.label, &der)
+                    {
+                        return Ok(k);
+                    }
+                }
+                Err(Error::new(
+                    "the private key: the password does not decrypt it",
+                ))
+            }
+        }
+    }
+
+    /// From the DER of a PEM block labelled `label`.
+    fn from_der(label: &str, der: &[u8]) -> Result<Self, Error> {
+        let bad = |e: &dyn std::fmt::Display| Error::new(format!("the private key: {e}"));
+        match label {
             "PRIVATE KEY" => {
-                if let Ok(k) = p256::SecretKey::from_pkcs8_der(&der) {
+                if let Ok(k) = p256::SecretKey::from_pkcs8_der(der) {
                     Ok(PrivateKey::P256(k.into()))
                 } else {
-                    rsa::RsaPrivateKey::from_pkcs8_der(&der)
+                    rsa::RsaPrivateKey::from_pkcs8_der(der)
                         .map(|k| PrivateKey::Rsa(Box::new(k)))
                         .map_err(|e| bad(&e))
                 }
             }
-            "EC PRIVATE KEY" => p256::SecretKey::from_sec1_der(&der)
+            "EC PRIVATE KEY" => p256::SecretKey::from_sec1_der(der)
                 .map(|k| PrivateKey::P256(k.into()))
                 .map_err(|e| bad(&e)),
-            "RSA PRIVATE KEY" => rsa::RsaPrivateKey::from_pkcs1_der(&der)
+            "RSA PRIVATE KEY" => rsa::RsaPrivateKey::from_pkcs1_der(der)
                 .map(|k| PrivateKey::Rsa(Box::new(k)))
                 .map_err(|e| bad(&e)),
-            "ENCRYPTED PRIVATE KEY" => Err(Error::new("encrypted private keys are not supported")),
             l => Err(Error::new(format!("not a private key: {l}"))),
         }
     }
@@ -232,6 +289,163 @@ pub fn pem_rfc7468(pem: &str) -> Result<(String, Vec<u8>), Error> {
     let (label, der) = pem_rfc7468::decode_vec(&pem.as_bytes()[start..])
         .map_err(|e| Error::new(format!("PEM: {e}")))?;
     Ok((label.to_string(), der))
+}
+
+/// A PEM block that may have the headers of RFC 1421 (which RFC 7468
+/// leaves out).
+struct PemBlock {
+    label: String,
+    headers: Vec<(String, String)>,
+    der: Vec<u8>,
+}
+
+impl PemBlock {
+    /// The first block in `pem`.
+    fn parse(pem: &str) -> Result<Self, Error> {
+        let start = pem
+            .find("-----BEGIN ")
+            .ok_or_else(|| Error::new("no PEM block"))?;
+        let rest = &pem[start + "-----BEGIN ".len()..];
+        let (label, rest) = rest
+            .split_once("-----")
+            .ok_or_else(|| Error::new("PEM: a bad BEGIN line"))?;
+        let end = format!("-----END {label}-----");
+        let body = &rest[..rest
+            .find(&end)
+            .ok_or_else(|| Error::new(format!("PEM: no {end}")))?];
+        let mut headers = Vec::new();
+        let mut text = String::new();
+        let mut in_headers = true;
+        for line in body.lines().map(str::trim) {
+            if line.is_empty() {
+                // The blank line after the headers.
+                in_headers &= headers.is_empty() && text.is_empty();
+                continue;
+            }
+            match line.split_once(':') {
+                Some((k, v)) if in_headers => headers.push((k.trim().into(), v.trim().into())),
+                _ => {
+                    in_headers = false;
+                    text.push_str(line);
+                }
+            }
+        }
+        let der =
+            base64ct::Base64::decode_vec(&text).map_err(|e| Error::new(format!("PEM: {e}")))?;
+        Ok(PemBlock {
+            label: label.to_string(),
+            headers,
+            der,
+        })
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The cipher and IV of an encrypted block (RFC 1421, 4.6.1.1 and
+    /// 4.6.1.3), `None` if it is not encrypted.
+    fn dek_info(&self) -> Result<Option<(Cbc, Vec<u8>)>, Error> {
+        let encrypted = self
+            .header("Proc-Type")
+            .is_some_and(|v| v.split(',').any(|p| p.trim() == "ENCRYPTED"));
+        if !encrypted {
+            return Ok(None);
+        }
+        let dek = self
+            .header("DEK-Info")
+            .ok_or_else(|| Error::new("the private key: an encrypted PEM with no DEK-Info"))?;
+        let (alg, iv) = dek
+            .split_once(',')
+            .ok_or_else(|| Error::new(format!("the private key: DEK-Info {dek}")))?;
+        let cipher = match alg.trim() {
+            "AES-128-CBC" => Cbc::Aes128,
+            "AES-192-CBC" => Cbc::Aes192,
+            "AES-256-CBC" => Cbc::Aes256,
+            a => {
+                return Err(Error::new(format!(
+                    "the private key: unsupported cipher {a} (AES-128/192/256-CBC are)"
+                )));
+            }
+        };
+        let iv = hex(iv.trim())
+            .filter(|iv| iv.len() == 16)
+            .ok_or_else(|| Error::new(format!("the private key: DEK-Info {dek}")))?;
+        Ok(Some((cipher, iv)))
+    }
+}
+
+fn hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// The ciphers of an encrypted PEM block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cbc {
+    Aes128,
+    Aes192,
+    Aes256,
+}
+
+impl Cbc {
+    fn key_len(self) -> usize {
+        match self {
+            Cbc::Aes128 => 16,
+            Cbc::Aes192 => 24,
+            Cbc::Aes256 => 32,
+        }
+    }
+
+    /// Decrypts with PKCS #7 padding; `None` if the padding is wrong.
+    fn decrypt(self, key: &[u8], iv: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+        use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+        fn run<C: BlockDecryptMut + KeyIvInit>(
+            key: &[u8],
+            iv: &[u8],
+            data: &[u8],
+        ) -> Option<Vec<u8>> {
+            C::new_from_slices(key, iv)
+                .ok()?
+                .decrypt_padded_vec_mut::<Pkcs7>(data)
+                .ok()
+        }
+        match self {
+            Cbc::Aes128 => run::<cbc::Decryptor<aes::Aes128>>(key, iv, data),
+            Cbc::Aes192 => run::<cbc::Decryptor<aes::Aes192>>(key, iv, data),
+            Cbc::Aes256 => run::<cbc::Decryptor<aes::Aes256>>(key, iv, data),
+        }
+    }
+}
+
+/// The key of an encrypted PEM block from a passphrase: MD5 over the
+/// passphrase and the salt (the first 8 octets of the IV), then over the
+/// previous digest, the passphrase and the salt, until there are `len`
+/// octets (PBKDF1 of RFC 8018 with one iteration, extended past one
+/// digest).
+fn bytes_to_key(password: &[u8], iv: &[u8], len: usize) -> Vec<u8> {
+    use md5::{Digest as _, Md5};
+    let salt = &iv[..8];
+    let mut key = Vec::with_capacity(len + 16);
+    let mut prev: Vec<u8> = Vec::new();
+    while key.len() < len {
+        let mut h = Md5::new();
+        h.update(&prev);
+        h.update(password);
+        h.update(salt);
+        prev = h.finalize().to_vec();
+        key.extend_from_slice(&prev);
+    }
+    key.truncate(len);
+    key
 }
 
 fn der_error(e: der::Error) -> Error {
@@ -351,15 +565,119 @@ impl Cert {
         issuer
             .public
             .verify_with(&self.cert.signature_algorithm.oid.to_string(), &tbs, sig)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if !self.is_valid_at(now) {
+        if !self.is_valid_at(unix_now()) {
             return Err(Error::new(format!("{} is not valid now", self.subject())));
         }
         Ok(())
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A certificate revocation list (RFC 5280, 5), which 10.3.3 has the
+/// plugin check, with validate_local_identity and validate_remote_identity.
+#[derive(Clone, Debug)]
+pub struct Crl {
+    list: CertificateList,
+}
+
+impl Crl {
+    /// The CRLs in `b`: PEM blocks `X509 CRL`, or one in DER.
+    pub fn parse_all(b: &[u8]) -> Result<Vec<Self>, Error> {
+        let b = b.strip_suffix(&[0]).unwrap_or(b);
+        let lists = match std::str::from_utf8(b) {
+            Ok(s) if s.contains("-----BEGIN") => {
+                let mut lists = Vec::new();
+                let mut rest = s;
+                while let Some(i) = rest.find("-----BEGIN ") {
+                    let block = PemBlock::parse(&rest[i..])?;
+                    let end = format!("-----END {}-----", block.label);
+                    rest = &rest[i + rest[i..].find(&end).expect("parsed") + end.len()..];
+                    if block.label == "X509 CRL" {
+                        lists.push(CertificateList::from_der(&block.der).map_err(der_error)?);
+                    }
+                }
+                lists
+            }
+            _ => vec![CertificateList::from_der(b).map_err(der_error)?],
+        };
+        if lists.is_empty() {
+            return Err(Error::new("no X509 CRL in the CRL file"));
+        }
+        Ok(lists.into_iter().map(|list| Crl { list }).collect())
+    }
+
+    /// Its issuer, as text.
+    pub fn issuer(&self) -> String {
+        self.list.tbs_cert_list.issuer.to_string()
+    }
+
+    /// Whether `issuer` signed it, and whether it is current at `now`
+    /// (seconds since the Unix epoch): issued, and its next update, if
+    /// it names one, not passed.
+    pub fn verify_signed_by(&self, issuer: &Cert, now: u64) -> Result<(), Error> {
+        let tbs = &self.list.tbs_cert_list;
+        if tbs.issuer.to_der().map_err(der_error)? != issuer.subject_der() {
+            return Err(Error::new(format!(
+                "the CRL of {} is not of the identity CA {}",
+                self.issuer(),
+                issuer.subject()
+            )));
+        }
+        let sig = self
+            .list
+            .signature
+            .as_bytes()
+            .ok_or_else(|| Error::new("the CRL's signature is not whole octets"))?;
+        issuer
+            .public
+            .verify_with(
+                &self.list.signature_algorithm.oid.to_string(),
+                &tbs.to_der().map_err(der_error)?,
+                sig,
+            )
+            .map_err(|_| Error::new(format!("the CRL of {} does not verify", self.issuer())))?;
+        if tbs.this_update.to_unix_duration().as_secs() > now {
+            return Err(Error::new(format!(
+                "the CRL of {} is not valid yet",
+                self.issuer()
+            )));
+        }
+        if let Some(next) = tbs.next_update
+            && next.to_unix_duration().as_secs() < now
+        {
+            return Err(Error::new(format!(
+                "the CRL of {} has expired (its next update was {next})",
+                self.issuer()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether it revokes `cert`: same issuer, and its serial number listed.
+    pub fn revokes(&self, cert: &Cert) -> bool {
+        let tbs = &self.list.tbs_cert_list;
+        let serial = cert.cert.tbs_certificate.serial_number.as_bytes();
+        tbs.issuer.to_der().ok() == Some(cert.issuer_der())
+            && tbs
+                .revoked_certificates
+                .iter()
+                .flatten()
+                .any(|r| r.serial_number.as_bytes() == serial)
+    }
+}
+
+/// The password in the query of a `file:` URI of a private key, as in
+/// the example `file:identity_ca_private_key.pem?password=OpenSesame` of
+/// Table 50.
+pub fn uri_password(uri: &str) -> Option<&str> {
+    let (_, query) = uri.strip_prefix("file:")?.split_once('?')?;
+    query.split('&').find_map(|p| p.strip_prefix("password="))
 }
 
 /// Reads a URI of a certificate, key or document (10.3.1): `file:` or

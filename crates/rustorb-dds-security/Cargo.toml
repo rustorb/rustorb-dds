@@ -22,6 +22,13 @@ cms = "0.2"
 der = { version = "0.7", features = ["pem", "alloc", "oid"] }
 spki = { version = "0.7", features = ["alloc"] }
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+# Encrypted private keys: PKCS #8 (PBES2), and the PEM of RFC 1421 with
+# DEK-Info (AES-CBC, its key derived with MD5).
+pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+md-5 = "0.10"
+base64ct = { version = "1", features = ["alloc"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 roxmltree = "0.20"
 

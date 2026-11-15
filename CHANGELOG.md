@@ -8,6 +8,18 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security: encrypted private keys and CRLs (#73). `SecurityConfig`
+  has two new fields, `password` and `crl`.
+  - `dds.sec.auth.password` (`SecurityConfig::password`) decrypts the
+    private key: PKCS #8 `ENCRYPTED PRIVATE KEY`, or PEM with `DEK-Info`
+    (AES-CBC). The password can also come from `?password=` in the
+    `file:` URI of the key.
+  - `rustorb.dds.sec.auth.crl` (`SecurityConfig::crl`) gives CRLs of the
+    identity CA. A revoked certificate fails authentication, this
+    participant's or a peer's.
+
+  See [docs/security.md](docs/security.md).
+
 - The rest of DDS-RPC 1.0 (#72):
   - The function-call style: rustorb-idl (`-brust -Wbdds_only -Wbxtypes`)
     writes a trait, `<I>Client` and `<I>Server<S>` for each `@DDSService`

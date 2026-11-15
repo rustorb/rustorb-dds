@@ -70,12 +70,26 @@ pub struct SecurityConfig {
     pub governance: String,
     /// `dds.sec.access.permissions`: the signed permissions document.
     pub permissions: String,
+    /// `dds.sec.auth.password`: the password of an encrypted private
+    /// key, PKCS #8 (`ENCRYPTED PRIVATE KEY`) or PEM with `DEK-Info`
+    /// (AES-CBC). `None` takes a `password=` in the query of a `file:`
+    /// URI of the key (`file:key.pem?password=...`), if there is one.
+    pub password: Option<String>,
+    /// [`Self::CRL`]: CRLs of the identity CA (PEM `X509 CRL` blocks, or
+    /// DER). A revoked identity certificate, this participant's or a
+    /// peer's, fails authentication.
+    pub crl: Option<String>,
 }
 
 impl SecurityConfig {
-    /// The standard names of the properties it is made of, those of the
+    /// The property of the URI of the CRLs of the identity CA, which DDS
+    /// Security 1.2 does not name.
+    pub const CRL: &'static str = "rustorb.dds.sec.auth.crl";
+
+    /// The standard names of the properties it needs, those of the
     /// builtin authentication and access control plugins (DDS Security
-    /// 1.2, clause 9).
+    /// 1.2, clause 9). `dds.sec.auth.password` and [`Self::CRL`] may be
+    /// given too.
     pub const PROPERTIES: [&'static str; 6] = [
         "dds.sec.auth.identity_ca",
         "dds.sec.auth.identity_certificate",
@@ -99,6 +113,8 @@ impl SecurityConfig {
             permissions_ca: get("dds.sec.access.permissions_ca")?,
             governance: get("dds.sec.access.governance")?,
             permissions: get("dds.sec.access.permissions")?,
+            password: get("dds.sec.auth.password"),
+            crl: get(Self::CRL),
         })
     }
 }
@@ -332,10 +348,12 @@ impl Security {
         writer_config: WriterConfig,
         reader_config: ReaderConfig,
     ) -> Result<Self> {
-        let identity = Identity::from_uris(
+        let identity = Identity::from_uris_with(
             &config.identity_ca,
             &config.identity_certificate,
             &config.private_key,
+            config.password.as_deref(),
+            config.crl.as_deref(),
         )
         .map_err(sec_error("identity"))?;
         let permissions_ca =

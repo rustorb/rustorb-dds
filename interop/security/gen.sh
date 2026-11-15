@@ -10,6 +10,9 @@
 #   liveliness, metadata and data encrypted, the RTPS messages protected
 #   as rtps_protection says (NONE, SIGN or ENCRYPT; default NONE), and
 #   both subjects allowed to publish and subscribe everything;
+# - rustorb's private key encrypted (PKCS #8, password in
+#   dds.sec.auth.password), and a CRL of the identity CA that revokes a
+#   third certificate, so that rustorb-dds checks the peer against it;
 # - the configuration of each implementation: rustorb.properties (for
 #   RUSTORB_DDS_SECURITY), cyclonedds.xml (CYCLONEDDS_URI) and fastdds.xml
 #   (FASTRTPS_DEFAULT_PROFILES_FILE).
@@ -24,8 +27,9 @@ q ecparam -name prime256v1 -genkey -noout -out identity_ca_key.pem
 q req -x509 -new -key identity_ca_key.pem -sha256 -days $days \
   -subj "/C=JP/O=rustorb/CN=interop identity CA" -out identity_ca.pem
 q ecparam -name prime256v1 -genkey -noout -out rustorb_ec.pem
-q pkcs8 -topk8 -nocrypt -in rustorb_ec.pem -out rustorb_key.pem
-q req -new -key rustorb_key.pem -subj "/C=JP/O=rustorb/CN=rustorb" -out rustorb.csr
+password=interop-secret
+q pkcs8 -topk8 -v2 aes-256-cbc -passout pass:$password -in rustorb_ec.pem -out rustorb_key.pem
+q req -new -key rustorb_ec.pem -subj "/C=JP/O=rustorb/CN=rustorb" -out rustorb.csr
 q x509 -req -in rustorb.csr -CA identity_ca.pem -CAkey identity_ca_key.pem \
   -CAcreateserial -sha256 -days $days -out rustorb_cert.pem
 q ecparam -name prime256v1 -genkey -noout -out peer_ec.pem
@@ -36,7 +40,18 @@ q x509 -req -in peer.csr -CA identity_ca.pem -CAkey identity_ca_key.pem \
 q ecparam -name prime256v1 -genkey -noout -out permissions_ca_key.pem
 q req -x509 -new -key permissions_ca_key.pem -sha256 -days $days \
   -subj "/C=JP/O=rustorb/CN=interop permissions CA" -out permissions_ca.pem
-rm -f ./*.csr ./*.srl rustorb_ec.pem peer_ec.pem
+# A revoked certificate, and the CRL that says so.
+q ecparam -name prime256v1 -genkey -noout -out revoked_key.pem
+q req -new -key revoked_key.pem -subj "/C=JP/O=rustorb/CN=revoked" -out revoked.csr
+q x509 -req -in revoked.csr -CA identity_ca.pem -CAkey identity_ca_key.pem \
+  -CAcreateserial -sha256 -days $days -out revoked_cert.pem
+mkdir -p ca.tmp
+: > ca.tmp/index.txt
+echo 1000 > ca.tmp/crlnumber
+printf '[ca]\ndefault_ca=c\n[c]\ndatabase=ca.tmp/index.txt\ncrlnumber=ca.tmp/crlnumber\ndefault_md=sha256\ndefault_crl_days=%s\n' $days > ca.tmp/ca.cnf
+q ca -config ca.tmp/ca.cnf -cert identity_ca.pem -keyfile identity_ca_key.pem -revoke revoked_cert.pem
+q ca -config ca.tmp/ca.cnf -cert identity_ca.pem -keyfile identity_ca_key.pem -gencrl -out crl.pem
+rm -rf ca.tmp ./*.csr ./*.srl rustorb_ec.pem peer_ec.pem revoked_key.pem
 
 cat > governance.xml <<XML
 <?xml version="1.0" encoding="UTF-8"?>
@@ -102,6 +117,8 @@ cat > rustorb.properties <<P
 dds.sec.auth.identity_ca=file:$d/identity_ca.pem
 dds.sec.auth.identity_certificate=file:$d/rustorb_cert.pem
 dds.sec.auth.private_key=file:$d/rustorb_key.pem
+dds.sec.auth.password=$password
+rustorb.dds.sec.auth.crl=file:$d/crl.pem
 dds.sec.access.permissions_ca=file:$d/permissions_ca.pem
 dds.sec.access.governance=file:$d/governance.p7s
 dds.sec.access.permissions=file:$d/permissions.p7s
