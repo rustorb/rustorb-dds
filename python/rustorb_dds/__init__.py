@@ -77,7 +77,17 @@ class Qos:
       ``"best_effort"`` (a reader's default); ``max_blocking_time``.
     - ``history``: the depth of KEEP_LAST (1 by default), or
       ``"keep_all"``.
-    - ``durability``: ``"volatile"`` (default), ``"transient_local"``.
+    - ``durability``: ``"volatile"`` (default), ``"transient_local"``,
+      ``"transient"``, ``"persistent"``. The samples of a TRANSIENT
+      writer outlive it in its participant; those of a PERSISTENT one
+      also in a file, which a later PERSISTENT writer of the topic takes
+      up (the participant property ``rustorb.dds.persistence.directory``
+      says where).
+    - ``service_cleanup_delay``, ``service_history``,
+      ``service_max_samples``, ``service_max_instances``,
+      ``service_max_samples_per_instance`` (writers): DURABILITY_SERVICE,
+      what is kept of a TRANSIENT or PERSISTENT writer once it is
+      deleted; KEEP_LAST 1 by default.
     - ``deadline``: the period.
     - ``liveliness``: ``"automatic"`` (default),
       ``"manual_by_participant"``, ``"manual_by_topic"``;
@@ -101,6 +111,11 @@ class Qos:
     max_instances: typing.Optional[int] = None
     max_samples_per_instance: typing.Optional[int] = None
     autodispose_unregistered_instances: typing.Optional[bool] = None
+    service_cleanup_delay: typing.Optional[float] = None
+    service_history: typing.Union[int, str, None] = None
+    service_max_samples: typing.Optional[int] = None
+    service_max_instances: typing.Optional[int] = None
+    service_max_samples_per_instance: typing.Optional[int] = None
 
     def _dict(self):
         return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
@@ -152,7 +167,11 @@ class DomainParticipant:
     its traffic on the loopback interface. ``properties`` (a dict, or
     name and value pairs) are the PROPERTY of its QoS: the six
     ``dds.sec.*`` properties of the builtin plugins (values ``file:`` or
-    ``data:,`` URIs) turn on DDS Security; other names are ignored."""
+    ``data:,`` URIs) turn on DDS Security;
+    ``rustorb.dds.persistence.directory`` is where PERSISTENT writers
+    keep their files (by default the ``RUSTORB_DDS_PERSISTENCE_DIR``
+    environment variable, or ``rustorb-dds-persistent`` in the current
+    directory); other names are ignored."""
 
     def __init__(self, domain_id=0, localhost=False, properties=None):
         if properties is None:

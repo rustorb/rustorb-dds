@@ -700,15 +700,14 @@ impl Security {
         match token.class_id.as_str() {
             auth::REQUEST_CLASS => {
                 // The same request again: the reply was lost.
-                if let (Some(hs), Some((sent, ..))) = (&peer.handshake, &peer.last_sent) {
-                    if hs.sent.class_id == auth::REPLY_CLASS
-                        && token.binary("challenge1") == hs.sent.binary("challenge1")
-                    {
-                        let resend = sent.clone();
-                        st.out
-                            .extend(stateless_datagram(self.prefix, &peer.data, &resend));
-                        return;
-                    }
+                if let (Some(hs), Some((sent, ..))) = (&peer.handshake, &peer.last_sent)
+                    && hs.sent.class_id == auth::REPLY_CLASS
+                    && token.binary("challenge1") == hs.sent.binary("challenge1")
+                {
+                    let resend = sent.clone();
+                    st.out
+                        .extend(stateless_datagram(self.prefix, &peer.data, &resend));
+                    return;
                 }
                 match Handshake::reply(
                     &self.identity,
@@ -1225,12 +1224,13 @@ impl Security {
         let st = &mut *g;
         let mut out = std::mem::take(&mut st.out);
         for peer in st.peers.values_mut() {
-            if let Some((m, at, wait)) = &mut peer.last_sent {
-                if *at <= now && peer.authenticated.is_none() {
-                    out.extend(stateless_datagram(self.prefix, &peer.data, m));
-                    *wait = (*wait * 2).min(MAX_RESEND);
-                    *at = now + *wait;
-                }
+            if let Some((m, at, wait)) = &mut peer.last_sent
+                && *at <= now
+                && peer.authenticated.is_none()
+            {
+                out.extend(stateless_datagram(self.prefix, &peer.data, m));
+                *wait = (*wait * 2).min(MAX_RESEND);
+                *at = now + *wait;
             }
             if let Some(w) = peer.volatile_writer.as_mut() {
                 out.extend(w.poll(now));

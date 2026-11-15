@@ -467,6 +467,42 @@ TEST(requester_and_replier) {
   CHECK(!requester.receive_reply(g, first, Duration(0, 100000000)));
   server.join();
 }
+// TRANSIENT: the samples outlive the writer, as many as its
+// DURABILITY_SERVICE keeps.
+TEST(transient_samples_outlive_the_writer) {
+  dds::pub::qos::DataWriterQos d;
+  CHECK(d.policy<policy::DurabilityService>().history_depth() == 1);
+  CHECK(d.policy<policy::DurabilityService>().max_samples() == dds::core::LENGTH_UNLIMITED);
+  auto p1 = participant(93);
+  auto p2 = participant(93);
+  dds::topic::Topic<HelloWorld::Greeting> t1(p1, "kept");
+  dds::topic::Topic<HelloWorld::Greeting> t2(p2, "kept");
+  dds::pub::Publisher pub(p1);
+  dds::pub::qos::DataWriterQos wq = pub.default_datawriter_qos();
+  wq << policy::Durability::Transient() << policy::History::KeepLast(3)
+     << policy::DurabilityService(Duration::zero(), policy::HistoryKind::KEEP_LAST, 2,
+                                  dds::core::LENGTH_UNLIMITED, dds::core::LENGTH_UNLIMITED,
+                                  dds::core::LENGTH_UNLIMITED);
+  dds::pub::DataWriter<HelloWorld::Greeting> w(pub, t1, wq);
+  for (uint32_t i = 1; i <= 3; i++) {
+    HelloWorld::Greeting g;
+    g.index(i);
+    w.write(g);
+  }
+  w.close();
+  dds::sub::Subscriber sub(p2);
+  dds::sub::qos::DataReaderQos rq = reliable_reader(sub);
+  rq << policy::Durability::Transient();
+  dds::sub::DataReader<HelloWorld::Greeting> r(sub, t2, rq);
+  std::vector<uint32_t> got;
+  CHECK(eventually([&] {
+    for (const auto& s : r.take()) {
+      if (s.info().valid()) got.push_back(s.data().index());
+    }
+    return got.size() >= 2;
+  }));
+  CHECK(got == std::vector<uint32_t>({2, 3}));
+}
 
 // DDS Security from the PROPERTY of the DomainParticipantQos: the two
 // participants authenticate each other, and a protected topic (Square*

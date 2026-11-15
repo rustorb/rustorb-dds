@@ -7,8 +7,8 @@
 //! `HelloWorld::Greeting`. The full form, used by `interop/run.sh`:
 //!
 //! ```text
-//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local|filtered [size]]
-//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|filtered [size]]
+//! hello_world pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local|transient|persistent|filtered [size]]
+//! hello_world sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|transient|filtered [size]]
 //! ```
 //!
 //! The publisher waits for a subscriber, then writes `count` samples. The
@@ -24,6 +24,15 @@
 //! writes its samples at once, before any subscriber is there, then
 //! waits for one and for its acknowledgments; the subscriber creates its
 //! reader two seconds late, and must still get them all.
+//!
+//! `transient` is like `transient_local` with TRANSIENT durability, and
+//! the publisher deletes its writer once it has written: its participant
+//! keeps the samples (with a KEEP_ALL DURABILITY_SERVICE) and sends them
+//! to the subscriber. The publisher then waits for another participant
+//! to come and go. `persistent` (publisher only) writes them with a
+//! PERSISTENT writer of a first participant, deletes that participant,
+//! and creates a PERSISTENT writer in a second one, which takes them up
+//! from its file (in `$RUSTORB_DDS_PERSISTENCE_DIR`) and sends them.
 //!
 //! `filtered` is reliable, and the subscriber reads a content filtered
 //! topic, `index > %0 AND message LIKE 'Hello%'` with `count / 2` for
@@ -57,8 +66,8 @@ use std::time::{Duration, Instant};
 
 use greeting::Greeting;
 use rustorb_dds::{
-    DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, Error, History,
-    ParticipantConfig, Reliability, StatusMask, WaitSet, data_representation,
+    DataReaderQos, DataWriterQos, DomainParticipant, DurabilityKind, DurabilityService, Error,
+    History, ParticipantConfig, Reliability, StatusMask, WaitSet, data_representation,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,17 +82,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let domain = num(2, 0)? as u32;
     let count = num(3, 10)? as u32;
     let filtered = args.get(5).map(String::as_str) == Some("filtered");
+    let durability = match args.get(5).map(String::as_str) {
+        Some("transient_local") => DurabilityKind::TransientLocal,
+        Some("transient") => DurabilityKind::Transient,
+        Some("persistent") => DurabilityKind::Persistent,
+        _ => DurabilityKind::Volatile,
+    };
     let (reliable, transient_local) = match args.get(5).map(String::as_str) {
         None | Some("best_effort") => (false, false),
         Some("reliable" | "filtered") => (true, false),
-        Some("transient_local") => (true, true),
+        Some("transient_local" | "transient" | "persistent") => (true, true),
         Some(other) => return Err(format!("unknown reliability {other:?}").into()),
     };
-    let durability = if transient_local {
-        DurabilityKind::TransientLocal
-    } else {
-        DurabilityKind::Volatile
-    };
+    // The samples outlive the writer.
+    let outlive = durability >= DurabilityKind::Transient;
     let size = match args.get(6) {
         Some(v) => Some(v.parse::<usize>()?),
         None => None,
@@ -112,12 +124,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("RUSTORB_DDS_SECURITY: a dds.sec property is missing")?,
         );
     }
-    let participant = DomainParticipant::with_config(config)?;
-    // A content filter needs the type's description.
-    if filtered || std::env::var_os("RUSTORB_NO_TYPE_INFORMATION").is_none() {
-        participant.register_type::<Greeting>()?;
-    }
-    let topic = participant.create_topic::<Greeting>("hello_world")?;
+    let join = |config: ParticipantConfig| -> Result<_, Box<dyn std::error::Error>> {
+        let participant = DomainParticipant::with_config(config)?;
+        // A content filter needs the type's description.
+        if filtered || std::env::var_os("RUSTORB_NO_TYPE_INFORMATION").is_none() {
+            participant.register_type::<Greeting>()?;
+        }
+        let topic = participant.create_topic::<Greeting>("hello_world")?;
+        Ok((participant, topic))
+    };
+    let first = (role == "pub" && durability == DurabilityKind::Persistent)
+        .then(|| join(config.clone()))
+        .transpose()?;
+    let (participant, topic) = join(config)?;
     match role {
         "pub" => {
             let interval = Duration::from_millis(num(4, 1000)?);
@@ -126,6 +145,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     reliability: Reliability::reliable(),
                     history: History::KeepAll,
                     durability,
+                    durability_service: DurabilityService {
+                        history: History::KeepAll,
+                        ..DurabilityService::default()
+                    },
                     ..DataWriterQos::default()
                 }
             } else {
@@ -142,9 +165,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 qos
             };
-            let writer = participant
-                .create_publisher()?
-                .create_datawriter_with_qos(&topic, qos)?;
+            // The samples are written by the first participant's writer,
+            // and taken up by the second's.
+            let publisher = match &first {
+                Some((p, _)) => p.create_publisher()?,
+                None => participant.create_publisher()?,
+            };
+            let writer = publisher
+                .create_datawriter_with_qos(first.as_ref().map_or(&topic, |f| &f.1), qos.clone())?;
             if !transient_local {
                 println!("rustorb-dds: waiting for a subscriber...");
                 while !writer.wait_for_subscriptions(1, Duration::from_secs(1)) {}
@@ -159,6 +187,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 writer.write(&g)?;
                 println!("rustorb-dds: sent {index}");
                 std::thread::sleep(interval);
+            }
+            if outlive {
+                drop(writer);
+                drop(publisher);
+                println!("rustorb-dds: writer deleted");
+                if let Some(first) = first {
+                    drop(first);
+                    // For the second participant to see it leave.
+                    std::thread::sleep(Duration::from_secs(1));
+                    let _writer = participant
+                        .create_publisher()?
+                        .create_datawriter_with_qos(&topic, qos)?;
+                    println!("rustorb-dds: samples taken up by a new participant");
+                    wait_for_a_visit(&participant);
+                } else {
+                    wait_for_a_visit(&participant);
+                }
+                return Ok(());
             }
             if transient_local {
                 println!("rustorb-dds: waiting for a subscriber...");
@@ -243,4 +289,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err(format!("unknown role {role:?}: use pub or sub").into()),
     }
     Ok(())
+}
+
+/// Waits, 30 s at most, for another participant to come, then for
+/// it to leave.
+fn wait_for_a_visit(participant: &DomainParticipant) {
+    println!("rustorb-dds: waiting for a subscriber to come and go...");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while participant.discovered_participants().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    while !participant.discovered_participants().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

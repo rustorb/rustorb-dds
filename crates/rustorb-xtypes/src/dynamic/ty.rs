@@ -685,10 +685,10 @@ impl DynamicTypeBuilder {
             }
             TK_STRUCTURE => {
                 let base = d.base_type.as_ref().map(|t| t.0.clone());
-                if let Some(b) = &base {
-                    if !matches!(resolve(b), Type::Struct(_)) {
-                        return Err(bad("the base type of a struct is not a struct"));
-                    }
+                if let Some(b) = &base
+                    && !matches!(resolve(b), Type::Struct(_))
+                {
+                    return Err(bad("the base type of a struct is not a struct"));
                 }
                 Type::from(StructType {
                     name: d.name.clone(),

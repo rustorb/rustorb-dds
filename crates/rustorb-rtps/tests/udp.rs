@@ -22,10 +22,10 @@ fn loopback_config(domain_id: u32) -> UdpConfig {
 fn wait_for(incoming: &Incoming, payload: &[u8]) -> Datagram {
     let deadline = Instant::now() + WAIT;
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        if let Some(d) = incoming.recv_timeout(left) {
-            if d.data == payload {
-                return d;
-            }
+        if let Some(d) = incoming.recv_timeout(left)
+            && d.data == payload
+        {
+            return d;
         }
     }
     panic!("datagram not received");

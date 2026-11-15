@@ -698,10 +698,9 @@ impl ReliableWriter {
             .readers
             .values()
             .any(|p| p.reliable && p.acked < self.last_sn)
+            && let Some(t) = self.next_heartbeat
         {
-            if let Some(t) = self.next_heartbeat {
-                take(t);
-            }
+            take(t);
         }
         d
     }
@@ -1081,10 +1080,10 @@ impl ReliableReader {
             // all of (HEARTBEAT) or some of (HEARTBEAT_FRAG).
             let mut nacks: BTreeMap<SequenceNumber, FragmentNumberSet> = BTreeMap::new();
             for sn in p.fragments.incomplete() {
-                if sn <= p.available_max {
-                    if let Some(set) = p.fragments.missing(sn, None) {
-                        nacks.insert(sn, set);
-                    }
+                if sn <= p.available_max
+                    && let Some(set) = p.fragments.missing(sn, None)
+                {
+                    nacks.insert(sn, set);
                 }
             }
             for (sn, last) in std::mem::take(&mut p.heartbeat_frags) {

@@ -126,6 +126,77 @@ impl DurabilityKind {
     }
 }
 
+/// `DurabilityServiceQosPolicy` (DDS 1.4, 2.2.3.5): the HISTORY and
+/// RESOURCE_LIMITS of the service that keeps the samples of a TRANSIENT
+/// or PERSISTENT writer, and when it drops a disposed instance. The
+/// counts are `long`s, `-1` being `LENGTH_UNLIMITED`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DurabilityService {
+    /// `service_cleanup_delay`.
+    pub service_cleanup_delay: Duration,
+    /// `history_kind`: 0 is KEEP_LAST, 1 KEEP_ALL.
+    pub history_kind: u32,
+    /// `history_depth`.
+    pub history_depth: i32,
+    /// `max_samples`.
+    pub max_samples: i32,
+    /// `max_instances`.
+    pub max_instances: i32,
+    /// `max_samples_per_instance`.
+    pub max_samples_per_instance: i32,
+}
+
+impl Default for DurabilityService {
+    /// No cleanup delay, KEEP_LAST 1, no limits (DDS 1.4, 2.2.3).
+    fn default() -> Self {
+        DurabilityService {
+            service_cleanup_delay: Duration::ZERO,
+            history_kind: 0,
+            history_depth: 1,
+            max_samples: -1,
+            max_instances: -1,
+            max_samples_per_instance: -1,
+        }
+    }
+}
+
+impl DurabilityService {
+    /// Reads `PID_DURABILITY_SERVICE`: `{ Duration_t
+    /// service_cleanup_delay; HistoryQosPolicyKind history_kind; long
+    /// history_depth, max_samples, max_instances,
+    /// max_samples_per_instance; }`.
+    pub fn from_parameter(v: &PlValues, p: &Parameter) -> Result<Self, DecodeError> {
+        if p.value.len() < 28 {
+            return Err(DecodeError::InvalidParameterValue(p.id));
+        }
+        let at = |i: usize| v.u32(&Parameter::new(p.id, p.value[i..i + 4].to_vec()));
+        Ok(DurabilityService {
+            service_cleanup_delay: v.duration(&Parameter::new(p.id, p.value[..8].to_vec()))?,
+            history_kind: at(8)?,
+            history_depth: at(12)? as i32,
+            max_samples: at(16)? as i32,
+            max_instances: at(20)? as i32,
+            max_samples_per_instance: at(24)? as i32,
+        })
+    }
+
+    /// Writes `PID_DURABILITY_SERVICE`.
+    pub fn to_parameter(&self, b: &PlBuilder) -> Parameter {
+        let id = pid::DURABILITY_SERVICE;
+        let mut value = b.duration(id, self.service_cleanup_delay).value;
+        for n in [
+            self.history_kind,
+            self.history_depth as u32,
+            self.max_samples as u32,
+            self.max_instances as u32,
+            self.max_samples_per_instance as u32,
+        ] {
+            value.extend(b.u32(id, n).value);
+        }
+        Parameter::new(id, value)
+    }
+}
+
 /// `LivelinessQosPolicyKind`, in the order of the DDS enum, which is also
 /// the order used to compare an offered and a requested kind (DDS 1.4,
 /// 2.2.3.11).

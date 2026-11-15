@@ -595,10 +595,10 @@ impl HeaderExtension {
         };
         // 8.3.7.3: messageLength must fit the Header (20 octets), this
         // submessage's header (4) and its contents.
-        if let Some(len) = message_length {
-            if (len as usize) < 20 + 4 + body_len {
-                return Err(invalid(id::RTPS_HE, "messageLength too small"));
-            }
+        if let Some(len) = message_length
+            && (len as usize) < 20 + 4 + body_len
+        {
+            return Err(invalid(id::RTPS_HE, "messageLength too small"));
         }
         Ok(HeaderExtension {
             message_length,

@@ -384,14 +384,14 @@ impl ReaderHistory {
             self.lost.add(u32::try_from(n).unwrap_or(u32::MAX));
         }
         *last = c.sequence_number;
-        if matches!(c.change, Change::Write(_)) {
-            if let Some(reason) = self.rejects(&c.instance) {
-                self.rejected.total_count += 1;
-                self.rejected.total_count_change += 1;
-                self.rejected.last_reason = Some(reason);
-                self.rejected.last_instance_handle = Some(c.instance);
-                return false;
-            }
+        if matches!(c.change, Change::Write(_))
+            && let Some(reason) = self.rejects(&c.instance)
+        {
+            self.rejected.total_count += 1;
+            self.rejected.total_count_change += 1;
+            self.rejected.last_reason = Some(reason);
+            self.rejected.last_instance_handle = Some(c.instance);
+            return false;
         }
         let inst = self
             .instances

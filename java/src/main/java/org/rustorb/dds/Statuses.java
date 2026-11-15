@@ -18,6 +18,7 @@ import org.omg.dds.core.event.*;
 import org.omg.dds.core.policy.DataRepresentation;
 import org.omg.dds.core.policy.Deadline;
 import org.omg.dds.core.policy.Durability;
+import org.omg.dds.core.policy.DurabilityService;
 import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.Partition;
@@ -66,6 +67,8 @@ final class Statuses {
                 return ResourceLimits.class;
             case 16:
                 return WriterDataLifecycle.class;
+            case 22:
+                return DurabilityService.class;
             case 23:
                 return DataRepresentation.class;
             default:

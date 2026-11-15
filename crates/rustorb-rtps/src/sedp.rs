@@ -33,8 +33,8 @@ use crate::error::DecodeError;
 use crate::parameter::{Parameter, ParameterList, SecurityParameters};
 use crate::pl::{PlBuilder, PlValues, decode_pl_payload, encode_pl_payload, pid};
 use crate::qos::{
-    DurabilityKind, Liveliness, QosPolicyId, Reliability, RxO, incompatible_policies,
-    partitions_match,
+    DurabilityKind, DurabilityService, Liveliness, QosPolicyId, Reliability, RxO,
+    incompatible_policies, partitions_match,
 };
 use crate::receiver::receive;
 use crate::reliable::{
@@ -83,6 +83,8 @@ pub struct EndpointData {
     pub reliability: Reliability,
     /// DURABILITY.
     pub durability: DurabilityKind,
+    /// DURABILITY_SERVICE (writers only), when announced.
+    pub durability_service: Option<DurabilityService>,
     /// DEADLINE period; infinite by default.
     pub deadline: Duration,
     /// LIVELINESS.
@@ -177,6 +179,7 @@ impl EndpointData {
             type_name: type_name.to_owned(),
             reliability,
             durability: DurabilityKind::Volatile,
+            durability_service: None,
             deadline: Duration::INFINITE,
             liveliness: Liveliness::default(),
             partitions: Vec::new(),
@@ -245,6 +248,9 @@ impl EndpointData {
         l.push(b.string(pid::TYPE_NAME, &self.type_name));
         l.push(self.reliability.to_parameter(&b));
         l.push(self.durability.to_parameter(&b));
+        if let Some(ds) = &self.durability_service {
+            l.push(ds.to_parameter(&b));
+        }
         if self.deadline != Duration::INFINITE {
             l.push(b.duration(pid::DEADLINE, self.deadline));
         }
@@ -359,6 +365,9 @@ impl EndpointData {
                 pid::TYPE_NAME => type_name = Some(v.string(p)?),
                 pid::RELIABILITY => d.reliability = Reliability::from_parameter(&v, p)?,
                 pid::DURABILITY => d.durability = DurabilityKind::from_parameter(&v, p)?,
+                pid::DURABILITY_SERVICE => {
+                    d.durability_service = DurabilityService::from_parameter(&v, p).ok()
+                }
                 pid::DEADLINE => d.deadline = v.duration(p)?,
                 pid::LIVELINESS => d.liveliness = Liveliness::from_parameter(&v, p)?,
                 pid::PARTITION => d.partitions = v.strings(p)?,
@@ -1214,11 +1223,12 @@ impl Sedp {
         if data.guid.prefix == self.prefix {
             return;
         }
-        if data.unicast_locators.is_empty() && data.multicast_locators.is_empty() {
-            if let Some((uc, mc)) = self.participants.get(&data.guid.prefix) {
-                data.unicast_locators = uc.clone();
-                data.multicast_locators = mc.clone();
-            }
+        if data.unicast_locators.is_empty()
+            && data.multicast_locators.is_empty()
+            && let Some((uc, mc)) = self.participants.get(&data.guid.prefix)
+        {
+            data.unicast_locators = uc.clone();
+            data.multicast_locators = mc.clone();
         }
         let guid = data.guid;
         let remotes = match kind {
@@ -1345,12 +1355,11 @@ impl Sedp {
 /// `PID_ENDPOINT_GUID` (9.6.3.2), or else from the in-line
 /// `PID_KEY_HASH`, which for a GUID key is the GUID itself (9.6.4.8).
 fn disposed_key(c: &Change) -> Option<Guid> {
-    if let Some(p) = &c.payload {
-        if let Ok((list, e)) = decode_pl_payload(&p.bytes) {
-            if let Some(g) = list.get(pid::ENDPOINT_GUID) {
-                return PlValues::new(e).guid(g).ok();
-            }
-        }
+    if let Some(p) = &c.payload
+        && let Ok((list, e)) = decode_pl_payload(&p.bytes)
+        && let Some(g) = list.get(pid::ENDPOINT_GUID)
+    {
+        return PlValues::new(e).guid(g).ok();
     }
     let hash = c.inline_qos.as_ref()?.get(pid::KEY_HASH)?;
     let b: [u8; 16] = hash.value.get(..16)?.try_into().ok()?;
@@ -1507,6 +1516,14 @@ mod tests {
         });
         d.related_entity_guid = Some(rguid(2));
         d.service_instance_name = Some("robot".into());
+        d.durability_service = Some(DurabilityService {
+            service_cleanup_delay: Duration::from_std(std::time::Duration::from_millis(1500)),
+            history_kind: 1,
+            history_depth: 5,
+            max_samples: 100,
+            max_instances: -1,
+            max_samples_per_instance: 20,
+        });
         for e in [Endianness::Big, Endianness::Little] {
             assert_eq!(
                 EndpointData::from_payload(&d.to_payload(e), false).unwrap(),

@@ -67,6 +67,15 @@ once, before there is a subscriber, then waits for one and for its
 acknowledgments. The subscriber creates its reader two seconds late and
 must still get all of them, in order.
 
+The `-transient` and `-persistent` cases (rustorb-dds#71) go from
+rustorb-dds only. Its publisher writes `RELIABLE` samples with a
+TRANSIENT writer and deletes the writer at once; its participant keeps
+them (DURABILITY_SERVICE KEEP_ALL). For `-persistent`, a PERSISTENT
+writer of a first participant writes them, that participant is
+deleted, and the PERSISTENT writer of a second one takes them up from
+its file. The subscriber creates a TRANSIENT reader (TRANSIENT_LOCAL for
+Fast DDS, see below) two seconds late and must get them all, in order.
+
 The `-filtered` cases (rustorb-dds#56) are like the reliable ones, but
 the subscriber reads a content filtered topic, `index > %0 AND message
 LIKE 'Hello%'` with half the count for `%0`, and must get exactly the
@@ -301,6 +310,12 @@ Found on the way:
   to KEEP_ALL too: that policy, KEEP_LAST 1 by default, bounds what it
   keeps for late joiners. `cyclonedds/hello.c` sets it. Fast DDS 2.11.2
   sends the writer's whole history.
+- TRANSIENT (rustorb-dds#71): Fast DDS 2.11.2 does not create a
+  TRANSIENT reader without its persistence plugin configured ("Cannot
+  create persistence service. Persistence GUID not specified"), so its
+  reader in the `-transient` and `-persistent` cases is TRANSIENT_LOCAL.
+  Cyclone DDS 0.10.4 takes the TRANSIENT reader, and the
+  `PID_DURABILITY_SERVICE` that rustorb-dds announces.
 - `dds_wait_for_acks` of Cyclone DDS 0.10.4 does not wait for a reader
   that has not yet answered a HEARTBEAT; the ACKNACK that rustorb-dds
   sends when it matches a writer (before any HEARTBEAT) does not count.

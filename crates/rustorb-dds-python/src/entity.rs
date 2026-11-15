@@ -88,6 +88,18 @@ fn get<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<'py, PyA
     Ok(d.get_item(key)?.filter(|v| !v.is_none()))
 }
 
+/// A HISTORY: the depth of KEEP_LAST, or "keep_all".
+fn history(d: &Bound<'_, PyDict>, key: &str) -> PyResult<History> {
+    Ok(match get(d, key)? {
+        None => History::default(),
+        Some(h) => match h.extract::<String>() {
+            Ok(s) if s == "keep_all" => History::KeepAll,
+            Ok(s) => return Err(PyValueError::new_err(format!("unknown history {s:?}"))),
+            Err(_) => History::KeepLast(h.extract()?),
+        },
+    })
+}
+
 fn common(d: &Bound<'_, PyDict>, reliable_default: bool) -> PyResult<Common> {
     let mut reliability = if reliable_default {
         Reliability::reliable()
@@ -107,14 +119,7 @@ fn common(d: &Bound<'_, PyDict>, reliable_default: bool) -> PyResult<Common> {
     if let Some(t) = get(d, "max_blocking_time")? {
         reliability.max_blocking_time = secs(t.extract()?)?;
     }
-    let history = match get(d, "history")? {
-        None => History::default(),
-        Some(h) => match h.extract::<String>() {
-            Ok(s) if s == "keep_all" => History::KeepAll,
-            Ok(s) => return Err(PyValueError::new_err(format!("unknown history {s:?}"))),
-            Err(_) => History::KeepLast(h.extract()?),
-        },
-    };
+    let history = history(d, "history")?;
     let durability = match get(d, "durability")?
         .map(|v| v.extract::<String>())
         .transpose()?
@@ -204,6 +209,21 @@ fn writer_qos(d: Option<&Bound<'_, PyDict>>) -> PyResult<DataWriterQos> {
     if let Some(v) = get(d, "autodispose_unregistered_instances")? {
         qos.writer_data_lifecycle.autodispose_unregistered_instances = v.extract()?;
     }
+    let limit = |k: &str| -> PyResult<Option<usize>> {
+        get(d, k)?.map(|v| v.extract::<usize>()).transpose()
+    };
+    qos.durability_service = rustorb_dds::DurabilityService {
+        service_cleanup_delay: get(d, "service_cleanup_delay")?
+            .map(|v| v.extract::<f64>().and_then(secs))
+            .transpose()?
+            .unwrap_or_default(),
+        history: history(d, "service_history")?,
+        resource_limits: rustorb_dds::ResourceLimits {
+            max_samples: limit("service_max_samples")?,
+            max_instances: limit("service_max_instances")?,
+            max_samples_per_instance: limit("service_max_samples_per_instance")?,
+        },
+    };
     Ok(qos)
 }
 

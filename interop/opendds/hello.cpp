@@ -3,7 +3,10 @@
 // (interop/fastdds/hello.cpp), without the content filtered topic.
 //
 //   hello pub <domain> <count> <interval_ms> [best_effort|reliable|transient_local [size]]
-//   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local [size]]
+//   hello sub <domain> <count> <timeout_s> [best_effort|reliable|transient_local|transient [size]]
+//
+// transient (subscriber only) is transient_local with a TRANSIENT
+// reader, for the samples of a writer that is gone.
 //
 // The -DCPSConfigFile argument (run.sh passes interop/opendds/rtps.ini)
 // may come anywhere. HELLO_XCDR2=1 makes the writer write XCDR2 instead
@@ -18,6 +21,7 @@ using namespace interop;
 static const char* MESSAGE = "Hello, world!";
 static bool reliable = false;
 static bool transient_local = false;
+static bool transient = false;
 static long size = -1;
 
 static std::string message(unsigned index)
@@ -91,8 +95,9 @@ static int subscribe(DDS::DomainParticipant_ptr pp, DDS::Topic_ptr topic, int co
     qos.reliability.kind =
         reliable ? DDS::RELIABLE_RELIABILITY_QOS : DDS::BEST_EFFORT_RELIABILITY_QOS;
     qos.history.kind = DDS::KEEP_ALL_HISTORY_QOS;
-    qos.durability.kind =
-        transient_local ? DDS::TRANSIENT_LOCAL_DURABILITY_QOS : DDS::VOLATILE_DURABILITY_QOS;
+    qos.durability.kind = transient         ? DDS::TRANSIENT_DURABILITY_QOS
+                          : transient_local ? DDS::TRANSIENT_LOCAL_DURABILITY_QOS
+                                            : DDS::VOLATILE_DURABILITY_QOS;
     set_representation(qos.representation.value, true, true);
     if (transient_local) {
         sleep_ms(2000);  // join late
@@ -143,12 +148,13 @@ int main(int argc, char** argv)
     if (argc < 5 || argc > 7) {
         std::fprintf(stderr,
                      "usage: %s pub|sub <domain> <count> <interval_ms|timeout_s> "
-                     "[best_effort|reliable|transient_local [size]]\n",
+                     "[best_effort|reliable|transient_local|transient [size]]\n",
                      argv[0]);
         return 2;
     }
     std::string mode = argc >= 6 ? argv[5] : "best_effort";
-    transient_local = mode == "transient_local";
+    transient = mode == "transient";
+    transient_local = transient || mode == "transient_local";
     reliable = transient_local || mode == "reliable";
     if (argc == 7) {
         size = std::atol(argv[6]);

@@ -27,6 +27,7 @@ import org.omg.dds.core.ServiceEnvironment;
 import org.omg.dds.core.policy.DataRepresentation;
 import org.omg.dds.core.policy.Deadline;
 import org.omg.dds.core.policy.Durability;
+import org.omg.dds.core.policy.DurabilityService;
 import org.omg.dds.core.policy.History;
 import org.omg.dds.core.policy.Liveliness;
 import org.omg.dds.core.policy.Partition;
@@ -253,7 +254,13 @@ final class Qos {
     static final long DATA_REPRESENTATION = 72;
     static final long DATA_REPRESENTATION_LEN = 80;
     static final long AUTODISPOSE = 88;
-    static final long WRITER_QOS_SIZE = 96;
+    static final long SERVICE_CLEANUP_DELAY = 92;
+    static final long SERVICE_HISTORY_KIND = 100;
+    static final long SERVICE_HISTORY_DEPTH = 104;
+    static final long SERVICE_MAX_SAMPLES = 108;
+    static final long SERVICE_MAX_INSTANCES = 112;
+    static final long SERVICE_MAX_SAMPLES_PER_INSTANCE = 116;
+    static final long WRITER_QOS_SIZE = 120;
     static final long READER_QOS_SIZE = 104;
 
     /** The endpoint policies of an rdds_writer_qos / rdds_reader_qos. */
@@ -338,6 +345,10 @@ final class Qos {
                     put(m, (QosPolicy.ForDataWriter) p);
                 }
                 put(m, new Policies.WriterDataLifecycleImpl(env, s.get(JAVA_BOOLEAN, AUTODISPOSE)));
+                put(m, new Policies.DurabilityServiceImpl(env, DurationImpl.get(s, SERVICE_CLEANUP_DELAY),
+                        History.Kind.values()[s.get(JAVA_INT, SERVICE_HISTORY_KIND)],
+                        s.get(JAVA_INT, SERVICE_HISTORY_DEPTH), s.get(JAVA_INT, SERVICE_MAX_SAMPLES),
+                        s.get(JAVA_INT, SERVICE_MAX_INSTANCES), s.get(JAVA_INT, SERVICE_MAX_SAMPLES_PER_INSTANCE)));
                 return new WriterQos(env, m);
             } catch (Throwable t) {
                 throw Library.rethrow(t);
@@ -376,12 +387,24 @@ final class Qos {
             }
             Qos.toNative(arena, s, this);
             s.set(JAVA_BOOLEAN, AUTODISPOSE, getWriterDataLifecycle().isAutDisposeUnregisteredInstances());
+            DurabilityService ds = getDurabilityService();
+            DurationImpl.put(s.asSlice(SERVICE_CLEANUP_DELAY, 8), DurationImpl.nanos(ds.getServiceCleanupDelay()));
+            s.set(JAVA_INT, SERVICE_HISTORY_KIND, ds.getHistoryKind().ordinal());
+            s.set(JAVA_INT, SERVICE_HISTORY_DEPTH, ds.getHistoryDepth());
+            s.set(JAVA_INT, SERVICE_MAX_SAMPLES, ds.getMaxSamples());
+            s.set(JAVA_INT, SERVICE_MAX_INSTANCES, ds.getMaxInstances());
+            s.set(JAVA_INT, SERVICE_MAX_SAMPLES_PER_INSTANCE, ds.getMaxSamplesPerInstance());
             return s;
         }
 
         @Override
         public Durability getDurability() {
             return get(Durability.class);
+        }
+
+        @Override
+        public DurabilityService getDurabilityService() {
+            return get(DurabilityService.class);
         }
 
         @Override

@@ -9,13 +9,13 @@ use std::time::Duration;
 use rustorb_dds::{
     ContentFilteredTopic, DataReader, DataReaderListener, DataReaderQos, DataWriter,
     DataWriterListener, DataWriterQos, DeadlineMissedStatus, DomainParticipant, DurabilityKind,
-    DynamicData, DynamicType, Guid, History, IncompatibleQosStatus, InconsistentTopicStatus,
-    InstanceHandle, InstanceState, InstanceStateMask, Liveliness, LivelinessChangedStatus,
-    LivelinessKind, LivelinessLostStatus, MatchedStatus, ParticipantConfig, Publisher,
-    PublisherQos, Reliability, ReliabilityKind, ResourceLimits, Sample, SampleLostStatus,
-    SampleRejectedReason, SampleRejectedStatus, SampleState, SampleStateMask, StateFilter,
-    StatusMask, Subscriber, SubscriberQos, Time, Topic, TypeConsistency, TypeConsistencyKind,
-    ViewState, ViewStateMask, data_representation,
+    DurabilityService, DynamicData, DynamicType, Guid, History, IncompatibleQosStatus,
+    InconsistentTopicStatus, InstanceHandle, InstanceState, InstanceStateMask, Liveliness,
+    LivelinessChangedStatus, LivelinessKind, LivelinessLostStatus, MatchedStatus,
+    ParticipantConfig, Publisher, PublisherQos, Reliability, ReliabilityKind, ResourceLimits,
+    Sample, SampleLostStatus, SampleRejectedReason, SampleRejectedStatus, SampleState,
+    SampleStateMask, StateFilter, StatusMask, Subscriber, SubscriberQos, Time, Topic,
+    TypeConsistency, TypeConsistencyKind, ViewState, ViewStateMask, data_representation,
 };
 
 use crate::condition::RddsCondition;
@@ -176,6 +176,13 @@ pub struct RddsWriterQos {
     pub data_representation: *const i16,
     pub data_representation_len: usize,
     pub autodispose_unregistered_instances: bool,
+    /// DURABILITY_SERVICE, of a TRANSIENT or PERSISTENT writer.
+    pub service_cleanup_delay: RddsDuration,
+    pub service_history_kind: i32,
+    pub service_history_depth: i32,
+    pub service_max_samples: i32,
+    pub service_max_instances: i32,
+    pub service_max_samples_per_instance: i32,
 }
 
 /// `rdds_reader_qos`.
@@ -257,6 +264,15 @@ fn unlimited(v: Option<usize>) -> i32 {
     v.map_or(LENGTH_UNLIMITED, |v| v.min(i32::MAX as usize) as i32)
 }
 
+fn history(kind: i32, depth: i32) -> Res<History> {
+    match kind {
+        0 if depth > 0 => Ok(History::KeepLast(depth as usize)),
+        0 => Err(bad("a KEEP_LAST history of depth below 1")),
+        1 => Ok(History::KeepAll),
+        k => Err(bad(format!("unknown history kind {k}"))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn common(
     reliability_kind: i32,
@@ -280,12 +296,7 @@ unsafe fn common(
         kind,
         max_blocking_time: max_blocking_time.finite()?,
     };
-    let history = match history_kind {
-        0 if history_depth > 0 => History::KeepLast(history_depth as usize),
-        0 => return Err(bad("a KEEP_LAST history of depth below 1")),
-        1 => History::KeepAll,
-        k => return Err(bad(format!("unknown history kind {k}"))),
-    };
+    let history = history(history_kind, history_depth)?;
     let durability = match durability_kind {
         0 => DurabilityKind::Volatile,
         1 => DurabilityKind::TransientLocal,
@@ -350,6 +361,15 @@ pub(crate) unsafe fn writer_qos(q: *const RddsWriterQos) -> Res<DataWriterQos> {
     };
     qos.writer_data_lifecycle.autodispose_unregistered_instances =
         q.autodispose_unregistered_instances;
+    qos.durability_service = DurabilityService {
+        service_cleanup_delay: q.service_cleanup_delay.finite()?,
+        history: history(q.service_history_kind, q.service_history_depth)?,
+        resource_limits: ResourceLimits {
+            max_samples: limit(q.service_max_samples)?,
+            max_instances: limit(q.service_max_instances)?,
+            max_samples_per_instance: limit(q.service_max_samples_per_instance)?,
+        },
+    };
     Ok(qos)
 }
 
@@ -448,6 +468,8 @@ pub unsafe extern "C" fn rdds_writer_qos_default(out: *mut RddsWriterQos) -> Sta
     guard(|| {
         let d = DataWriterQos::default();
         let (history_kind, history_depth) = history_parts(d.history);
+        let ds = d.durability_service;
+        let (service_history_kind, service_history_depth) = history_parts(ds.history);
         let q = RddsWriterQos {
             reliability_kind: reliability_kind(d.reliability.kind),
             max_blocking_time: RddsDuration::of(Some(d.reliability.max_blocking_time)),
@@ -467,6 +489,14 @@ pub unsafe extern "C" fn rdds_writer_qos_default(out: *mut RddsWriterQos) -> Sta
             autodispose_unregistered_instances: d
                 .writer_data_lifecycle
                 .autodispose_unregistered_instances,
+            service_cleanup_delay: RddsDuration::of(Some(ds.service_cleanup_delay)),
+            service_history_kind,
+            service_history_depth,
+            service_max_samples: unlimited(ds.resource_limits.max_samples),
+            service_max_instances: unlimited(ds.resource_limits.max_instances),
+            service_max_samples_per_instance: unlimited(
+                ds.resource_limits.max_samples_per_instance,
+            ),
         };
         unsafe { set(out, q) }
     })

@@ -237,6 +237,34 @@ class EntitiesTest {
     }
 
     @Test
+    void transientSamplesOutliveTheWriter() throws Exception {
+        DataWriterQos defaults = dp.createPublisher().getDefaultDataWriterQos();
+        assertEquals(1, defaults.getDurabilityService().getHistoryDepth());
+        assertEquals(-1, defaults.getDurabilityService().getMaxSamples());
+        Topic<Greeting> topic = dp.createTopic("kept", Greeting.class);
+        Publisher pub = dp.createPublisher();
+        DataWriter<Greeting> writer = pub.createDataWriter(topic, reliableWriter(pub).withPolicies(
+                policy.Durability().withTransient(), policy.History().withKeepLast(3),
+                policy.DurabilityService().withHistoryDepth(2)));
+        for (int i = 1; i <= 3; i++) {
+            writer.write(new Greeting(i, "kept " + i));
+        }
+        writer.close();
+        Subscriber sub = dp.createSubscriber();
+        DataReader<Greeting> reader = sub.createDataReader(topic,
+                reliableReader(sub).withPolicy(policy.Durability().withTransient()));
+        List<Integer> got = new ArrayList<>();
+        long end = System.nanoTime() + 10_000_000_000L;
+        while (got.size() < 2 && System.nanoTime() < end) {
+            for (Sample<Greeting> s : takeAll(reader)) {
+                got.add(s.getData().index);
+            }
+            Thread.sleep(20);
+        }
+        assertEquals(List.of(2, 3), got);
+    }
+
+    @Test
     void writeAndTake() throws Exception {
         Topic<Greeting> topic = dp.createTopic("greetings", Greeting.class);
         assertEquals("greetings", topic.getName());
