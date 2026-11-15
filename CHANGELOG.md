@@ -8,6 +8,15 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security: the builtin logging plugin, DDS:Logging:DDS_LogTopic (DDS
+  Security 1.2, 9.6 and 10.6, #73). `SecurityConfig::logging`
+  (`security_log::LogOptions`), or the properties
+  `dds.sec.log.builtin.DDS_LogTopic.logging_level`, `.log_file` and
+  `.distribute`. It logs authentication and access control events to a
+  file and/or publishes them on `DDS:Security:LogTopicV2`
+  (`BuiltinLoggingTypeV2`). That topic gets the builtin rule of 10.6: anyone
+  may write, reading needs a grant. See [docs/security.md](docs/security.md).
+
 - DDS Security: encrypted private keys and CRLs (#73). `SecurityConfig`
   has two new fields, `password` and `crl`.
   - `dds.sec.auth.password` (`SecurityConfig::password`) decrypts the

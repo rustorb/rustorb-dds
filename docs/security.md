@@ -25,6 +25,7 @@ config.security = Some(SecurityConfig {
     permissions: "file:/etc/dds/permissions.p7s".into(),
     password: None,
     crl: None,
+    logging: None,
 });
 let participant = DomainParticipant::with_config(config)?;
 ```
@@ -47,9 +48,38 @@ let participant = DomainParticipant::with_config(config)?;
   - 自分の証明書が失効していれば参加者を作れない（validate_local_identity）。handshake の相手の証明書が失効していれば、認証しない（validate_remote_identity、10.3.3）。
   - CRL は参加者を作るときに一度だけ読む。
 
+### ログ（DDS:Logging:DDS_LogTopic）
+
+#73 で足した、組み込みの logging plugin（9.6、10.6）。`SecurityConfig::logging` に `security_log::LogOptions` を入れるか、次の PROPERTY で設定する。名前は `dds.sec.<plugin>.builtin.<plugin 名>.` の形にした（仕様は名前を決めていない）。
+
+- `dds.sec.log.builtin.DDS_LogTopic.logging_level`: この重さ以上を記録する。10.6 の `LoggingLevel` の名前（`ERROR_LEVEL`、`ERROR` でもよく、大文字小文字は問わない）か、番号（0 が EMERGENCY、7 が DEBUG）。既定は `ERROR_LEVEL`。
+- `dds.sec.log.builtin.DDS_LogTopic.log_file`: 追記するファイル。
+- `dds.sec.log.builtin.DDS_LogTopic.distribute`: `true` なら、トピック `DDS:Security:LogTopicV2`（型 `BuiltinLoggingTypeV2`、`rustorb_dds::security_log`）に publish する。
+
+どれか一つでもあればログが有効になる。オプションは参加者を作るときに決まり、後から変えられない（9.6.2.1）。
+
+- 記録する出来事と重さ:
+  - 自分の証明書や permissions の検証の失敗（CRITICAL）。参加者を作れなかったときで、ファイルにだけ書く。
+  - 参加者として domain に入ったこと（INFORMATIONAL）。
+  - handshake の失敗（ERROR）と成功（INFORMATIONAL）。
+  - 相手の permissions が domain に入ることを許さない（ERROR）。
+  - 自分の writer・reader が permissions で拒まれた（ERROR）。
+  - 相手の writer・reader が permissions で拒まれた（WARNING）。
+- `structured_data` の `"DDS"` には `guid`、`domain_id`、`plugin_class`、`plugin_method` を入れる（表 47）。`msgid` は `<plugin_class>.<plugin_method>`、`facility` は 10。`hostname`（`HOSTNAME` か /etc/hostname）、`appname`（実行ファイル名）、`procid`（プロセス ID）も入れ、`hostip` は空にする。
+- ファイルには 1 行に 1 件、`<RFC 3339 の UTC 時刻> <重さ> <plugin_class>.<plugin_method> guid=<GUID> domain_id=<id>: <本文>` の形で書く。
+- トピックには 10.6 の組み込みの規則を、governance より先に当てる。
+  - 書くのは domain に入れる参加者なら誰でもよい。
+  - 読むには permissions の subscribe の grant が要る。
+  - data は ENCRYPT、metadata は SIGN、discovery は守らない。
+  - 1.1 までの名前 `DDS:Security:LogTopic` にも同じ規則を当てるが、publish するのは V2 だけ。
+- writer は RELIABLE、KEEP_LAST 64 の VOLATILE。reader が match する前のメッセージは届かない。
+- 型の `structured_data` は仕様では `map<string, NameValuePairSeq>`。rustorb-idl に map がないので、Rust の型では `StructuredDataEntry`（`key` と `value`）の列にしている。直列化は同じで、XTypes の型の記述（TypeObject）は map にしてある。
+- `set_listener`（LoggerListener）はない。同じ参加者で読むときも grant が要る。
+- `RUSTORB_DDS_SECURITY_LOG=1` は今までどおり、同じ出来事を stderr に出す。
+
 ### ほかの言語から
 
-どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`）を入れる。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
+どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
 
 - C ABI: `rdds_participant_qos` の `property`（`rdds_property` の配列）と `property_len`。
 - C++: `dds::core::policy::Property`（`set(name, value)`）を `DomainParticipantQos` に入れる。
@@ -70,12 +100,13 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
 - `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
 ## 未対応
 
 - secure SPDP の `identity_status_token`（読み飛ばすだけで、送らない）。
-- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）、ログ（DDS:Logging）、data tagging。
+- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）、data tagging。
+- ログの LoggerListener、レガシーの `DDS:Security:LogTopic` への publish、他の言語でのログのトピックの型。
 - 鍵の更新（key revision）。

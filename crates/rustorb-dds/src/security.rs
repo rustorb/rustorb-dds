@@ -50,6 +50,7 @@ use rustorb_rtps::{
 
 use crate::error::{Error, Result};
 use crate::participant::VENDOR_ID;
+use crate::security_log::{LogOptions, Logger, LoggingLevel, Plugin};
 
 /// Where the participant's security documents are (the properties of DDS
 /// Security 1.2, 9.3.1.3 and 9.4.1.3): each is a URI, `file:` followed
@@ -79,6 +80,9 @@ pub struct SecurityConfig {
     /// DER). A revoked identity certificate, this participant's or a
     /// peer's, fails authentication.
     pub crl: Option<String>,
+    /// The builtin logging plugin (DDS:Logging:DDS_LogTopic): `None`
+    /// logs nothing. See [`crate::security_log`].
+    pub logging: Option<LogOptions>,
 }
 
 impl SecurityConfig {
@@ -101,10 +105,34 @@ impl SecurityConfig {
 
     /// The configuration given by the standard property names (as a
     /// DomainParticipantQos PROPERTY would); `None` if one is missing.
+    /// The options of the logging plugin are left out when one of them
+    /// is not understood: [`Self::try_from_properties`] says which.
     pub fn from_properties<'a>(
         props: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Option<Self> {
         let props: HashMap<&str, &str> = props.into_iter().collect();
+        Self::make(&props, LogOptions::from_properties(&props).ok().flatten())
+    }
+
+    /// As [`Self::from_properties`], with an error for a property that is
+    /// missing or not understood.
+    pub fn try_from_properties<'a>(
+        props: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> std::result::Result<Self, String> {
+        let props: HashMap<&str, &str> = props.into_iter().collect();
+        let missing: Vec<&str> = Self::PROPERTIES
+            .iter()
+            .copied()
+            .filter(|n| !props.contains_key(n))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("missing properties: {}", missing.join(", ")));
+        }
+        let logging = LogOptions::from_properties(&props)?;
+        Ok(Self::make(&props, logging).expect("none missing"))
+    }
+
+    fn make(props: &HashMap<&str, &str>, logging: Option<LogOptions>) -> Option<Self> {
         let get = |n: &str| props.get(n).map(|v| v.to_string());
         Some(SecurityConfig {
             identity_ca: get("dds.sec.auth.identity_ca")?,
@@ -115,6 +143,7 @@ impl SecurityConfig {
             permissions: get("dds.sec.access.permissions")?,
             password: get("dds.sec.auth.password"),
             crl: get(Self::CRL),
+            logging,
         })
     }
 }
@@ -267,6 +296,7 @@ pub(crate) struct Security {
     participant: Option<Encoder>,
     writer_config: WriterConfig,
     reader_config: ReaderConfig,
+    logger: Option<Arc<Logger>>,
     state: Mutex<State>,
 }
 
@@ -348,6 +378,40 @@ impl Security {
         writer_config: WriterConfig,
         reader_config: ReaderConfig,
     ) -> Result<Self> {
+        let logger = match &config.logging {
+            Some(o) => Some(Arc::new(Logger::new(o.clone(), domain_id).map_err(
+                |e| Error::Security(format!("logging: {:?}: {e}", o.log_file)),
+            )?)),
+            None => None,
+        };
+        let r = Self::build(
+            config,
+            domain_id,
+            candidate,
+            writer_config,
+            reader_config,
+            logger.clone(),
+        );
+        if let (Err(e), Some(l)) = (&r, &logger) {
+            // validate_local_identity or validate_local_permissions.
+            l.log(
+                LoggingLevel::CriticalLevel,
+                Plugin::Authentication,
+                "validate_local_identity",
+                &e.to_string(),
+            );
+        }
+        r
+    }
+
+    fn build(
+        config: &SecurityConfig,
+        domain_id: u32,
+        candidate: GuidPrefix,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        logger: Option<Arc<Logger>>,
+    ) -> Result<Self> {
         let identity = Identity::from_uris_with(
             &config.identity_ca,
             &config.identity_certificate,
@@ -385,6 +449,15 @@ impl Security {
         guid[..12].copy_from_slice(&candidate.0);
         guid[12..].copy_from_slice(&EntityId::PARTICIPANT.to_bytes());
         let prefix = GuidPrefix(identity.adjusted_prefix(&guid));
+        if let Some(l) = &logger {
+            l.set_guid(&Guid::new(prefix, EntityId::PARTICIPANT).to_bytes());
+            l.log(
+                LoggingLevel::InformationalLevel,
+                Plugin::Authentication,
+                "validate_local_identity",
+                &format!("{subject} joins domain {domain_id}"),
+            );
+        }
         let participant = rule
             .rtps_protection_kind
             .is_protected()
@@ -402,6 +475,7 @@ impl Security {
             participant,
             writer_config,
             reader_config,
+            logger,
             state: Mutex::new(State {
                 pdata: Vec::new(),
                 peers: HashMap::new(),
@@ -424,6 +498,20 @@ impl Security {
     /// The GUID prefix of the participant.
     pub(crate) fn prefix(&self) -> GuidPrefix {
         self.prefix
+    }
+
+    /// The logging plugin, if it is on.
+    pub(crate) fn logger(&self) -> Option<&Arc<Logger>> {
+        self.logger.as_ref()
+    }
+
+    /// Reports a security event to the logging plugin, and to standard
+    /// error when `RUSTORB_DDS_SECURITY_LOG` is set.
+    fn log(&self, level: LoggingLevel, plugin: Plugin, method: &str, message: &str) {
+        stderr_log(message);
+        if let Some(l) = &self.logger {
+            l.log(level, plugin, method, message);
+        }
     }
 
     /// Adds the tokens, the security info and the builtin endpoints to
@@ -742,7 +830,12 @@ impl Security {
                         let m = self.stateless(st, src, m.message_identity, reply);
                         self.send_handshake(st, src, m, now);
                     }
-                    Err(e) => log(&format!("handshake request from {src:?} rejected: {e}")),
+                    Err(e) => self.log(
+                        LoggingLevel::ErrorLevel,
+                        Plugin::Authentication,
+                        "begin_handshake_reply",
+                        &format!("handshake request from {} rejected: {e}", prefix_text(&src)),
+                    ),
                 }
             }
             auth::REPLY_CLASS => {
@@ -769,7 +862,12 @@ impl Security {
                         peer.last_sent = Some((m, now + Duration::from_secs(3600), MAX_RESEND));
                         self.authenticated(st, src, a, now);
                     }
-                    Err(e) => log(&format!("handshake reply from {src:?} rejected: {e}")),
+                    Err(e) => self.log(
+                        LoggingLevel::ErrorLevel,
+                        Plugin::Authentication,
+                        "process_handshake",
+                        &format!("handshake reply from {} rejected: {e}", prefix_text(&src)),
+                    ),
                 }
             }
             auth::FINAL_CLASS => {
@@ -784,7 +882,12 @@ impl Security {
                         peer.last_sent = None;
                         self.authenticated(st, src, a, now);
                     }
-                    Err(e) => log(&format!("handshake final from {src:?} rejected: {e}")),
+                    Err(e) => self.log(
+                        LoggingLevel::ErrorLevel,
+                        Plugin::Authentication,
+                        "process_handshake",
+                        &format!("handshake final from {} rejected: {e}", prefix_text(&src)),
+                    ),
                 }
             }
             _ => {}
@@ -798,11 +901,26 @@ impl Security {
         let grant = match self.remote_grant(&a) {
             Ok(g) => g,
             Err(e) => {
-                log(&format!("participant {src:?} not allowed: {e}"));
+                self.log(
+                    LoggingLevel::ErrorLevel,
+                    Plugin::AccessControl,
+                    "check_remote_participant",
+                    &format!("participant {} not allowed: {e}", prefix_text(&src)),
+                );
                 st.peers.remove(&src);
                 return;
             }
         };
+        self.log(
+            LoggingLevel::InformationalLevel,
+            Plugin::Authentication,
+            "process_handshake",
+            &format!(
+                "participant {} authenticated as {}",
+                prefix_text(&src),
+                a.peer_cert.subject()
+            ),
+        );
         let kx = KeyMaterial::key_exchange(&a.challenge1, &a.challenge2, &a.shared_secret);
         let Some(peer) = st.peers.get_mut(&src) else {
             return;
@@ -998,10 +1116,21 @@ impl Security {
                 .grant
                 .allows(self.domain_id, action, topic, &data.partitions)
         {
-            return Err(Error::Security(format!(
+            let e = format!(
                 "not allowed to {} {topic}",
                 if writer { "publish" } else { "subscribe to" }
-            )));
+            );
+            self.log(
+                LoggingLevel::ErrorLevel,
+                Plugin::AccessControl,
+                if writer {
+                    "check_create_datawriter"
+                } else {
+                    "check_create_datareader"
+                },
+                &e,
+            );
+            return Err(Error::Security(e));
         }
         let m = rule.endpoint_masks(writer);
         data.security =
@@ -1159,13 +1288,33 @@ impl Security {
         match st.peers.get(&remote.guid.prefix) {
             Some(p) => match &p.grant {
                 Some(g) => {
-                    !controlled
+                    let ok = !controlled
                         || g.allows(
                             self.domain_id,
                             action,
                             &remote.topic_name,
                             &remote.partitions,
-                        )
+                        );
+                    if !ok {
+                        drop(st);
+                        self.log(
+                            LoggingLevel::WarningLevel,
+                            Plugin::AccessControl,
+                            if writer {
+                                "check_remote_datawriter"
+                            } else {
+                                "check_remote_datareader"
+                            },
+                            &format!(
+                                "{} of {} may not {} {}",
+                                if writer { "writer" } else { "reader" },
+                                prefix_text(&remote.guid.prefix),
+                                if writer { "publish" } else { "subscribe to" },
+                                remote.topic_name
+                            ),
+                        );
+                    }
+                    ok
                 }
                 None => false,
             },
@@ -1490,9 +1639,16 @@ fn stateless_datagram(
     })
 }
 
-/// Reports a security event. There is no logging facility: it goes to
-/// standard error when `RUSTORB_DDS_SECURITY_LOG` is set.
-fn log(s: &str) {
+/// Reports a security event to standard error when
+/// `RUSTORB_DDS_SECURITY_LOG` is set.
+fn prefix_text(p: &GuidPrefix) -> String {
+    let mut g = [0u8; 16];
+    g[..12].copy_from_slice(&p.0);
+    g[12..].copy_from_slice(&EntityId::PARTICIPANT.to_bytes());
+    crate::security_log::guid_text(&g)
+}
+
+fn stderr_log(s: &str) {
     if std::env::var_os("RUSTORB_DDS_SECURITY_LOG").is_some() {
         eprintln!("rustorb-dds security: {s}");
     }

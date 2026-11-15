@@ -166,9 +166,33 @@ pub struct DomainRule {
     pub topic_rules: Vec<TopicRule>,
 }
 
+/// The topics of the builtin logging plugin: the one of DDS Security 1.2
+/// and the one of 1.1 and before (10.6).
+pub const LOG_TOPICS: [&str; 2] = ["DDS:Security:LogTopicV2", "DDS:Security:LogTopic"];
+
+/// The rule of the logging topics (10.6): any participant that may join
+/// writes them, reading them takes a grant, the data is encrypted and the
+/// metadata signed, and discovery is not protected.
+pub fn log_topic_rule() -> &'static TopicRule {
+    static RULE: std::sync::OnceLock<TopicRule> = std::sync::OnceLock::new();
+    RULE.get_or_init(|| TopicRule {
+        topic_expression: "DDS:Security:LogTopic".into(),
+        enable_discovery_protection: false,
+        enable_liveliness_protection: false,
+        enable_read_access_control: true,
+        enable_write_access_control: false,
+        metadata_protection_kind: ProtectionKind::Sign,
+        data_protection_kind: ProtectionKind::Encrypt,
+    })
+}
+
 impl DomainRule {
-    /// The first topic rule of `topic`.
+    /// The first topic rule of `topic`. The topics of the builtin logging
+    /// plugin have their own rule, whatever the governance says (10.6).
     pub fn topic_rule(&self, topic: &str) -> Result<&TopicRule, Error> {
+        if LOG_TOPICS.contains(&topic) {
+            return Ok(log_topic_rule());
+        }
         self.topic_rules
             .iter()
             .find(|r| fnmatch(&r.topic_expression, topic))

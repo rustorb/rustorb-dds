@@ -87,6 +87,8 @@ mod qos;
 pub mod rpc;
 #[cfg(feature = "security")]
 mod security;
+#[cfg(feature = "security")]
+pub mod security_log;
 mod status;
 mod subscriber;
 #[cfg(test)]

@@ -11,7 +11,7 @@
       <allow_rule>
         <domains><id_range><min>0</min><max>230</max></id_range></domains>
         <publish><topics><topic>Square*</topic></topics></publish>
-        <subscribe><topics><topic>Square*</topic></topics></subscribe>
+        <subscribe><topics><topic>Square*</topic><topic>DDS:Security:LogTopic*</topic></topics></subscribe>
       </allow_rule>
       <deny_rule>
         <domains><id>231</id></domains>
