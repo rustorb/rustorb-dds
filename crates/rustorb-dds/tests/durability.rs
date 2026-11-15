@@ -140,7 +140,7 @@ fn disposed_instances_go_after_the_cleanup_delay() {
     let b = participant(85);
     let topic = a.create_topic::<Shape>("cleanup").unwrap();
     let mut qos = writer_qos(DurabilityKind::Transient);
-    qos.durability_service.service_cleanup_delay = Duration::from_millis(800);
+    qos.durability_service.service_cleanup_delay = Duration::from_secs(2);
     qos.durability_service.resource_limits = ResourceLimits {
         max_instances: Some(2),
         ..ResourceLimits::default()
@@ -156,8 +156,9 @@ fn disposed_instances_go_after_the_cleanup_delay() {
     writer.dispose(&shape(3, 0)).unwrap();
     drop(writer);
     // Instance 1, changed longest ago, is beyond max_instances; disposed
-    // instance 3 stays for the cleanup delay.
-    let early = reader(&b, "cleanup", DurabilityKind::Transient);
+    // instance 3 stays for the cleanup delay. A reader of the same
+    // participant gets them at once, without discovery.
+    let early = reader(&a, "cleanup", DurabilityKind::Transient);
     let (got, disposed) = take(&early, 2, WAIT);
     let deadline = Instant::now() + Duration::from_millis(300);
     let mut disposed = disposed;
@@ -166,7 +167,7 @@ fn disposed_instances_go_after_the_cleanup_delay() {
     }
     assert_eq!(got, vec![(2, 1), (3, 1)]);
     assert_eq!(disposed, 1);
-    std::thread::sleep(Duration::from_millis(1000));
+    std::thread::sleep(Duration::from_millis(2500));
     let late = reader(&b, "cleanup", DurabilityKind::Transient);
     assert_eq!(take(&late, 2, Duration::from_secs(2)), (vec![(2, 1)], 0));
 }
