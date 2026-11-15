@@ -87,7 +87,18 @@ impl Publisher {
         topic: &Topic<T>,
         qos: DataWriterQos,
     ) -> Result<DataWriter<T>> {
-        self.create(topic, qos, None)
+        self.create(topic, qos, None, |_| {})
+    }
+
+    /// Creates a writer whose announcement `f` changes before it is
+    /// matched (as with the topic aliases of DDS-RPC).
+    pub(crate) fn create_datawriter_with<T>(
+        &self,
+        topic: &Topic<T>,
+        qos: DataWriterQos,
+        f: impl FnOnce(&mut EndpointData),
+    ) -> Result<DataWriter<T>> {
+        self.create(topic, qos, None, f)
     }
 
     /// Creates a writer for `topic` with a listener for the statuses in
@@ -102,7 +113,7 @@ impl Publisher {
     ) -> Result<DataWriter<T>> {
         let encoding = encoding_of(&qos)?;
         let l = writer_listener(encoding, topic.samples.clone(), listener);
-        self.create(topic, qos, Some((l, mask)))
+        self.create(topic, qos, Some((l, mask)), |_| {})
     }
 
     fn create<T>(
@@ -110,6 +121,7 @@ impl Publisher {
         topic: &Topic<T>,
         qos: DataWriterQos,
         listener: Option<(WriterListener, StatusMask)>,
+        f: impl FnOnce(&mut EndpointData),
     ) -> Result<DataWriter<T>> {
         let keyed = topic.samples.keyed();
         let kind = if keyed {
@@ -132,6 +144,7 @@ impl Publisher {
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
         data.partitions = self.entity.qos.partition.clone();
+        f(&mut data);
         self.shared.add_writer(
             data,
             qos,
@@ -231,7 +244,7 @@ impl<T> DataWriter<T> {
         let sequence_number = self.shared.write(
             self.guid,
             self.samples.instance_of(sample)?,
-            WriteOp::Value(payload, params.related_sample_identity),
+            WriteOp::Value(payload, params.related_sample_identity, params.directed_to),
             params.source_timestamp.unwrap_or_else(Time::now),
         )?;
         Ok(SampleIdentity {
@@ -527,4 +540,9 @@ pub struct WriteParams {
     /// (`PID_RELATED_SAMPLE_IDENTITY`, DDS-RPC 1.0, 7.8.2), which the
     /// readers find in [`SampleInfo::related_sample_identity`](crate::SampleInfo::related_sample_identity).
     pub related_sample_identity: Option<SampleIdentity>,
+    /// The one matched reader to send the sample to; the others are told
+    /// it is not for them (a GAP, as for a sample a writer filters out,
+    /// DDSI-RTPS 2.5, 8.7.3.4). A [`Replier`](crate::rpc::Replier) sends
+    /// a reply so to the requester that asked. `None` sends it to all.
+    pub directed_to: Option<Guid>,
 }

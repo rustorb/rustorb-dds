@@ -638,7 +638,8 @@ pub(crate) struct WriterInstance {
 pub(crate) enum WriteOp {
     /// `write`: a value payload, and the sample it answers (sent in-line
     /// as `PID_RELATED_SAMPLE_IDENTITY`).
-    Value(Vec<u8>, Option<SampleIdentity>),
+    /// The third is the only reader to send it to, if any.
+    Value(Vec<u8>, Option<SampleIdentity>, Option<Guid>),
     /// `dispose` and/or `unregister_instance`.
     Lifecycle { dispose: bool, unregister: bool },
 }
@@ -811,7 +812,7 @@ impl WriterState {
         self.restoring = true;
         for r in records {
             let op = match r.value {
-                Some(v) => WriteOp::Value(v, None),
+                Some(v) => WriteOp::Value(v, None, None),
                 None => WriteOp::Lifecycle {
                     dispose: r.dispose,
                     unregister: r.unregister,
@@ -984,7 +985,7 @@ impl WriterState {
         let restoring = self.restoring;
         let record = self.store.as_mut().map(|store| {
             let (value, dispose) = match &op {
-                WriteOp::Value(v, _) => (Some(v.clone()), false),
+                WriteOp::Value(v, ..) => (Some(v.clone()), false),
                 WriteOp::Lifecycle { dispose, .. } => (None, *dispose),
             };
             let r = Record {
@@ -1014,8 +1015,10 @@ impl WriterState {
         if self.keyed {
             q.push(Parameter::new(pid::KEY_HASH, h.0));
         }
+        let mut directed = None;
         let (payload, change) = match op {
-            WriteOp::Value(v, related) => {
+            WriteOp::Value(v, related, to) => {
+                directed = to;
                 if self.keyed {
                     let inst = self.instances.get_mut(&h).expect("registered above");
                     if inst.key.is_none() {
@@ -1094,6 +1097,9 @@ impl WriterState {
         let sn = self
             .rtps
             .add_change_at(inline_qos, payload, Some(timestamp));
+        if let Some(r) = directed {
+            self.rtps.direct(sn, r);
+        }
         self.change_instance.insert(sn, h);
         if let Some(r) = record {
             self.persisted.insert(sn, r);
@@ -1759,7 +1765,12 @@ impl Shared {
                         if w.transient_local()
                             && r.data.durability >= DurabilityKind::TransientLocal
                         {
-                            let kept: Vec<Change> = w.rtps.changes().cloned().collect();
+                            let kept: Vec<Change> = w
+                                .rtps
+                                .changes()
+                                .filter(|c| w.rtps.is_for(c.sequence_number, rg))
+                                .cloned()
+                                .collect();
                             for c in kept {
                                 if let Some(c) = r.incoming(c) {
                                     k |= r.accept(c);
@@ -1839,7 +1850,12 @@ impl Shared {
                             inner.pending.push((*wg, StatusMask::PUBLICATION_MATCHED));
                         }
                         if w.transient_local() && qos.durability >= DurabilityKind::TransientLocal {
-                            kept.extend(w.rtps.changes().cloned());
+                            kept.extend(
+                                w.rtps
+                                    .changes()
+                                    .filter(|c| w.rtps.is_for(c.sequence_number, &guid))
+                                    .cloned(),
+                            );
                         }
                     }
                     Match::Incompatible(policies) => {
@@ -2021,9 +2037,9 @@ impl Shared {
         timestamp: Time,
     ) -> Result<SequenceNumber> {
         let out;
-        let related = match &op {
-            WriteOp::Value(_, r) => *r,
-            WriteOp::Lifecycle { .. } => None,
+        let (related, directed) = match &op {
+            WriteOp::Value(_, r, d) => (*r, *d),
+            WriteOp::Lifecycle { .. } => (None, None),
         };
         let sn;
         {
@@ -2075,7 +2091,7 @@ impl Shared {
             let w = inner.writers.get_mut(&writer).expect("checked above");
             let matched: Vec<Guid> = w.matched.iter().copied().collect();
             for r in matched {
-                if r.prefix != self.prefix {
+                if r.prefix != self.prefix || directed.is_some_and(|d| d != r) {
                     continue;
                 }
                 if let Some(st) = inner.readers.get_mut(&r) {
@@ -2121,6 +2137,16 @@ impl Shared {
             .or_else(|| g.sedp.remote_writer(guid))
             .or_else(|| g.sedp.remote_reader(guid))
             .cloned()
+    }
+
+    /// The sequence number of the last change of local writer `writer`
+    /// (0 if none): the next is one more.
+    pub(crate) fn last_sequence_number(&self, writer: &Guid) -> Result<SequenceNumber> {
+        self.lock_any()
+            .writers
+            .get(writer)
+            .map(|w| w.rtps.last_sn())
+            .ok_or(Error::AlreadyDeleted)
     }
 
     /// Whether participant `prefix` has acknowledged the latest SEDP

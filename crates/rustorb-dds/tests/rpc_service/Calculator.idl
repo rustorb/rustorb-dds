@@ -1,0 +1,20 @@
+// DDS services (DDS-RPC 1.0): an interface and one derived from it.
+module Calc {
+    exception TooBig {
+        long limit;
+    };
+
+    @DDSService
+    interface Adder {
+        long add(in long a, in long b) raises (TooBig);
+    };
+
+    @DDSService
+    interface Calculator : Adder {
+        double divide(in double a, in double b, out double remainder);
+        void clear(inout string log);
+        oneway void note(in string text);
+        attribute string name;
+        readonly attribute unsigned long calls;
+    };
+};
