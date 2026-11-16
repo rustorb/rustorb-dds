@@ -143,6 +143,7 @@ impl Publisher {
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
+        data.data_tags = qos.data_tags.clone();
         data.partitions = self.entity.qos.partition.clone();
         f(&mut data);
         self.shared.add_writer(

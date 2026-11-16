@@ -149,6 +149,7 @@ impl Subscriber {
         data.deadline = duration_to_rtps(qos.deadline);
         data.liveliness = qos.liveliness.to_rtps();
         data.user_data = qos.user_data.clone();
+        data.data_tags = qos.data_tags.clone();
         data.partitions = self.entity.qos.partition.clone();
         let filter = cft.map(|c| {
             let (filter, property) = c.reader_filter();

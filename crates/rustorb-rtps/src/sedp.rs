@@ -123,6 +123,9 @@ pub struct EndpointData {
     /// derived interface is by those of its bases. An endpoint matches
     /// those of a topic named by one of these too.
     pub topic_aliases: Vec<String>,
+    /// `data_tags` (`PID_DATA_TAGS`, DDS Security 1.2, 7.5.1.7 and
+    /// 7.5.1.8): the DataTagQosPolicy, (name, value) pairs.
+    pub data_tags: Vec<(String, String)>,
     /// The parameters of DDS Security, such as the endpoint security
     /// info.
     pub security: SecurityParameters,
@@ -199,6 +202,7 @@ impl EndpointData {
             related_entity_guid: None,
             service_instance_name: None,
             topic_aliases: Vec::new(),
+            data_tags: Vec::new(),
             security: SecurityParameters::default(),
         }
     }
@@ -320,6 +324,9 @@ impl EndpointData {
         if !self.topic_aliases.is_empty() {
             l.push(b.strings(pid::TOPIC_ALIASES, &self.topic_aliases));
         }
+        if !self.data_tags.is_empty() {
+            l.push(b.string_pairs(pid::DATA_TAGS, &self.data_tags));
+        }
         if let Some(info) = &self.type_information {
             // An XCDR2 stream of its own, as Cyclone DDS 0.10 writes it.
             if let Ok(mut v) = info.to_bytes(order) {
@@ -403,6 +410,7 @@ impl EndpointData {
                 pid::RELATED_ENTITY_GUID => d.related_entity_guid = v.guid(p).ok(),
                 pid::SERVICE_INSTANCE_NAME => d.service_instance_name = v.string(p).ok(),
                 pid::TOPIC_ALIASES => d.topic_aliases = v.strings(p).unwrap_or_default(),
+                pid::DATA_TAGS => d.data_tags = v.string_pairs(p).unwrap_or_default(),
                 id if SecurityParameters::is_security(id) => d.security.push(p.clone(), endianness),
                 id if !id.is_vendor_specific() && id.must_understand() => {
                     return Err(DecodeError::MustUnderstand(id));
@@ -1535,6 +1543,10 @@ mod tests {
         d.related_entity_guid = Some(rguid(2));
         d.service_instance_name = Some("robot".into());
         d.topic_aliases = vec!["Adder_Service_Request".into(), "Sub_Service_Request".into()];
+        d.data_tags = vec![
+            ("level".into(), "secret".into()),
+            ("x".into(), String::new()),
+        ];
         d.durability_service = Some(DurabilityService {
             service_cleanup_delay: Duration::from_std(std::time::Duration::from_millis(1500)),
             history_kind: 1,

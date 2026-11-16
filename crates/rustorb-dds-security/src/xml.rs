@@ -124,6 +124,15 @@ fn criteria(n: Node<'_, '_>) -> Criteria {
                 .map(|e| text(e).to_string())
                 .collect()
         }),
+        data_tags: child(n, "data_tags").map(|d| {
+            children(d, "tag")
+                .map(|t| {
+                    let field =
+                        |f: &str| child(t, f).map(|e| text(e).to_string()).unwrap_or_default();
+                    (field("name"), field("value"))
+                })
+                .collect()
+        }),
     }
 }
 

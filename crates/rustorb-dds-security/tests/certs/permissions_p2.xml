@@ -13,6 +13,17 @@
         <publish><topics><topic>Square*</topic></topics></publish>
         <subscribe><topics><topic>Square*</topic><topic>DDS:Security:LogTopic*</topic></topics></subscribe>
       </allow_rule>
+      <allow_rule>
+        <domains><id_range><min>0</min><max>230</max></id_range></domains>
+        <publish>
+          <topics><topic>SquareTagged</topic></topics>
+          <data_tags><tag><name>level</name><value>secret</value></tag></data_tags>
+        </publish>
+        <subscribe>
+          <topics><topic>SquareTagged</topic></topics>
+          <data_tags><tag><name>level</name><value>secret</value></tag></data_tags>
+        </subscribe>
+      </allow_rule>
       <deny_rule>
         <domains><id>231</id></domains>
         <publish><topics><topic>*</topic></topics></publish>

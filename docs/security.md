@@ -77,6 +77,17 @@ let participant = DomainParticipant::with_config(config)?;
 - `set_listener`（LoggerListener）はない。同じ参加者で読むときも grant が要る。
 - `RUSTORB_DDS_SECURITY_LOG=1` は今までどおり、同じ出来事を stderr に出す。
 
+### data tagging（DDS:Tagging:DDS_Discovery）
+
+#73 で足した（9.7）。`DataWriterQos::data_tags` と `DataReaderQos::data_tags` に (name, value) の組を入れる。
+
+- タグは writer・reader の SEDP に `PID_DATA_TAGS`（0x1003）で載せ、受け取った相手の分も読む。DataWriter tagging なので、サンプルごとには送らない。
+- permissions の `<publish>`・`<subscribe>` の `<data_tags>` を見る（10.4.1.5.3.4.1.5、10.4.1.5.3.4.2.5）。
+  - allow rule: entity のタグがどれも `<data_tags>` にあれば当てはまる。`<data_tags>` がなければ、タグのない entity だけが当てはまる。
+  - deny rule: entity のタグのどれかが `<data_tags>` にあれば当てはまる。`<data_tags>` がなければ、タグによらず当てはまる。
+- 自分の writer・reader は、作るときに確かめる（check_create_datawriter・datareader）。相手の writer・reader は、match するときに、相手の permissions とタグで確かめる。
+- writer と reader のタグどうしは比べない（仕様にない）。タグは今は Rust の QoS にだけあり、他の言語の QoS にはない。
+
 ### ほかの言語から
 
 どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
@@ -100,13 +111,14 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
 - `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
 ## 未対応
 
 - secure SPDP の `identity_status_token`（読み飛ばすだけで、送らない）。
-- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）、data tagging。
+- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）。
+- 他の言語の QoS の data tags。
 - ログの LoggerListener、レガシーの `DDS:Security:LogTopic` への publish、他の言語でのログのトピックの型。
 - 鍵の更新（key revision）。
