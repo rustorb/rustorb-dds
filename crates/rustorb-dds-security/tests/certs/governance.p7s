@@ -1,9 +1,9 @@
 MIME-Version: 1.0
-Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----1789E2BF255BEFDBD413DC54E87F1448"
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----18BF37202C83DB45EB730C473091CA3F"
 
 This is an S/MIME signed message
 
-------1789E2BF255BEFDBD413DC54E87F1448
+------18BF37202C83DB45EB730C473091CA3F
 Content-Type: text/plain
 
 <?xml version="1.0" encoding="UTF-8"?>
@@ -16,6 +16,7 @@ Content-Type: text/plain
       </domains>
       <allow_unauthenticated_participants>false</allow_unauthenticated_participants>
       <enable_join_access_control>true</enable_join_access_control>
+      <enable_key_revision>true</enable_key_revision>
       <discovery_protection_kind>ENCRYPT</discovery_protection_kind>
       <liveliness_protection_kind>ENCRYPT</liveliness_protection_kind>
       <rtps_protection_kind>SIGN</rtps_protection_kind>
@@ -43,7 +44,7 @@ Content-Type: text/plain
   </domain_access_rules>
 </dds>
 
-------1789E2BF255BEFDBD413DC54E87F1448
+------18BF37202C83DB45EB730C473091CA3F
 Content-Type: application/x-pkcs7-signature; name="smime.p7s"
 Content-Transfer-Encoding: base64
 Content-Disposition: attachment; filename="smime.p7s"
@@ -71,16 +72,16 @@ gRkIowDgqiIONyDH5BMHUNvrXvTFS5I+St0bRi6A38bTgUR49cO4fSRmunfhqBB1
 BgNVBAYTAkpQMRAwDgYDVQQKDAdydXN0b3JiMSQwIgYDVQQDDBtydXN0b3JiIHRl
 c3QgcGVybWlzc2lvbnMgQ0ECFGIjncSB9HCkZ5xlHUbAfOQkw8ZrMA0GCWCGSAFl
 AwQCAQUAoIHkMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkF
-MQ8XDTI2MTExMDIzMzAxMlowLwYJKoZIhvcNAQkEMSIEIGJcKydMvFKeptYJC17n
-7AfRlSaq0Es7CjYcsaDqCsRZMHkGCSqGSIb3DQEJDzFsMGowCwYJYIZIAWUDBAEq
+MQ8XDTI2MTExNjAzMjk1MVowLwYJKoZIhvcNAQkEMSIEIAXQ2fu21/74yjfsz05+
+n4WBGdpCk5QFPjGjzI/AyOJNMHkGCSqGSIb3DQEJDzFsMGowCwYJYIZIAWUDBAEq
 MAsGCWCGSAFlAwQBFjALBglghkgBZQMEAQIwCgYIKoZIhvcNAwcwDgYIKoZIhvcN
 AwICAgCAMA0GCCqGSIb3DQMCAgFAMAcGBSsOAwIHMA0GCCqGSIb3DQMCAgEoMA0G
-CSqGSIb3DQEBAQUABIIBAKvow8tP5uX7aYnvZpn9L8hWR1n7+B1CecGmzPdxzXnU
-Q2lACDC8KZ1GRrVXk2NkIKOxY7L5SYlSLXyZRD2Uf7P0Uvavq4+GM61vEpHZy58G
-urGmB7Zuk2YsNOH8ew6JUhMZ1ny3yTF8/j+xIxXOHsya/1Ro1Thpsp6iF6RL+DIb
-499rpXp85wBzxSGH+7z9CrTe85OJ+GyQQD+56GTQRnvpooVtIRQRgBsqMFR5Eqgx
-kavb+boHwJmrzYBmNui4UJG/TCjInKmjXTmMsa8AwAuWoVE2o4miPQfxp5+cs78H
-Oc/MRqgBc9EcfiufWay9qGYbu9xVIxcpHpk/GiHi0BA=
+CSqGSIb3DQEBAQUABIIBAEQGe2O2W6SLD5778bPxZoJphxI0V4tjSzYYc1lyX8JQ
+N36HNwSsvbfmQdPdylLMUNwHNTj7jtRaRL/fAUszAu4Hj/ks2eLVKw8KgwfVn9dH
+JTBSLDvJXNwT/YccD4dfJfRLxnsq3iO1wjr+ORgFm1xad21Tg5uQGrlkV79mpHqv
+Rq2KMZl9XdNP+n7CMrWTXdK/YBZ795IyA02M46unTMrlZyv6Mldb3rIFWTDergeZ
+N8lzLNGWwA17dGIKTviQVtG7X+XFo/n+nnS5dyPfJWAbp56/cVhVkdBKPigXbIjY
+He5L+g7yo0VyQe4S2sFqwAbQE2U0mawx+CgqiaZquMs=
 
-------1789E2BF255BEFDBD413DC54E87F1448--
+------18BF37202C83DB45EB730C473091CA3F--
 

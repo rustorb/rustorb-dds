@@ -3,12 +3,16 @@
 //! the three-message handshake that authenticates two participants and
 //! gives them a shared secret.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use rand_core::{OsRng, RngCore};
 use rsa::BigUint;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
-use crate::pki::{Cert, Crl, PrivateKey, read_uri, uri_password};
+use crate::ocsp::{self, CertStatus, OcspOptions, OcspResponse};
+use crate::pki::{Cert, Crl, PrivateKey, read_uri, unix_now, uri_password};
 use crate::token::{BinaryProperty, DataHolder, binary_properties_cdr};
 
 /// The class of the plugin's tokens, without a version.
@@ -41,8 +45,21 @@ pub struct Identity {
     cert: Cert,
     key: PrivateKey,
     crls: Vec<Crl>,
+    ocsp: Option<Arc<OcspState>>,
     /// The key agreement this side asks for when it starts a handshake.
     pub key_agreement: KeyAgreement,
+}
+
+/// What OCSP knows.
+#[derive(Debug)]
+struct OcspState {
+    options: OcspOptions,
+    /// The response about this participant's certificate, stapled to its
+    /// handshake messages (`ocsp_status`).
+    own: Mutex<Option<OcspResponse>>,
+    /// The statuses of the peers' certificates (by DER), and until when
+    /// they are taken without asking again.
+    cache: Mutex<HashMap<Vec<u8>, (CertStatus, u64)>>,
 }
 
 impl Identity {
@@ -52,11 +69,13 @@ impl Identity {
         Self::with_options(ca_pem, cert_pem, key_pem, &IdentityOptions::default())
     }
 
-    /// As [`Self::new`], with a password for an encrypted private key and
-    /// CRLs. The CRLs must be the identity CA's and current; the
+    /// As [`Self::new`], with a password for an encrypted private key,
+    /// CRLs and OCSP. The CRLs must be the identity CA's and current; the
     /// certificate must not be revoked by them, nor will a peer's be
     /// accepted if it is (10.3.3, validate_local_identity and
-    /// validate_remote_identity).
+    /// validate_remote_identity). With OCSP, the responder must say that
+    /// the certificate is good, and that response is stapled to the
+    /// handshake messages; a peer's certificate must be good too.
     pub fn with_options(
         ca_pem: &[u8],
         cert_pem: &[u8],
@@ -85,34 +104,47 @@ impl Identity {
         if !key.matches(cert.public_key()) {
             return Err(Error::new("the private key is not the certificate's"));
         }
-        Ok(Identity {
+        let id = Identity {
             ca,
             cert,
             key,
             crls,
+            ocsp: options.ocsp.clone().map(|options| {
+                Arc::new(OcspState {
+                    options,
+                    own: Mutex::new(None),
+                    cache: Mutex::new(HashMap::new()),
+                })
+            }),
             key_agreement: KeyAgreement::EcdhP256,
-        })
+        };
+        if id.ocsp.is_some() {
+            id.refresh_own_ocsp()?;
+        }
+        Ok(id)
     }
 
     /// From the URIs of the properties `dds.sec.auth.identity_ca`,
     /// `dds.sec.auth.identity_certificate` and `dds.sec.auth.private_key`.
     pub fn from_uris(ca: &str, cert: &str, key: &str) -> Result<Self, Error> {
-        Self::from_uris_with(ca, cert, key, None, None)
+        Self::from_uris_with(ca, cert, key, None, None, None)
     }
 
     /// As [`Self::from_uris`], with the property `dds.sec.auth.password`
-    /// (or else a `password` in the query of a `file:` URI of the key) and
-    /// the URI of a file of CRLs.
+    /// (or else a `password` in the query of a `file:` URI of the key),
+    /// the URI of a file of CRLs, and OCSP.
     pub fn from_uris_with(
         ca: &str,
         cert: &str,
         key: &str,
         password: Option<&str>,
         crl: Option<&str>,
+        ocsp: Option<OcspOptions>,
     ) -> Result<Self, Error> {
         let options = IdentityOptions {
             password: password.or_else(|| uri_password(key)).map(str::to_string),
             crl: crl.map(read_uri).transpose()?,
+            ocsp,
         };
         Self::with_options(&read_uri(ca)?, &read_uri(cert)?, &read_uri(key)?, &options)
     }
@@ -159,13 +191,142 @@ impl Identity {
             .with_property("dds.ca.algo", ca_algo)
     }
 
-    /// Checks a peer's certificate against the identity CA.
+    /// Checks a peer's certificate against the identity CA and the CRLs,
+    /// and with OCSP if it is on.
     pub fn verify_peer(&self, cert: &[u8]) -> Result<Cert, Error> {
+        self.verify_peer_with(cert, None)
+    }
+
+    /// As [`Self::verify_peer`], with the OCSP response the peer stapled
+    /// to its handshake message (`ocsp_status`, 10.3.3,
+    /// begin_handshake_reply and process_handshake): if it is about the
+    /// certificate, signed for the identity CA and current, a good status
+    /// is taken as proof and a revoked one fails; otherwise it is as if
+    /// there were none, and OCSP, if it is on, asks the responder.
+    pub fn verify_peer_with(&self, cert: &[u8], ocsp_status: Option<&[u8]>) -> Result<Cert, Error> {
         let c = Cert::parse(cert)?;
         c.verify_signed_by(&self.ca)?;
         check_revocation(&self.crls, &c)?;
-        Ok(c)
+        let now = unix_now();
+        let stapled = ocsp_status
+            .and_then(|b| OcspResponse::parse(b).ok())
+            .and_then(|r| r.check(&c, &self.ca, now).ok());
+        match stapled.map(|s| s.status) {
+            Some(CertStatus::Good) => {
+                if let (Some(o), Some(s)) = (&self.ocsp, stapled) {
+                    let until = o.until(now, s.next_update);
+                    o.cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(c.der().to_vec(), (CertStatus::Good, until));
+                }
+                return Ok(c);
+            }
+            Some(CertStatus::Revoked) => return Err(revoked(&c)),
+            _ => {}
+        }
+        match self.ocsp_status(&c) {
+            None | Some(Ok(CertStatus::Good)) => Ok(c),
+            Some(Ok(CertStatus::Revoked)) => Err(revoked(&c)),
+            Some(Ok(CertStatus::Unknown)) => Err(Error::new(format!(
+                "the OCSP responder does not know the certificate of {}",
+                c.subject()
+            ))),
+            Some(Err(e)) => Err(e),
+        }
     }
+
+    /// The OCSP options, if OCSP is on.
+    pub fn ocsp_options(&self) -> Option<&OcspOptions> {
+        self.ocsp.as_ref().map(|o| &o.options)
+    }
+
+    /// The status of `cert`, a certificate of the identity CA, by OCSP:
+    /// what the responder said last, or what it says now if that is out of
+    /// date (past its nextUpdate, or older than the refresh period).
+    /// `None` if OCSP is off.
+    pub fn ocsp_status(&self, cert: &Cert) -> Option<Result<CertStatus, Error>> {
+        let o = self.ocsp.as_ref()?;
+        let now = unix_now();
+        if let Some((s, until)) = o
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(cert.der())
+            && *until > now
+        {
+            return Some(Ok(*s));
+        }
+        Some(o.ask(cert, &self.ca).map(|c| {
+            o.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(cert.der().to_vec(), (c.status, o.until(now, c.next_update)));
+            c.status
+        }))
+    }
+
+    /// Asks the responder for this participant's own status again: an
+    /// error if it is not good. The response is stapled to the handshake
+    /// messages from then on. Nothing to do if OCSP is off.
+    pub fn refresh_own_ocsp(&self) -> Result<(), Error> {
+        let Some(o) = &self.ocsp else {
+            return Ok(());
+        };
+        let url = o.url(&self.cert)?;
+        let r = ocsp::query(&url, &self.cert, &self.ca, o.options.timeout)?;
+        match r.check(&self.cert, &self.ca, unix_now())?.status {
+            CertStatus::Good => {
+                *o.own.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                Ok(())
+            }
+            CertStatus::Revoked => Err(revoked(&self.cert)),
+            CertStatus::Unknown => Err(Error::new(format!(
+                "the OCSP responder does not know the certificate of {}",
+                self.cert.subject()
+            ))),
+        }
+    }
+
+    /// The DER of the OCSP response about this participant's certificate,
+    /// stapled to its handshake messages.
+    pub fn stapled_ocsp(&self) -> Option<Vec<u8>> {
+        let o = self.ocsp.as_ref()?;
+        let own = o.own.lock().unwrap_or_else(|e| e.into_inner());
+        own.as_ref().map(|r| r.der().to_vec())
+    }
+}
+
+impl OcspState {
+    fn url(&self, cert: &Cert) -> Result<String, Error> {
+        self.options
+            .responder
+            .clone()
+            .or_else(|| ocsp::responder_of(cert))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "no OCSP responder for the certificate of {}",
+                    cert.subject()
+                ))
+            })
+    }
+
+    fn ask(&self, cert: &Cert, ca: &Cert) -> Result<ocsp::Checked, Error> {
+        let r = ocsp::query(&self.url(cert)?, cert, ca, self.options.timeout)?;
+        r.check(cert, ca, unix_now())
+    }
+
+    /// Until when a status is taken without asking again: the refresh
+    /// period, and no later than the response's nextUpdate.
+    fn until(&self, now: u64, next_update: Option<u64>) -> u64 {
+        let refresh = self.options.refresh.as_secs().max(1);
+        let t = now + refresh;
+        next_update.map_or(t, |n| n.min(t))
+    }
+}
+
+fn revoked(c: &Cert) -> Error {
+    Error::new(format!("the certificate of {} is revoked", c.subject()))
 }
 
 /// What [`Identity::with_options`] takes besides the documents.
@@ -175,6 +336,8 @@ pub struct IdentityOptions {
     pub password: Option<String>,
     /// CRLs of the identity CA, PEM (`X509 CRL` blocks) or DER.
     pub crl: Option<Vec<u8>>,
+    /// OCSP: `None` takes only the responses stapled by the peers.
+    pub ocsp: Option<OcspOptions>,
 }
 
 fn check_revocation(crls: &[Crl], cert: &Cert) -> Result<(), Error> {
@@ -396,6 +559,15 @@ fn c_properties(
     ]
 }
 
+/// `t` with the OCSP response about the certificate, `ocsp_status`, if
+/// there is one (10.3.2.5.1 and 10.3.2.5.2).
+fn staple(id: &Identity, t: DataHolder) -> DataHolder {
+    match id.stapled_ocsp() {
+        Some(r) => t.with_binary(BinaryProperty::new("ocsp_status", r)),
+        None => t,
+    }
+}
+
 /// `b` with a NUL at the end, as the PEM text of a certificate is sent.
 fn nul(b: &[u8]) -> Vec<u8> {
     let mut v = b.to_vec();
@@ -473,10 +645,12 @@ impl Handshake {
             .unwrap_or_else(challenge);
         let mut t = DataHolder::new(REQUEST_CLASS);
         t.binary_properties = c;
-        let t = t
-            .with_binary(BinaryProperty::new("hash_c1", hash_c1.clone()))
-            .with_binary(BinaryProperty::new("dh1", dh1.clone()))
-            .with_binary(BinaryProperty::new("challenge1", challenge1.clone()));
+        let t = staple(
+            id,
+            t.with_binary(BinaryProperty::new("hash_c1", hash_c1.clone()))
+                .with_binary(BinaryProperty::new("dh1", dh1.clone()))
+                .with_binary(BinaryProperty::new("challenge1", challenge1.clone())),
+        );
         Handshake {
             ephemeral,
             sent: t,
@@ -521,7 +695,8 @@ impl Handshake {
         if request.binary("hash_c1").is_some_and(|h| h != hash_c1) {
             return Err(Error::new("hash_c1 does not match"));
         }
-        let peer_cert = id.verify_peer(need(request, "c.id")?)?;
+        let peer_cert =
+            id.verify_peer_with(need(request, "c.id")?, request.binary("ocsp_status"))?;
         let pdata1 = need(request, "c.pdata")?.to_vec();
         check_prefix(&pdata_prefix(&pdata1)?, &peer_cert)?;
         let kagree = request
@@ -553,6 +728,7 @@ impl Handshake {
             .with_binary(BinaryProperty::new("challenge1", challenge1.clone()))
             .with_binary(BinaryProperty::new("challenge2", challenge2.clone()))
             .with_binary(BinaryProperty::new("signature", signature));
+        let t = staple(id, t);
         let perm1 = need(request, "c.perm")?.to_vec();
         Ok(Handshake {
             ephemeral,
@@ -605,7 +781,7 @@ impl Handshake {
         if reply.binary("hash_c2").is_some_and(|h| h != hash_c2) {
             return Err(Error::new("hash_c2 does not match"));
         }
-        let peer_cert = id.verify_peer(need(reply, "c.id")?)?;
+        let peer_cert = id.verify_peer_with(need(reply, "c.id")?, reply.binary("ocsp_status"))?;
         let pdata2 = need(reply, "c.pdata")?.to_vec();
         check_prefix(&pdata_prefix(&pdata2)?, &peer_cert)?;
         let dh2 = need(reply, "dh2")?.to_vec();

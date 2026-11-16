@@ -18,7 +18,7 @@
 //! decoded when a change is read.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +30,7 @@ use rustorb_dds_security::crypto::{
     read_submessage, submessage_id,
 };
 use rustorb_dds_security::message::{self as gm, GenericMessage, MessageIdentity};
+use rustorb_dds_security::ocsp::OcspOptions;
 use rustorb_dds_security::pki::{Cert, read_uri};
 use rustorb_dds_security::smime;
 use rustorb_dds_security::token::{BinaryProperty, DataHolder};
@@ -80,6 +81,14 @@ pub struct SecurityConfig {
     /// DER). A revoked identity certificate, this participant's or a
     /// peer's, fails authentication.
     pub crl: Option<String>,
+    /// OCSP (RFC 6960), [`Self::OCSP`]: `None` takes only the responses
+    /// that peers staple to their handshake messages. With it, the
+    /// responder must say that this participant's certificate is good
+    /// (and the response is stapled), and a peer's certificate must be
+    /// good too; the statuses are asked again every
+    /// [`OcspOptions::refresh`], and a peer found revoked is revoked as
+    /// [`crate::DomainParticipant::revoke_participant`] does.
+    pub ocsp: Option<OcspOptions>,
     /// The builtin logging plugin (DDS:Logging:DDS_LogTopic): `None`
     /// logs nothing. See [`crate::security_log`].
     pub logging: Option<LogOptions>,
@@ -89,6 +98,16 @@ impl SecurityConfig {
     /// The property of the URI of the CRLs of the identity CA, which DDS
     /// Security 1.2 does not name.
     pub const CRL: &'static str = "rustorb.dds.sec.auth.crl";
+
+    /// The property that turns OCSP on, which DDS Security 1.2 does not
+    /// name: the responder's URL (`http://host[:port]/path`), or `aia` for
+    /// the one in each certificate's Authority Information Access.
+    pub const OCSP: &'static str = "rustorb.dds.sec.auth.ocsp";
+    /// The timeout of an OCSP query, in seconds (3 by default).
+    pub const OCSP_TIMEOUT: &'static str = "rustorb.dds.sec.auth.ocsp_timeout";
+    /// How often the OCSP statuses are asked again, in seconds (300 by
+    /// default; 0 only at authentication).
+    pub const OCSP_REFRESH: &'static str = "rustorb.dds.sec.auth.ocsp_refresh";
 
     /// The standard names of the properties it needs, those of the
     /// builtin authentication and access control plugins (DDS Security
@@ -111,7 +130,11 @@ impl SecurityConfig {
         props: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Option<Self> {
         let props: HashMap<&str, &str> = props.into_iter().collect();
-        Self::make(&props, LogOptions::from_properties(&props).ok().flatten())
+        Self::make(
+            &props,
+            LogOptions::from_properties(&props).ok().flatten(),
+            ocsp_options(&props).ok().flatten(),
+        )
     }
 
     /// As [`Self::from_properties`], with an error for a property that is
@@ -129,10 +152,15 @@ impl SecurityConfig {
             return Err(format!("missing properties: {}", missing.join(", ")));
         }
         let logging = LogOptions::from_properties(&props)?;
-        Ok(Self::make(&props, logging).expect("none missing"))
+        let ocsp = ocsp_options(&props)?;
+        Ok(Self::make(&props, logging, ocsp).expect("none missing"))
     }
 
-    fn make(props: &HashMap<&str, &str>, logging: Option<LogOptions>) -> Option<Self> {
+    fn make(
+        props: &HashMap<&str, &str>,
+        logging: Option<LogOptions>,
+        ocsp: Option<OcspOptions>,
+    ) -> Option<Self> {
         let get = |n: &str| props.get(n).map(|v| v.to_string());
         Some(SecurityConfig {
             identity_ca: get("dds.sec.auth.identity_ca")?,
@@ -143,9 +171,45 @@ impl SecurityConfig {
             permissions: get("dds.sec.access.permissions")?,
             password: get("dds.sec.auth.password"),
             crl: get(Self::CRL),
+            ocsp,
             logging,
         })
     }
+}
+
+/// The OCSP options of the properties: `None` without [`SecurityConfig::OCSP`].
+fn ocsp_options(props: &HashMap<&str, &str>) -> std::result::Result<Option<OcspOptions>, String> {
+    let Some(r) = props.get(SecurityConfig::OCSP) else {
+        return Ok(None);
+    };
+    let mut o = OcspOptions::default();
+    match *r {
+        "aia" => {}
+        u if u.starts_with("http://") => o.responder = Some(u.to_string()),
+        u => {
+            return Err(format!(
+                "{}: not aia or an http: URL: {u}",
+                SecurityConfig::OCSP
+            ));
+        }
+    }
+    let secs = |n: &str| -> std::result::Result<Option<Duration>, String> {
+        props
+            .get(n)
+            .map(|v| {
+                v.parse::<u64>()
+                    .map(Duration::from_secs)
+                    .map_err(|_| format!("{n}: not a number of seconds: {v}"))
+            })
+            .transpose()
+    };
+    if let Some(t) = secs(SecurityConfig::OCSP_TIMEOUT)? {
+        o.timeout = t;
+    }
+    if let Some(t) = secs(SecurityConfig::OCSP_REFRESH)? {
+        o.refresh = t;
+    }
+    Ok(Some(o))
 }
 
 fn sec_error(what: &str) -> impl Fn(SecError) -> Error + '_ {
@@ -228,7 +292,38 @@ struct LocalEndpoint {
     /// receiver-specific key, for origin authentication).
     sent: HashMap<Guid, KeyMaterial>,
     origin_authentication: bool,
+    /// Whether it is a writer.
+    writer: bool,
+    /// The matched remote endpoints.
+    matched: HashSet<Guid>,
+    /// The earlier revisions of the payload key material, the newest
+    /// first: the changes kept in the history may have been encoded with
+    /// them (9.3.2.12.2: at most 7 revisions earlier than the current).
+    payload_old: Vec<KeyMaterial>,
 }
+
+/// A key revision sent to the peers but not yet in use (9.8.9.5).
+struct PendingRevision {
+    /// When it is used even if some peer has not acknowledged it.
+    at: Instant,
+    participant: Option<KeyMaterial>,
+    /// Of each local endpoint: its submessage and payload key materials.
+    endpoints: HashMap<Guid, (Option<KeyMaterial>, Option<KeyMaterial>)>,
+}
+
+/// Crypto tokens to send: to the participant, the class, to the
+/// endpoint, from the endpoint, the tokens.
+type TokenSend = (
+    GuidPrefix,
+    &'static str,
+    Option<Guid>,
+    Option<Guid>,
+    Vec<DataHolder>,
+);
+
+/// How long a key revision waits for the peers to acknowledge it before
+/// it is used anyway.
+const REVISION_WAIT: Duration = Duration::from_secs(2);
 
 /// The state of a remote participant.
 struct Peer {
@@ -275,6 +370,12 @@ struct State {
     protected_remote: HashMap<Guid, bool>,
     out: Vec<Outgoing>,
     events: Vec<PeerEvent>,
+    /// The key revision on its way.
+    revision: Option<PendingRevision>,
+    /// The participants whose identity was revoked, and their
+    /// certificates (PEM): they are not authenticated again.
+    revoked: HashSet<GuidPrefix>,
+    revoked_certs: HashSet<String>,
     /// The stateless messages of each peer coming as DATA_FRAG (a
     /// handshake with certificates and permissions outgrows the fragment
     /// size of some implementations).
@@ -418,6 +519,7 @@ impl Security {
             &config.private_key,
             config.password.as_deref(),
             config.crl.as_deref(),
+            config.ocsp.clone(),
         )
         .map_err(sec_error("identity"))?;
         let permissions_ca =
@@ -486,6 +588,9 @@ impl Security {
                 protected_remote: HashMap::new(),
                 out: Vec::new(),
                 events: Vec::new(),
+                revision: None,
+                revoked: HashSet::new(),
+                revoked_certs: HashSet::new(),
                 stateless_frags: HashMap::new(),
             }),
         })
@@ -535,7 +640,7 @@ impl Security {
         }
         // The keys of the builtin secure endpoints (9.8.9.3).
         let mut st = self.state();
-        for (local, _, _, _, kind) in self.builtin_secure() {
+        for (local, _, writer, _, kind) in self.builtin_secure() {
             st.endpoints
                 .entry(Guid::new(self.prefix, local))
                 .or_insert_with(|| LocalEndpoint {
@@ -543,6 +648,9 @@ impl Security {
                     payload: None,
                     sent: HashMap::new(),
                     origin_authentication: kind.origin_authenticated(),
+                    writer,
+                    matched: HashSet::new(),
+                    payload_old: Vec::new(),
                 });
         }
         drop(st);
@@ -570,6 +678,9 @@ impl Security {
         let secure = token_of(&p.security, pid::IDENTITY_TOKEN)
             .is_some_and(|t| auth::is_pki_dh(&t.class_id));
         let mut st = self.state();
+        if st.revoked.contains(&p.guid_prefix) {
+            return false;
+        }
         if !secure {
             // An unauthenticated participant sees only what is not
             // protected, if the governance lets it in at all.
@@ -617,6 +728,7 @@ impl Security {
         st.decoders.retain(|g, _| g.prefix != *prefix);
         st.protected_remote.retain(|g, _| g.prefix != *prefix);
         for e in st.endpoints.values_mut() {
+            e.matched.retain(|g| g.prefix != *prefix);
             e.sent.retain(|g, _| g.prefix != *prefix);
         }
     }
@@ -898,7 +1010,14 @@ impl Security {
     /// sets up the volatile endpoints with the KxKey and sends it the
     /// participant's key material.
     fn authenticated(&self, st: &mut State, src: GuidPrefix, a: Authenticated, now: Instant) {
-        let grant = match self.remote_grant(&a) {
+        let revoked = st.revoked_certs.contains(&a.peer_cert.pem());
+        let grant = match self.remote_grant(&a).and_then(|g| {
+            if revoked {
+                Err(SecError::new("its identity was revoked"))
+            } else {
+                Ok(g)
+            }
+        }) {
             Ok(g) => g,
             Err(e) => {
                 self.log(
@@ -962,7 +1081,11 @@ impl Security {
                 } else {
                     enc.key_material().clone()
                 };
-                let t = vec![crypto_token(&km)];
+                let mut t = vec![crypto_token(&km)];
+                // A revision on its way, too.
+                if let Some(p) = st.revision.as_ref().and_then(|r| r.participant.as_ref()) {
+                    t.push(crypto_token(&p.with_receiver_key_of(&km)));
+                }
                 peer.participant_sent = Some(km);
                 t
             }
@@ -1071,8 +1194,13 @@ impl Security {
                 let Some(peer) = st.peers.get_mut(&src) else {
                     return;
                 };
-                if let Some(km) = key_materials(&m.message_data).into_iter().next() {
-                    peer.participant = Some(Decoder::new(km));
+                // The first is the one in use; more are revisions of it
+                // (9.5.1.6), as are the tokens sent after a revision.
+                for km in key_materials(&m.message_data) {
+                    match &peer.participant {
+                        Some(d) if d.add_revision(km.clone()) => {}
+                        _ => peer.participant = Some(Decoder::new(km)),
+                    }
                 }
                 self.check_ready(st, src);
             }
@@ -1081,12 +1209,17 @@ impl Security {
                 if remote.prefix != src {
                     return;
                 }
-                let decoders = key_materials(&m.message_data)
-                    .into_iter()
-                    .filter(|k| k.kind != TransformKind::None)
-                    .map(Decoder::new)
-                    .collect();
-                st.decoders.insert(remote, decoders);
+                // Key materials of the same sender key id are revisions
+                // of one another (9.5.1.6).
+                let decoders = st.decoders.entry(remote).or_default();
+                for km in key_materials(&m.message_data) {
+                    if km.kind == TransformKind::None
+                        || decoders.iter().any(|d| d.add_revision(km.clone()))
+                    {
+                        continue;
+                    }
+                    decoders.push(Decoder::new(km));
+                }
             }
             _ => {}
         }
@@ -1162,6 +1295,9 @@ impl Security {
                 payload: payload.clone(),
                 sent: HashMap::new(),
                 origin_authentication: rule.metadata_protection_kind.origin_authenticated(),
+                writer,
+                matched: HashSet::new(),
+                payload_old: Vec::new(),
             },
         );
         Ok(payload)
@@ -1344,20 +1480,31 @@ impl Security {
         let Some(e) = st.endpoints.get_mut(&local) else {
             return;
         };
+        e.matched.insert(remote);
+        let pending = st.revision.as_ref().and_then(|r| r.endpoints.get(&local));
         let mut kms = Vec::new();
+        let mut more = Vec::new();
         if let Some(enc) = &e.submessage {
             let km = if e.origin_authentication {
                 enc.key_material().with_receiver_specific_key()
             } else {
-                enc.key_material().clone()
+                enc.key_material()
             };
+            if let Some(p) = pending.and_then(|p| p.0.as_ref()) {
+                more.push(p.with_receiver_key_of(&km));
+            }
             e.sent.insert(remote, km.clone());
             kms.push(km);
             st.protected_remote.insert(remote, true);
         }
         if let Some(enc) = &e.payload {
-            kms.push(enc.key_material().clone());
+            kms.push(enc.key_material());
+            // The earlier revisions, for the changes kept in the history,
+            // and a revision on its way.
+            more.extend(e.payload_old.iter().rev().cloned());
+            more.extend(pending.and_then(|p| p.1.clone()));
         }
+        kms.extend(more);
         if kms.is_empty() || !st.peers.contains_key(&remote.prefix) {
             return;
         }
@@ -1375,6 +1522,202 @@ impl Security {
         let mut st = self.state();
         if let Some(e) = st.endpoints.get_mut(&local) {
             e.sent.remove(&remote);
+            e.matched.remove(&remote);
+        }
+    }
+
+    /// Revokes the identity of the participant `prefix`
+    /// (on_revoke_identity, 9.3.2.12.2): communication with it ends, it
+    /// is not authenticated again, and, if the governance enables key
+    /// revision, the key material it had is revised and sent to the other
+    /// participants. Whether it was an authenticated participant.
+    pub(crate) fn revoke_participant(&self, prefix: &GuidPrefix, now: Instant) -> bool {
+        let mut g = self.state();
+        let st = &mut *g;
+        let Some(cert) = st
+            .peers
+            .get(prefix)
+            .and_then(|p| p.authenticated.as_ref())
+            .map(|a| a.peer_cert.clone())
+        else {
+            return false;
+        };
+        st.revoked.insert(*prefix);
+        st.revoked_certs.insert(cert.pem());
+        drop(g);
+        self.participant_removed(prefix);
+        self.log(
+            LoggingLevel::NoticeLevel,
+            Plugin::Authentication,
+            "on_revoke_identity",
+            &format!(
+                "identity of participant {} ({}) revoked",
+                prefix_text(prefix),
+                cert.subject()
+            ),
+        );
+        if self.rule.enable_key_revision {
+            self.revise_keys(now);
+        }
+        true
+    }
+
+    /// How often the OCSP statuses are asked again, if OCSP is on and
+    /// they are.
+    pub(crate) fn ocsp_refresh(&self) -> Option<Duration> {
+        self.identity
+            .ocsp_options()
+            .map(|o| o.refresh)
+            .filter(|r| !r.is_zero())
+    }
+
+    /// Asks OCSP again for this participant's status (stapled to its
+    /// handshakes from then on) and for those of its authenticated peers:
+    /// the peers found revoked. The queries are made without the lock.
+    pub(crate) fn check_ocsp(&self) -> Vec<GuidPrefix> {
+        if let Err(e) = self.identity.refresh_own_ocsp() {
+            self.log(
+                LoggingLevel::WarningLevel,
+                Plugin::Authentication,
+                "validate_local_identity",
+                &format!("OCSP: {e}"),
+            );
+        }
+        let peers: Vec<(GuidPrefix, Cert)> = self
+            .state()
+            .peers
+            .iter()
+            .filter_map(|(p, peer)| Some((*p, peer.authenticated.as_ref()?.peer_cert.clone())))
+            .collect();
+        let mut revoked = Vec::new();
+        for (prefix, cert) in peers {
+            match self.identity.ocsp_status(&cert) {
+                Some(Ok(rustorb_dds_security::ocsp::CertStatus::Revoked)) => revoked.push(prefix),
+                Some(Ok(_)) | None => {}
+                Some(Err(e)) => self.log(
+                    LoggingLevel::WarningLevel,
+                    Plugin::Authentication,
+                    "validate_remote_identity",
+                    &format!("OCSP for {}: {e}", prefix_text(&prefix)),
+                ),
+            }
+        }
+        revoked
+    }
+
+    /// Revises the key material of the participant and of its endpoints
+    /// but the volatile ones (revise_local_entity_keys, 9.8.9.5), and
+    /// sends it to the authenticated participants matched; it is used once
+    /// they acknowledge it, or after [`REVISION_WAIT`]. The revision
+    /// number of the participant's key material, or 0 if it has none.
+    pub(crate) fn revise_keys(&self, now: Instant) -> i32 {
+        let mut g = self.state();
+        let st = &mut *g;
+        // A revision still on its way is used first.
+        self.activate_revision(st);
+        let participant = self
+            .participant
+            .as_ref()
+            .map(|enc| enc.key_material().revised());
+        let mut sends: Vec<TokenSend> = Vec::new();
+        if let Some(new) = &participant {
+            for (prefix, peer) in st.peers.iter_mut() {
+                let Some(old) = peer.participant_sent.as_ref() else {
+                    continue;
+                };
+                let km = new.with_receiver_key_of(old);
+                sends.push((
+                    *prefix,
+                    gm::PARTICIPANT_CRYPTO_TOKENS,
+                    None,
+                    None,
+                    vec![crypto_token(&km)],
+                ));
+                peer.participant_sent = Some(km);
+            }
+        }
+        let mut endpoints = HashMap::new();
+        for (guid, e) in st.endpoints.iter_mut() {
+            let sub = e
+                .submessage
+                .as_ref()
+                .map(|enc| enc.key_material().revised());
+            let payload = e.payload.as_ref().map(|enc| enc.key_material().revised());
+            if sub.is_none() && payload.is_none() {
+                continue;
+            }
+            let class = if e.writer {
+                gm::DATAWRITER_CRYPTO_TOKENS
+            } else {
+                gm::DATAREADER_CRYPTO_TOKENS
+            };
+            for remote in &e.matched {
+                if !st.peers.contains_key(&remote.prefix) {
+                    continue;
+                }
+                let mut kms = Vec::new();
+                if let Some(new) = &sub {
+                    let km = match e.sent.get(remote) {
+                        Some(old) => new.with_receiver_key_of(old),
+                        None => new.clone(),
+                    };
+                    e.sent.insert(*remote, km.clone());
+                    kms.push(km);
+                }
+                kms.extend(payload.clone());
+                sends.push((
+                    remote.prefix,
+                    class,
+                    Some(*remote),
+                    Some(*guid),
+                    kms.iter().map(crypto_token).collect(),
+                ));
+            }
+            endpoints.insert(*guid, (sub, payload));
+        }
+        for (dest, class, to, from, tokens) in sends {
+            self.volatile_send(st, dest, class, to, from, tokens);
+        }
+        let n = participant.as_ref().map_or(0, KeyMaterial::revision_number);
+        st.revision = Some(PendingRevision {
+            at: now + REVISION_WAIT,
+            participant,
+            endpoints,
+        });
+        drop(g);
+        self.log(
+            LoggingLevel::InformationalLevel,
+            Plugin::Authentication,
+            "revise_local_entity_keys",
+            &format!("key material revised (revision {n})"),
+        );
+        n
+    }
+
+    /// Uses the key revision on its way (activate_key_revision, 9.5.1.8.8).
+    fn activate_revision(&self, st: &mut State) {
+        let Some(r) = st.revision.take() else {
+            return;
+        };
+        if let (Some(enc), Some(km)) = (&self.participant, r.participant) {
+            enc.set_key_material(km);
+        }
+        for (guid, (sub, payload)) in r.endpoints {
+            let Some(e) = st.endpoints.get_mut(&guid) else {
+                continue;
+            };
+            if let (Some(enc), Some(km)) = (&e.submessage, sub) {
+                enc.set_key_material(km);
+            }
+            if let (Some(enc), Some(km)) = (&e.payload, payload) {
+                e.payload_old.insert(0, enc.key_material());
+                e.payload_old.truncate(crypto::KEPT_REVISIONS - 1);
+                enc.set_key_material(km.clone());
+                // Its own changes are read back by local late joiners.
+                if let Some(ds) = st.decoders.get(&guid) {
+                    ds.iter().any(|d| d.add_revision(km.clone()));
+                }
+            }
         }
     }
 
@@ -1395,6 +1738,16 @@ impl Security {
         let mut g = self.state();
         let st = &mut *g;
         let mut out = std::mem::take(&mut st.out);
+        if let Some(r) = &st.revision {
+            let acked = st
+                .peers
+                .values()
+                .filter_map(|p| p.volatile_writer.as_ref())
+                .all(|w| w.is_all_acked());
+            if acked || now >= r.at {
+                self.activate_revision(st);
+            }
+        }
         for peer in st.peers.values_mut() {
             if let Some((m, at, wait)) = &mut peer.last_sent
                 && *at <= now
@@ -1427,6 +1780,7 @@ impl Security {
         if !st.out.is_empty() || !st.events.is_empty() {
             take(Some(Instant::now()));
         }
+        take(st.revision.as_ref().map(|r| r.at));
         for p in st.peers.values() {
             if p.authenticated.is_none() {
                 take(p.last_sent.as_ref().map(|(_, at, _)| *at));

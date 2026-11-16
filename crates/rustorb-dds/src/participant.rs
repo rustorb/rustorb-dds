@@ -2498,6 +2498,10 @@ pub struct DomainParticipant {
     /// plugin, when they are distributed.
     #[cfg(feature = "security")]
     log_thread: Option<JoinHandle<()>>,
+    /// The thread that asks OCSP again for the statuses, and what stops
+    /// it.
+    #[cfg(feature = "security")]
+    ocsp_thread: Option<(JoinHandle<()>, std::sync::mpsc::Sender<()>)>,
 }
 
 impl std::fmt::Debug for DomainParticipant {
@@ -2665,10 +2669,41 @@ impl DomainParticipant {
             thread: Some(thread),
             #[cfg(feature = "security")]
             log_thread: None,
+            #[cfg(feature = "security")]
+            ocsp_thread: None,
         };
         #[cfg(feature = "security")]
         participant.start_security_log()?;
+        #[cfg(feature = "security")]
+        participant.start_ocsp_refresh()?;
         Ok(participant)
+    }
+
+    /// With OCSP and a refresh period: a thread that asks again, each
+    /// period, for this participant's status and those of its
+    /// authenticated peers, and revokes the peers found revoked.
+    #[cfg(feature = "security")]
+    fn start_ocsp_refresh(&mut self) -> Result<()> {
+        let Some(period) = self.shared.security.as_ref().and_then(|s| s.ocsp_refresh()) else {
+            return Ok(());
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let shared = self.shared.clone();
+        let t = std::thread::Builder::new()
+            .name(format!("rustorb-dds-{}-ocsp", self.shared.domain_id))
+            .spawn(move || {
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(period)
+                {
+                    let Some(sec) = shared.security.clone() else {
+                        return;
+                    };
+                    for prefix in sec.check_ocsp() {
+                        let _ = revoke(&shared, &sec, prefix);
+                    }
+                }
+            })?;
+        self.ocsp_thread = Some((t, tx));
+        Ok(())
     }
 
     /// With the logging plugin of DDS Security distributing its messages
@@ -2935,10 +2970,72 @@ impl DomainParticipant {
         v.sort();
         v
     }
+
+    /// Revokes the identity of the authenticated participant `prefix`
+    /// (DDS Security 1.2, on_revoke_identity, 9.3.2.12.2): communication
+    /// with it ends and its certificate is not authenticated again. When
+    /// the governance has `<enable_key_revision>true</enable_key_revision>`,
+    /// the key material it had is revised as [`Self::revise_keys`] does,
+    /// so that it cannot read what is sent from now on. Whether `prefix`
+    /// was an authenticated participant; `PreconditionNotMet` without
+    /// DDS Security.
+    #[cfg(feature = "security")]
+    pub fn revoke_participant(&self, prefix: GuidPrefix) -> Result<bool> {
+        let sec = self
+            .shared
+            .security
+            .clone()
+            .ok_or(Error::PreconditionNotMet)?;
+        revoke(&self.shared, &sec, prefix)
+    }
+
+    /// Revises the key material of the participant and of its endpoints
+    /// (DDS Security 1.2, revise_local_entity_keys, 9.8.9.5): the new
+    /// revision goes to the authenticated participants matched, and is
+    /// used once they acknowledge it or after 2 seconds. The volatile
+    /// message endpoints keep their keys, which belong to one peer each.
+    /// Readers keep the last 8 revisions of what they receive, and writers
+    /// send the earlier revisions to readers that match later, for the
+    /// changes kept in their history. The revision number of the
+    /// participant's key material (0 without RTPS protection);
+    /// `PreconditionNotMet` without DDS Security.
+    #[cfg(feature = "security")]
+    pub fn revise_keys(&self) -> Result<i32> {
+        let sec = self
+            .shared
+            .security
+            .as_ref()
+            .ok_or(Error::PreconditionNotMet)?;
+        Ok(sec.revise_keys(Instant::now()))
+    }
+}
+
+/// Revokes the identity of `prefix` and forgets it.
+#[cfg(feature = "security")]
+fn revoke(shared: &Shared, sec: &Security, prefix: GuidPrefix) -> Result<bool> {
+    let now = Instant::now();
+    if !sec.revoke_participant(&prefix, now) {
+        return Ok(false);
+    }
+    {
+        let mut g = shared.lock()?;
+        participant_event(
+            &mut g,
+            ParticipantEvent::Removed(prefix, rustorb_rtps::spdp::RemovalReason::Disposed),
+            now,
+        );
+    }
+    shared.flush();
+    Ok(true)
 }
 
 impl Drop for DomainParticipant {
     fn drop(&mut self) {
+        #[cfg(feature = "security")]
+        if let Some((t, stop)) = self.ocsp_thread.take() {
+            drop(stop);
+            let _ = t.join();
+        }
         // The security log writer goes first, while the participant still
         // works.
         #[cfg(feature = "security")]

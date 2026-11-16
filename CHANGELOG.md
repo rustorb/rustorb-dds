@@ -8,6 +8,33 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security: OCSP (RFC 6960; DDS Security 1.2, 10.3.2.5 and 10.3.3,
+  #73). `SecurityConfig::ocsp` (`OcspOptions`), or the properties
+  `rustorb.dds.sec.auth.ocsp` (a responder URL, or `aia`),
+  `.ocsp_timeout` and `.ocsp_refresh`. The participant must be good to
+  start, staples its response to its handshake messages (`ocsp_status`),
+  and checks its peers: by their stapled response, or else by asking the
+  responder. The statuses are asked again every refresh period, and a peer
+  found revoked is revoked as `revoke_participant` does. Stapled responses
+  are taken even with OCSP off. In rustorb-dds-security: the `ocsp`
+  module, `IdentityOptions::ocsp`, `Identity::verify_peer_with`, and a new
+  `ocsp` parameter of `Identity::from_uris_with`.
+
+- DDS Security: identity revocation and key revision (DDS Security 1.2,
+  9.3.2.12.2, 9.5.1.6 and 9.8.9.5, #73).
+  `DomainParticipant::revoke_participant` ends the communication with an
+  authenticated participant and refuses its certificate from then on;
+  with `<enable_key_revision>` in the governance it also revises the keys.
+  `DomainParticipant::revise_keys` revises the key material of the
+  participant and its endpoints (not the volatile ones), sends it to the
+  matched participants and uses it once they acknowledge it or after 2 s.
+  In rustorb-dds-security, `KeyMaterial::revision` (the first three octets
+  of the transformation kind), `KeyMaterial::revised`,
+  `Encoder::set_key_material` and `Decoder::add_revision` (the last 8
+  revisions are kept); `Encoder::key_material` and `Decoder::key_material`
+  now return the key material by value. `DomainRule::enable_key_revision`
+  is read from the governance.
+
 - DDS Security: data tagging, DDS:Tagging:DDS_Discovery (DDS Security
   1.2, 9.7, #73). `DataWriterQos::data_tags` and `DataReaderQos::data_tags`
   are announced as `PID_DATA_TAGS` (`EndpointData::data_tags` in

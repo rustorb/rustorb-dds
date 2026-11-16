@@ -6,7 +6,7 @@ rustorb/rustorb#111 の D5（#55）の 4 番目、#59 をまとめる。OMG DDS 
 - アクセス制御 DDS:Access:Permissions: permissions CA が S/MIME で署名した governance と permissions の XML 文書。
 - 暗号 DDS:Crypto:AES-GCM-GMAC: AES-256-GCM（暗号化）と AES-256-GMAC（署名）。RTPS メッセージ、submessage、payload の各段で、governance の指定どおりに守る。
 
-暗号には RustCrypto の crate（aes-gcm、sha2、hmac、p256、rsa、x509-cert、cms など）を、XML には roxmltree を使う。どれも MIT/Apache-2.0（`subtle` だけ BSD-3-Clause、RustCrypto が使う）。
+暗号には RustCrypto の crate（aes-gcm、sha2、hmac、p256、rsa、x509-cert、cms、x509-ocsp など）を、XML には roxmltree を使う。どれも MIT/Apache-2.0（`subtle` だけ BSD-3-Clause、RustCrypto が使う）。
 
 ## 使い方
 
@@ -48,6 +48,23 @@ let participant = DomainParticipant::with_config(config)?;
   - 自分の証明書が失効していれば参加者を作れない（validate_local_identity）。handshake の相手の証明書が失効していれば、認証しない（validate_remote_identity、10.3.3）。
   - CRL は参加者を作るときに一度だけ読む。
 
+### OCSP
+
+#73 で足した（RFC 6960。10.3.2.5、10.3.3）。property の名前は仕様にないので rustorb-dds 独自にした。`SecurityConfig::ocsp`（`OcspOptions`）でも同じことを決められる。
+
+- `rustorb.dds.sec.auth.ocsp`: OCSP を使う。値は responder の URL（`http://host[:port]/path`）か、`aia`（証明書の Authority Information Access の responder）。`https:` は使えない。
+- `rustorb.dds.sec.auth.ocsp_timeout`: 問い合わせの timeout の秒数（既定は 3）。
+- `rustorb.dds.sec.auth.ocsp_refresh`: 状態を問い合わせなおす間隔の秒数（既定は 300。0 なら認証のときだけ）。
+
+ふるまい:
+
+- 参加者を作るとき、自分の証明書の状態を responder に問い合わせる。good でなければ（revoked、unknown、responder に届かない）、参加者を作れない。good の応答は handshake の request と reply に `ocsp_status` として付ける（stapling）。
+- 相手が `ocsp_status` を付けてきたら、OCSP を使わない設定でも確かめる。identity CA（か、CA が `id-kp-OCSPSigning` で委ねた responder）の署名があり、その証明書についての有効な応答で、good なら問い合わせずに認める。revoked なら認証しない。それ以外は付いていないものとして扱う。
+- OCSP を使う設定なら、相手の証明書の状態を responder に問い合わせ、good でなければ認証しない。結果は refresh の間隔（と応答の nextUpdate）まで覚えておく。
+- refresh の間隔ごとに、別の thread で自分の状態と認証の済んだ相手の状態を問い合わせなおす。revoked になった相手は `revoke_participant` と同じく失効させ、governance が許せば鍵を更新する。
+- 問い合わせは HTTP/1.0 の POST で、SHA-1 の CertID、nonce なし。handshake の中の問い合わせは、そのあいだ参加者の thread を止める（timeout まで）。
+- secure SPDP の `identity_status_token`（10.3.2.2）での状態の配布はしない。
+
 ### ログ（DDS:Logging:DDS_LogTopic）
 
 #73 で足した、組み込みの logging plugin（9.6、10.6）。`SecurityConfig::logging` に `security_log::LogOptions` を入れるか、次の PROPERTY で設定する。名前は `dds.sec.<plugin>.builtin.<plugin 名>.` の形にした（仕様は名前を決めていない）。
@@ -88,9 +105,19 @@ let participant = DomainParticipant::with_config(config)?;
 - 自分の writer・reader は、作るときに確かめる（check_create_datawriter・datareader）。相手の writer・reader は、match するときに、相手の permissions とタグで確かめる。
 - writer と reader のタグどうしは比べない（仕様にない）。タグは今は Rust の QoS にだけあり、他の言語の QoS にはない。
 
+### 失効と鍵の更新（key revision）
+
+#73 で足した（9.3.2.12.2、9.5.1.6、9.8.9.5、10.5.3.2）。
+
+- `DomainParticipant::revoke_participant(prefix)` は、認証の済んだ相手の identity を失効させる（on_revoke_identity）。その相手とのやりとりをやめ（discovery から外す）、その証明書は二度と認証しない。governance の `<enable_key_revision>true</enable_key_revision>` のとき、続けて鍵を更新する。`<enable_key_revision>` のない（1.1 の）governance では偽とみなす。
+- `DomainParticipant::revise_keys()` は鍵を更新する（revise_local_entity_keys）。参加者の鍵（RTPS protection）と、writer・reader の submessage と payload の鍵の、新しい revision を作る。transformation_kind の先頭 3 octet の revision を 1 つ進め、master_salt と master_sender_key は新しくし、sender_key_id と receiver-specific key はそのままにする。volatile message の鍵（相手ごとの KxKey）は更新しない。
+- 新しい revision は、認証の済んだ match している相手に volatile message で送る。相手がみな ack するか、2 秒たったら使い始める（activate_key_revision）。それより前に失効した相手には送らないので、使い始めたあとのものは読めない。
+- 受け取る側は、同じ sender_key_id の鍵を revision として足し、最後の 8 個を持つ。writer は、あとで match した reader に、今の鍵に加えて 7 個前までの payload の鍵も送る（history に残るサンプルは、書いたときの鍵で暗号化してあるため）。8 個以上前の鍵で書いたサンプルは、あとで match した reader には読めない。
+- 他の実装（Cyclone DDS 0.10.4、Fast DDS 2.11）は revision を作らないので、相互接続では revision 0 のままで、これまでと変わらない。
+
 ### ほかの言語から
 
-どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
+どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`rustorb.dds.sec.auth.ocsp*`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
 
 - C ABI: `rdds_participant_qos` の `property`（`rdds_property` の配列）と `property_len`。
 - C++: `dds::core::policy::Property`（`set(name, value)`）を `DomainParticipantQos` に入れる。
@@ -111,14 +138,14 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags、identity の失効と鍵の更新（あとで match した reader が古い revision のサンプルを読めること）、OCSP（この process の中の responder で、作るときの確認と、あとで revoked になった相手の失効）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL。`tests/ocsp.rs`: 応答の署名（委ねた responder を含む）、SHA-1 と SHA-256 の CertID、HTTP の問い合わせ、stapling）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
 - `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
 ## 未対応
 
 - secure SPDP の `identity_status_token`（読み飛ばすだけで、送らない）。
-- OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）。
+- PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK、#84）、`https:` の OCSP responder。
 - 他の言語の QoS の data tags。
 - ログの LoggerListener、レガシーの `DDS:Security:LogTopic` への publish、他の言語でのログのトピックの型。
-- 鍵の更新（key revision）。
+- 他の言語からの `revoke_participant`・`revise_keys`。

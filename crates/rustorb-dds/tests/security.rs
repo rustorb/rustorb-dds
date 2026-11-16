@@ -29,6 +29,7 @@ fn security(who: &str) -> SecurityConfig {
         permissions: f(&format!("permissions_{who}.p7s")),
         password: None,
         crl: None,
+        ocsp: None,
         logging: None,
     }
 }
@@ -262,6 +263,37 @@ fn password_and_crl_properties() {
     let got = c.security.unwrap();
     assert_eq!(got.password.as_deref(), Some("OpenSesame"));
     assert_eq!(got.crl.as_deref(), Some("file:crl.pem"));
+    assert_eq!(got.ocsp, None);
+
+    // OCSP: a URL or aia, and its periods.
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut p: Vec<(&str, &str)> = props.to_vec();
+        p.extend_from_slice(extra);
+        rustorb_dds::SecurityConfig::try_from_properties(p).map(|s| s.ocsp)
+    };
+    let o = with(&[
+        ("rustorb.dds.sec.auth.ocsp", "http://ocsp.example:8080/"),
+        ("rustorb.dds.sec.auth.ocsp_timeout", "7"),
+        ("rustorb.dds.sec.auth.ocsp_refresh", "0"),
+    ])
+    .unwrap()
+    .unwrap();
+    assert_eq!(o.responder.as_deref(), Some("http://ocsp.example:8080/"));
+    assert_eq!(o.timeout, Duration::from_secs(7));
+    assert_eq!(o.refresh, Duration::ZERO);
+    let o = with(&[("rustorb.dds.sec.auth.ocsp", "aia")])
+        .unwrap()
+        .unwrap();
+    assert_eq!(o.responder, None);
+    assert_eq!(o.refresh, Duration::from_secs(300));
+    assert!(with(&[("rustorb.dds.sec.auth.ocsp", "https://x/")]).is_err());
+    assert!(
+        with(&[
+            ("rustorb.dds.sec.auth.ocsp", "aia"),
+            ("rustorb.dds.sec.auth.ocsp_refresh", "soon"),
+        ])
+        .is_err()
+    );
 }
 
 /// The builtin logging plugin (DDS:Logging:DDS_LogTopic): participant1
@@ -440,4 +472,273 @@ fn data_tags_are_checked_against_the_permissions() {
         .take()
         .iter()
         .any(|s| s.data.is_some())));
+}
+
+fn take_messages(reader: &rustorb_dds::DataReader<Greeting>, got: &mut Vec<String>) {
+    got.extend(
+        reader
+            .take()
+            .into_iter()
+            .filter_map(|s| s.data)
+            .map(|g| g.message),
+    );
+}
+
+/// Revoking the identity of a participant (on_revoke_identity) ends the
+/// communication with it, keeps it from authenticating again, and revises
+/// the keys of the others (the governance enables key revision); a reader
+/// that matches after revisions still reads the history written before.
+#[test]
+fn revoked_identities_and_key_revisions() {
+    use rustorb_dds::{DataWriterQos, DurabilityKind, Reliability};
+    let p1 = participant(40, Some("p1")).unwrap();
+    let p2 = participant(40, Some("p2")).unwrap();
+    let p3 = participant(40, Some("p3")).unwrap();
+    let t1 = p1.create_topic::<Greeting>("Square").unwrap();
+    let writer = p1
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &t1,
+            DataWriterQos {
+                reliability: Reliability::reliable(),
+                durability: DurabilityKind::TransientLocal,
+                history: History::KeepAll,
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let reader_qos = DataReaderQos {
+        reliability: Reliability::reliable(),
+        durability: DurabilityKind::TransientLocal,
+        ..keep_all()
+    };
+    let t2 = p2.create_topic::<Greeting>("Square").unwrap();
+    let r2 = p2
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t2, reader_qos.clone())
+        .unwrap();
+    let t3 = p3.create_topic::<Greeting>("Square").unwrap();
+    let r3 = p3
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t3, reader_qos.clone())
+        .unwrap();
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 2),
+        "not matched"
+    );
+    let write = |m: &str| {
+        writer
+            .write(&Greeting {
+                index: 0,
+                message: m.into(),
+            })
+            .unwrap()
+    };
+    write("before");
+    let (mut got2, mut got3) = (Vec::new(), Vec::new());
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        take_messages(&r3, &mut got3);
+        got2.len() == 1 && got3.len() == 1
+    }));
+
+    // Only an authenticated participant can be revoked.
+    assert!(!p1.revoke_participant(p1.guid().prefix).unwrap());
+    assert!(p1.revoke_participant(p3.guid().prefix).unwrap());
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 1),
+        "the revoked reader is still matched"
+    );
+    write("after revocation");
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        got2.len() == 2
+    }));
+    // A second explicit revision: the participant's key material is at
+    // its second revision.
+    assert_eq!(p1.revise_keys().unwrap(), 2);
+    std::thread::sleep(Duration::from_millis(300));
+    write("after two revisions");
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        got2.len() == 3
+    }));
+    assert_eq!(got2, ["before", "after revocation", "after two revisions"]);
+
+    // A late joiner reads the history encoded with all three revisions:
+    // the writer sends it the earlier ones.
+    let p4 = participant(40, Some("p2")).unwrap();
+    let t4 = p4.create_topic::<Greeting>("Square").unwrap();
+    let late = p4
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t4, reader_qos)
+        .unwrap();
+    let mut got_late = Vec::new();
+    assert!(
+        wait_until(|| {
+            take_messages(&late, &mut got_late);
+            got_late.len() == 3
+        }),
+        "late joiner got {got_late:?}"
+    );
+
+    // The revoked participant got nothing more and does not authenticate
+    // again.
+    std::thread::sleep(Duration::from_secs(1));
+    take_messages(&r3, &mut got3);
+    assert_eq!(got3, ["before"]);
+    // The readers of participant2 and of the late joiner.
+    assert_eq!(writer.matched_subscriptions().len(), 2);
+}
+
+/// Serial numbers and the responses about them.
+type Answers = std::sync::Arc<std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>>>;
+
+/// An OCSP responder over HTTP in this process, for the certificates of
+/// `CERTS`: it answers each request with the response file of the
+/// certificate whose serial number is in it. The answers can be changed
+/// while it runs.
+struct Responder {
+    url: String,
+    answers: Answers,
+}
+
+impl Responder {
+    fn new() -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let r = Responder {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            answers: Default::default(),
+        };
+        let answers = r.answers.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                let Ok(mut s) = s else { continue };
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = s.read(&mut buf) {
+                    req.extend_from_slice(&buf[..n]);
+                    // The request of rustorb is under 200 octets after
+                    // its head.
+                    if n == 0
+                        || req
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .is_some_and(|e| {
+                                let head = String::from_utf8_lossy(&req[..e]).to_lowercase();
+                                let len: usize = head
+                                    .lines()
+                                    .find_map(|l| l.strip_prefix("content-length:"))
+                                    .and_then(|v| v.trim().parse().ok())
+                                    .unwrap_or(0);
+                                req.len() >= e + 4 + len
+                            })
+                    {
+                        break;
+                    }
+                }
+                let found = answers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(serial, _): &&(Vec<u8>, Vec<u8>)| {
+                        req.windows(serial.len()).any(|w| w == serial.as_slice())
+                    })
+                    .map(|(_, a)| a.clone());
+                let _ = match found {
+                    Some(a) => s
+                        .write_all(
+                            format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n", a.len())
+                                .as_bytes(),
+                        )
+                        .and_then(|_| s.write_all(&a)),
+                    None => s.write_all(b"HTTP/1.0 404 Not Found\r\n\r\n"),
+                };
+            }
+        });
+        r
+    }
+
+    /// Answers about the certificate of `who` with the response file `f`.
+    fn answer(&self, who: &str, f: &str) {
+        let c = std::fs::read(format!("{CERTS}{who}_cert.pem")).unwrap();
+        let serial = rustorb_dds_security::pki::Cert::parse(&c)
+            .unwrap()
+            .issuer_and_serial()
+            .1;
+        let a = std::fs::read(format!("{CERTS}{f}")).unwrap();
+        let mut all = self.answers.lock().unwrap();
+        all.retain(|(s, _)| *s != serial);
+        all.push((serial, a));
+    }
+}
+
+/// OCSP: the participants start only with a good status, and one whose
+/// certificate the responder later says is revoked is revoked by the
+/// others when they ask again.
+#[test]
+fn ocsp_statuses_are_checked_and_refreshed() {
+    use rustorb_dds::OcspOptions;
+    let r = Responder::new();
+    r.answer("p1", "ocsp_p1_good.der");
+    r.answer("p2", "ocsp_p2_good_delegated.der");
+    r.answer("p3", "ocsp_p3_good.der");
+    let with_ocsp = |who: &str| {
+        let mut s = security(who);
+        s.ocsp = Some(OcspOptions {
+            responder: Some(r.url.clone()),
+            timeout: Duration::from_secs(5),
+            refresh: Duration::from_millis(500),
+        });
+        participant_with(41, s)
+    };
+    let p1 = with_ocsp("p1").unwrap();
+    let p2 = with_ocsp("p2").unwrap();
+    let p3 = with_ocsp("p3").unwrap();
+    let t1 = p1.create_topic::<Greeting>("Square").unwrap();
+    let writer = p1
+        .create_publisher()
+        .unwrap()
+        .create_datawriter(&t1)
+        .unwrap();
+    let _readers: Vec<_> = [&p2, &p3]
+        .iter()
+        .map(|p| {
+            let t = p.create_topic::<Greeting>("Square").unwrap();
+            p.create_subscriber()
+                .unwrap()
+                .create_datareader_with_qos(&t, keep_all())
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 2),
+        "not matched"
+    );
+    // The responder now says participant3 is revoked: it can no longer
+    // start, and the others revoke it when they ask again.
+    r.answer("p3", "ocsp_p3_revoked.der");
+    match with_ocsp("p3") {
+        Err(Error::Security(e)) => assert!(e.contains("revoked"), "{e}"),
+        other => panic!("started: {:?}", other.map(|_| ())),
+    }
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 1
+            && writer.matched_subscriptions()[0].prefix == p2.guid().prefix),
+        "the revoked participant is still matched: {:?}",
+        writer.matched_subscriptions()
+    );
+    // And a participant without its own status cannot join.
+    let mut s = security("p1");
+    s.ocsp = Some(OcspOptions {
+        responder: Some("http://127.0.0.1:9/".into()),
+        timeout: Duration::from_millis(500),
+        refresh: Duration::ZERO,
+    });
+    assert!(participant_with(41, s).is_err());
 }
