@@ -175,18 +175,8 @@ impl ParticipantConfig {
         }
         #[cfg(feature = "security")]
         {
-            let missing: Vec<&str> = SecurityConfig::PROPERTIES
-                .iter()
-                .copied()
-                .filter(|n| !sec.iter().any(|(k, _)| k == n))
-                .collect();
-            if !missing.is_empty() {
-                return Err(Error::Security(format!(
-                    "missing properties: {}",
-                    missing.join(", ")
-                )));
-            }
-            self.security = SecurityConfig::from_properties(sec);
+            self.security =
+                Some(SecurityConfig::try_from_properties(sec).map_err(Error::Security)?);
             Ok(())
         }
         #[cfg(not(feature = "security"))]
@@ -2504,6 +2494,10 @@ fn type_lookup_replied(inner: &mut Inner, r: TypeLookupReplied, now: Instant) {
 pub struct DomainParticipant {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    /// The thread that publishes the messages of the security logging
+    /// plugin, when they are distributed.
+    #[cfg(feature = "security")]
+    log_thread: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for DomainParticipant {
@@ -2665,10 +2659,54 @@ impl DomainParticipant {
         let thread = std::thread::Builder::new()
             .name(format!("rustorb-dds-{domain_id}"))
             .spawn(move || run(s, incoming))?;
-        Ok(DomainParticipant {
+        #[allow(unused_mut)]
+        let mut participant = DomainParticipant {
             shared,
             thread: Some(thread),
-        })
+            #[cfg(feature = "security")]
+            log_thread: None,
+        };
+        #[cfg(feature = "security")]
+        participant.start_security_log()?;
+        Ok(participant)
+    }
+
+    /// With the logging plugin of DDS Security distributing its messages
+    /// (10.6): a writer of [`LOG_TOPIC`](crate::security_log::LOG_TOPIC),
+    /// and a thread that writes there what the plugin logs.
+    #[cfg(feature = "security")]
+    fn start_security_log(&mut self) -> Result<()> {
+        use crate::security_log::{BuiltinLoggingTypeV2, LOG_TOPIC};
+        let Some(logger) = self
+            .shared
+            .security
+            .as_ref()
+            .and_then(|s| s.logger())
+            .filter(|l| l.options().distribute)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let topic = self.create_topic::<BuiltinLoggingTypeV2>(LOG_TOPIC)?;
+        let writer = self.create_publisher()?.create_datawriter_with_qos(
+            &topic,
+            DataWriterQos {
+                history: History::KeepLast(64),
+                ..DataWriterQos::default()
+            },
+        )?;
+        let (tx, rx) = std::sync::mpsc::channel::<BuiltinLoggingTypeV2>();
+        logger.attach(tx);
+        self.log_thread = Some(
+            std::thread::Builder::new()
+                .name(format!("rustorb-dds-{}-log", self.shared.domain_id))
+                .spawn(move || {
+                    for m in rx {
+                        let _ = writer.write(&m);
+                    }
+                })?,
+        );
+        Ok(())
     }
 
     /// The domain id.
@@ -2901,6 +2939,15 @@ impl DomainParticipant {
 
 impl Drop for DomainParticipant {
     fn drop(&mut self) {
+        // The security log writer goes first, while the participant still
+        // works.
+        #[cfg(feature = "security")]
+        if let Some(t) = self.log_thread.take() {
+            if let Some(l) = self.shared.security.as_ref().and_then(|s| s.logger()) {
+                l.close();
+            }
+            let _ = t.join();
+        }
         // The authenticated participants take the deletion only from
         // DCPSParticipantsSecure (DDS Security 1.2, 7.5.1.6): it is
         // written there, and the thread is given a moment to deliver it.

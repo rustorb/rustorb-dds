@@ -26,6 +26,15 @@ fn governance_rules() {
     );
     assert_eq!(d.topic_rule("Circle").unwrap().topic_expression, "*");
     assert!(g.domain_rule(231, "").is_err());
+    // The logging topics have the builtin rule of 10.6, not the
+    // governance's "*".
+    for topic in ["DDS:Security:LogTopicV2", "DDS:Security:LogTopic"] {
+        let t = d.topic_rule(topic).unwrap();
+        assert!(t.enable_read_access_control && !t.enable_write_access_control);
+        assert!(!t.enable_discovery_protection);
+        assert_eq!(t.metadata_protection_kind, ProtectionKind::Sign);
+        assert_eq!(t.data_protection_kind, ProtectionKind::Encrypt);
+    }
 }
 
 #[test]

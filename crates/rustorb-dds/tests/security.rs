@@ -29,6 +29,7 @@ fn security(who: &str) -> SecurityConfig {
         permissions: f(&format!("permissions_{who}.p7s")),
         password: None,
         crl: None,
+        logging: None,
     }
 }
 
@@ -261,4 +262,110 @@ fn password_and_crl_properties() {
     let got = c.security.unwrap();
     assert_eq!(got.password.as_deref(), Some("OpenSesame"));
     assert_eq!(got.crl.as_deref(), Some("file:crl.pem"));
+}
+
+/// The builtin logging plugin (DDS:Logging:DDS_LogTopic): participant1
+/// logs to a file and distributes on DDS:Security:LogTopicV2, which
+/// participant2 is granted to read and participant1 is not.
+#[test]
+fn security_events_are_logged() {
+    use rustorb_dds::security_log::{BuiltinLoggingTypeV2, LOG_TOPIC, LogOptions, LoggingLevel};
+    let file = std::env::temp_dir().join(format!("rustorb-dds-seclog-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut s1 = security("p1");
+    s1.logging = Some(LogOptions {
+        log_level: LoggingLevel::InformationalLevel,
+        log_file: Some(file.clone()),
+        distribute: true,
+    });
+    let p1 = participant_with(38, s1).unwrap();
+    let p2 = participant(38, Some("p2")).unwrap();
+    let reader = p2
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(
+            &p2.create_topic::<BuiltinLoggingTypeV2>(LOG_TOPIC).unwrap(),
+            DataReaderQos {
+                reliability: rustorb_dds::Reliability::reliable(),
+                ..keep_all()
+            },
+        )
+        .unwrap();
+    let topic = p1.create_topic::<BuiltinLoggingTypeV2>(LOG_TOPIC).unwrap();
+    let sub = p1.create_subscriber().unwrap();
+    let mut got = None;
+    assert!(
+        wait_until(|| {
+            // Not granted: refused, and that is logged.
+            match sub.create_datareader(&topic) {
+                Err(Error::Security(_)) => {}
+                other => panic!("created: {:?}", other.map(|_| ())),
+            }
+            got = reader
+                .take()
+                .into_iter()
+                .filter_map(|s| s.data)
+                .find(|m| m.msgid == "AccessControl.check_create_datareader");
+            got.is_some()
+        }),
+        "no log message came"
+    );
+    let m = got.unwrap();
+    assert_eq!(m.facility, 10);
+    assert_eq!(m.severity, LoggingLevel::ErrorLevel);
+    assert!(
+        m.message.contains("subscribe to DDS:Security:LogTopicV2"),
+        "{}",
+        m.message
+    );
+    let dds = &m.structured_data[0];
+    assert_eq!(dds.key, "DDS");
+    let g = p1.guid().to_bytes();
+    let hex: String = g.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(dds.value[0].value.replace('.', ""), hex);
+    assert_eq!(dds.value[1].value, "38");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("INFORMATIONAL_LEVEL Authentication.validate_local_identity"),
+        "{text}"
+    );
+    assert!(text.contains("authenticated as"), "{text}");
+    assert!(
+        text.contains("ERROR_LEVEL AccessControl.check_create_datareader"),
+        "{text}"
+    );
+    drop(p1);
+    let _ = std::fs::remove_file(&file);
+}
+
+/// The logging options come from the PROPERTY too.
+#[test]
+fn logging_properties() {
+    use rustorb_dds::security_log::{LogOptions, LoggingLevel};
+    let s = security("p1");
+    let mut props = vec![
+        ("dds.sec.auth.identity_ca", s.identity_ca.clone()),
+        (
+            "dds.sec.auth.identity_certificate",
+            s.identity_certificate.clone(),
+        ),
+        ("dds.sec.auth.private_key", s.private_key.clone()),
+        ("dds.sec.access.permissions_ca", s.permissions_ca.clone()),
+        ("dds.sec.access.governance", s.governance.clone()),
+        ("dds.sec.access.permissions", s.permissions.clone()),
+        (LogOptions::LOGGING_LEVEL, "NOTICE_LEVEL".into()),
+        (LogOptions::DISTRIBUTE, "true".into()),
+    ];
+    let mut c = ParticipantConfig::new(0);
+    c.set_properties(props.iter().map(|(n, v)| (*n, v.as_str())))
+        .unwrap();
+    let l = c.security.clone().unwrap().logging.unwrap();
+    assert_eq!(l.log_level, LoggingLevel::NoticeLevel);
+    assert!(l.distribute);
+    assert_eq!(l.log_file, None);
+    props.push((LogOptions::DISTRIBUTE, "sometimes".into()));
+    let e = c
+        .set_properties(props.iter().map(|(n, v)| (*n, v.as_str())))
+        .unwrap_err();
+    assert!(e.to_string().contains("distribute"), "{e}");
 }
