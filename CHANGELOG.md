@@ -1,10 +1,15 @@
 # Changelog
 
-The releases of rustorb-dds. The Python package (`rustorb-dds` on PyPI)
-is tagged `python-v<version>`; the Rust crates are not published yet. See
-[docs/release.md](docs/release.md).
+The releases of rustorb-dds. From 0.2.0 on, the Rust crates (on
+crates.io) and the Python package (`rustorb-dds` on PyPI) have one version
+and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
+`python-v0.1.0`. See [docs/release.md](docs/release.md).
 
-## [Unreleased]
+## [0.2.0] - unreleased
+
+The first release of the Rust crates on crates.io: `rustorb-dds`,
+`rustorb-rtps`, `rustorb-xtypes`, `rustorb-dds-security`,
+`rustorb-dds-corba` and `rustorb-dds-ffi` (#75).
 
 ### Added
 
@@ -232,6 +237,14 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 ### Changed
 
 - The minimum supported Rust version is 1.89, for `File::try_lock` (#71).
+- rustorb-cdr and rustorb-typesupport 0.6.0 (from 0.2.0), and
+  rustorb-core 0.6.0 for rustorb-dds-corba (#65). rustorb-cdr writes the
+  XCDR2 encapsulation identifiers of DDS-XTypes Table 60 (`CDR2_LE` is
+  `0x0007`) itself since 0.5.0, so rustorb-dds no longer rewrites them;
+  it still reads those of Table 39.
+- One version for every package, set with `tools/set-version.py`, and
+  one tag `v<version>` that publishes the crates and the Python package
+  (`.github/workflows/release.yml`, #75).
 
 ### Fixed
 

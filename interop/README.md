@@ -350,8 +350,9 @@ Found on the way:
   malformed message, a DATA whose encapsulation identifier is `0x0011`
   (PLAIN_CDR2 little endian in DDS-XTypes Table 39 and DDSI-RTPS 2.5
   Table 10.3), and writes `0x0007` (`CDR2_LE`, Table 60) itself.
-  rustorb-cdr 0.2 writes the Table 39 values, so rustorb-dds rewrites
-  them to those of Table 60 when it writes; it reads both.
+  rustorb-cdr 0.5 and later write the Table 60 values (0.2 wrote those
+  of Table 39, which rustorb-dds rewrote until #65); rustorb-dds reads
+  both.
 - TypeLookup (rustorb-dds#33): Cyclone DDS 0.10.4 announces the four
   TypeLookup endpoints (bits 12 to 15 of `availableBuiltinEndpoints`);
   Fast DDS 2.11.2 does not, and has no TypeLookup service. Cyclone asks

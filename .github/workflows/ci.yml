@@ -29,6 +29,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      # The packages agree on their version (docs/release.md).
+      - run: python3 tools/set-version.py --check
 
   clippy:
     runs-on: ubuntu-24.04

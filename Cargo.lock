@@ -760,25 +760,19 @@ dependencies = [
 
 [[package]]
 name = "rustorb-cdr"
-version = "0.2.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4a04f61a080b2c9b42b9c79d4bcc0ea2fd4a8168c0602fdee919edd5e6e60e8"
-
-[[package]]
-name = "rustorb-cdr"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da4baf38074b8b141efc26b5a3e06df6d1580a6d7ab6411c62185e27c38c54ec"
+checksum = "1e210e1a97b177e4691bfa48d522e1459d6e7ad6bb0b9335c5b1605c1ef8ecaf"
 
 [[package]]
 name = "rustorb-core"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899ab6f4d252174313c50dbedb84712eda9d8400adb847c28140a501c0a64082"
+checksum = "d42dc5895ec0ba859d8d2781c8bc644e251a1b82eb63a6db740947f2c9f4bd84"
 dependencies = [
  "libc",
  "rustls",
- "rustorb-cdr 0.3.0",
+ "rustorb-cdr",
  "rustorb-giop",
  "socket2",
  "tokio",
@@ -787,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "rustorb-dds"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "rustorb-dds-security",
  "rustorb-rtps",
@@ -797,9 +791,9 @@ dependencies = [
 
 [[package]]
 name = "rustorb-dds-corba"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
- "rustorb-cdr 0.2.0",
+ "rustorb-cdr",
  "rustorb-core",
  "rustorb-typesupport",
  "rustorb-xtypes",
@@ -807,9 +801,9 @@ dependencies = [
 
 [[package]]
 name = "rustorb-dds-ffi"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
- "rustorb-cdr 0.2.0",
+ "rustorb-cdr",
  "rustorb-dds",
  "rustorb-typesupport",
  "rustorb-xtypes",
@@ -817,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "rustorb-dds-python"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "pyo3-build-config",
@@ -827,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "rustorb-dds-security"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -852,19 +846,19 @@ dependencies = [
 
 [[package]]
 name = "rustorb-giop"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "559b94c6f6a3efbd3dc8f0b399c391604505986214743d70c87b54082522b5cd"
+checksum = "1b56f526ee755d6b0d54b45670aa0dda79e853831eb093cac5861620f37a4b67"
 dependencies = [
- "rustorb-cdr 0.3.0",
+ "rustorb-cdr",
 ]
 
 [[package]]
 name = "rustorb-rtps"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "memmap2",
- "rustorb-cdr 0.2.0",
+ "rustorb-cdr",
  "rustorb-typesupport",
  "rustorb-xtypes",
  "socket2",
@@ -872,18 +866,18 @@ dependencies = [
 
 [[package]]
 name = "rustorb-typesupport"
-version = "0.2.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e68ddaa3eeecf15cb112bc236925de7b916a964926a25dcb8c72d8a0bf4efc8"
+checksum = "da8c680664f629afc108c397defec73653cd7912bf29e169753e1d02ef1a05fa"
 dependencies = [
- "rustorb-cdr 0.2.0",
+ "rustorb-cdr",
 ]
 
 [[package]]
 name = "rustorb-xtypes"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
- "rustorb-cdr 0.2.0",
+ "rustorb-cdr",
  "rustorb-typesupport",
 ]
 

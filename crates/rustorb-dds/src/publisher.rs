@@ -242,10 +242,9 @@ impl<T> DataWriter<T> {
         params: &WriteParams,
         map: impl FnOnce(Vec<u8>) -> Vec<u8>,
     ) -> Result<SampleIdentity> {
-        let mut payload = self
+        let payload = self
             .samples
             .to_payload(sample, self.encoding, ByteOrder::NATIVE)?;
-        table_60_identifier(&mut payload);
         let payload = map(payload);
         let sequence_number = self.shared.write(
             self.guid,
@@ -524,11 +523,7 @@ impl<T: PlainType> DataWriter<T> {
     }
 
     fn serialize(&self, v: &T) -> Result<Vec<u8>> {
-        let mut p = self
-            .samples
-            .to_payload(v, self.encoding, ByteOrder::NATIVE)?;
-        table_60_identifier(&mut p);
-        Ok(p)
+        self.samples.to_payload(v, self.encoding, ByteOrder::NATIVE)
     }
 
     /// The encapsulation of a sample whose memory is its serialized form:
@@ -547,23 +542,6 @@ impl<T> Drop for DataWriter<T> {
         if self.owned {
             self.shared.remove_writer(&self.guid);
         }
-    }
-}
-
-/// Rewrites an XCDR2 encapsulation identifier to the value of DDS-XTypes
-/// 1.3 Table 60 (`CDR2_LE` is `0x0007`, `D_CDR2_LE` `0x0009`, `PL_CDR2_LE`
-/// `0x000b`, and the big-endian ones one less). rustorb-cdr 0.2 writes the
-/// values of Table 39 (`0x0010` to `0x0015`), which Cyclone DDS 0.10.4
-/// drops as malformed; both tables are read.
-fn table_60_identifier(payload: &mut [u8]) {
-    if let [0x00, id, ..] = payload {
-        let order = *id & 1;
-        *id = match *id & !1 {
-            0x10 => 0x06,
-            0x14 => 0x08,
-            0x12 => 0x0a,
-            _ => return,
-        } | order;
     }
 }
 
@@ -614,19 +592,15 @@ mod tests {
 
     #[test]
     fn xcdr2_identifiers_of_table_60() {
-        for (from, to) in [
-            (0x10, 0x06),
-            (0x11, 0x07),
-            (0x14, 0x08),
-            (0x15, 0x09),
-            (0x12, 0x0a),
-            (0x13, 0x0b),
-            (0x01, 0x01),
-            (0x03, 0x03),
-        ] {
-            let mut p = [0x00, from, 0x00, 0x00];
-            table_60_identifier(&mut p);
-            assert_eq!(p, [0x00, to, 0x00, 0x00]);
+        // rustorb-cdr writes the identifiers of DDS-XTypes Table 60
+        // (`CDR2_LE` is `0x0007`), which Cyclone DDS 0.10.4 takes; it
+        // drops those of Table 39 (`0x0011`).
+        let samples = crate::typed::Typed::<crate::test_shape::Shape>::new();
+        for (order, id) in [(ByteOrder::Little, 0x07), (ByteOrder::Big, 0x06)] {
+            let p = samples
+                .to_payload(&crate::test_shape::Shape::default(), Encoding::Xcdr2, order)
+                .unwrap();
+            assert_eq!(p[..2], [0x00, id]);
         }
     }
 }
