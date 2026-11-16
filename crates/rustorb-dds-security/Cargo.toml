@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme.workspace = true
 
 [dependencies]
 # RustCrypto (MIT OR Apache-2.0), chosen on 2026-11-10 (#59).

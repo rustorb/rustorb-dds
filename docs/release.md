@@ -1,43 +1,90 @@
 # Releasing
 
-## The Python package
+`.github/workflows/release.yml` builds, checks and publishes a release
+from a tag `v<version>`. Every package has the same version.
 
-The Python package `rustorb-dds` (`python/`, with its native module in
-`crates/rustorb-dds-python`) is built and published by
-`.github/workflows/release.yml`:
+## What is released
 
-- one abi3 wheel (CPython 3.9 and later) for each of Linux x86_64 and
-  aarch64 (manylinux 2.28), macOS x86_64 and arm64, and Windows x64, each
-  tested with `python/tests` where it can run, and the sdist;
-- on a tag `python-v<version>`: a draft GitHub Release with those files,
-  the upload to PyPI, then the release made public.
+| What | Where |
+| --- | --- |
+| The crates `rustorb-dds-security`, `rustorb-xtypes`, `rustorb-rtps`, `rustorb-dds`, `rustorb-dds-corba` and `rustorb-dds-ffi` (in this order: each depends only on those before it) | crates.io |
+| The Python package `rustorb-dds` (`python/`, with its native module in `crates/rustorb-dds-python`): one abi3 wheel (CPython 3.9 and later) for each of Linux x86_64 and aarch64 (manylinux 2.28), macOS x86_64 and arm64, and Windows x64, and the sdist | PyPI |
+| The wheels, the sdist, the `.crate` files, `SHA256SUMS`, and the notes from `CHANGELOG.md` | GitHub Release `v<version>` |
 
-A pull request that changes the packaging, or Run workflow, only builds.
+`rustorb-dds-python` is never published to crates.io (`publish = false`).
+The C++ and Java bindings are not packaged yet: they build from the
+repository (`cpp/`, `java/`).
 
-### Once, before the first release
+## The version
 
-1. On PyPI, add a trusted publisher for the project `rustorb-dds` (a
-   "pending publisher" while the project does not exist yet): owner
-   `rustorb`, repository `rustorb-dds`, workflow `release.yml`, environment
-   `pypi`.
-2. In the repository settings, create the environment `pypi` (with the
-   reviewers who must approve an upload, if any).
+The version is written in the Cargo workspace (and the `version` of the
+workspace's path dependencies), `python/pyproject.toml`,
+`python/rustorb_dds/__init__.py`, `java/pom.xml` and
+`cpp/CMakeLists.txt`. `tools/set-version.py` changes them all:
 
-Instead of the trusted publisher, an API token in the `PYPI_API_TOKEN`
-secret of the `pypi` environment also works.
+```sh
+tools/set-version.py 0.3.0      # rewrite the files
+cargo update --workspace        # Cargo.lock, for the --locked builds
+tools/set-version.py --check    # they agree (CI checks it too)
+```
 
-### Each release
+Before 1.0, a new minor version may change the API.
 
-1. Set the version in `python/pyproject.toml` and in `__version__` of
-   `python/rustorb_dds/__init__.py`.
-2. Move the entries of `## [Unreleased]` in `CHANGELOG.md` to
-   `## [python-<version>] - <date>`.
-3. Merge, then tag the merge commit `python-v<version>` and push the tag.
+## Once, before the first release
 
-If a job fails, fix it and run the workflow again on the tag: files
-already on PyPI are skipped.
+In the repository settings (Settings, Environments), create:
 
-## The Rust crates
+- the environment `crates-io`, with the secret `CARGO_REGISTRY_TOKEN`: a
+  crates.io [API token](https://crates.io/settings/tokens) with the
+  scopes `publish-new` and `publish-update`. The first upload of a new
+  crate needs a token (crates.io trusted publishing can only be set up
+  for a crate that exists); after it, trusted publishing could replace
+  the token.
+- the environment `pypi` (it exists since the Python 0.1.0 release), with
+  the PyPI trusted publisher for the project `rustorb-dds`: owner
+  `rustorb`, repository `rustorb-dds`, workflow `release.yml`, environment
+  `pypi`. Instead, an API token in the `PYPI_API_TOKEN` secret of the
+  environment also works.
 
-Not published yet (`rustorb-dds`, `rustorb-rtps`, `rustorb-xtypes`; the
-`rustorb-dds-python` crate is never published).
+Required reviewers on these environments make each upload wait for an
+approval; limiting their deployment tags to `v*` is a good idea.
+
+## Each release
+
+1. Set the version, if it is a new one (above), and rename
+   `## [x.y.z] - unreleased` in `CHANGELOG.md` to
+   `## [x.y.z] - <date>` (the workflow wants a dated entry).
+2. Merge to main, then tag the merge commit `vx.y.z`. From the web: on
+   [a new release](https://github.com/rustorb/rustorb-dds/releases/new),
+   create the tag `vx.y.z` on main and press "Publish release" (not "Save
+   draft", which makes no tag); the workflow then fills that release.
+3. The workflow:
+   - checks that the tag is the version of every package and that
+     `CHANGELOG.md` has a dated entry for it;
+   - packages the crates and builds each against the others as packaged
+     (`cargo publish --workspace --dry-run`), builds the wheels (and runs
+     `python/tests` with each where it can) and the sdist;
+   - attaches them all to a draft GitHub Release `vx.y.z`, with
+     `SHA256SUMS` and the version's section of `CHANGELOG.md`;
+   - when all of that passed: publishes the crates to crates.io, in the
+     order above (job `crates-io`), and the Python package to PyPI (job
+     `pypi`);
+   - when both are done, publishes the GitHub Release.
+
+If a publishing job fails, fix the cause and run the failed jobs again
+from the Actions page: crates already on crates.io and files already on
+PyPI are skipped. If the fix needs a change to the workflow or the source,
+merge it, delete the release and the tag `vx.y.z`, and tag again (only
+while nothing is published yet; otherwise release the next patch
+version).
+
+Nothing published can be taken back: crates.io can only yank a version,
+and PyPI never takes the same version again.
+
+Pull requests that change the packaging, and Run workflow, build and
+check everything without publishing.
+
+## The Python package 0.1.0
+
+The Python package alone was released as 0.1.0, from the tag
+`python-v0.1.0`, with an earlier version of this workflow.

@@ -24,7 +24,7 @@ doctest = false
 
 [dependencies]
 # With DDS Security (the `dds.sec.*` properties of DomainParticipant).
-rustorb-dds = { path = "../rustorb-dds", features = ["security"] }
+rustorb-dds = { workspace = true, features = ["security"] }
 rustorb-xtypes.workspace = true
 # The Python binding. MIT OR Apache-2.0. Only this crate depends on it,
 # not the DDS crates.

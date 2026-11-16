@@ -25,9 +25,10 @@ python python/examples/hello_world.py pub
 | `rustorb-dds` | DCPS API（DDS 1.4） | MIT OR Apache-2.0 |
 | `rustorb-rtps` | 通信路（DDSI-RTPS 2.5）: メッセージ、ディスカバリ、writer と reader | MIT OR Apache-2.0 |
 | `rustorb-xtypes` | 型系（DDS-XTypes 1.3）: TypeObject、型の互換判定、DynamicData | MIT OR Apache-2.0 |
+| `rustorb-dds-security` | DDS Security 1.2 の組み込みプラグイン（PKI-DH、Permissions、AES-GCM-GMAC）。RustCrypto を使う。`rustorb-dds` は feature `security` で使う（[docs/security.md](docs/security.md)） | MIT OR Apache-2.0 |
 | `rustorb-dds-python` | Python パッケージ `rustorb_dds`（[python/](python/)）のネイティブモジュール。PyO3 を使う。crates.io には公開しない | MIT OR Apache-2.0 |
-| `rustorb-dds-ffi` | C++ と Java のバインディングの土台になる C ABI（[`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)、[docs/c-abi.md](docs/c-abi.md)）。crates.io には公開しない | MIT OR Apache-2.0 |
-| `rustorb-dds-corba` | CORBA の TypeCode と any（`rustorb-core`）を DDS-XTypes の型と DynamicData に変換し、その逆も行う（[docs/corba.md](docs/corba.md)）。ORB に依存するのはこのクレートだけ。crates.io には公開しない | MIT OR Apache-2.0 |
+| `rustorb-dds-ffi` | C++ と Java のバインディングの土台になる C ABI（[`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)、[docs/c-abi.md](docs/c-abi.md)） | MIT OR Apache-2.0 |
+| `rustorb-dds-corba` | CORBA の TypeCode と any（`rustorb-core`）を DDS-XTypes の型と DynamicData に変換し、その逆も行う（[docs/corba.md](docs/corba.md)）。ORB に依存するのはこのクレートだけ | MIT OR Apache-2.0 |
 
 C++ バインディング（[cpp/](cpp/)、[docs/cpp.md](docs/cpp.md)）はヘッダだけで、この C ABI の上に ISO/IEC の C++ PSM（`<dds/dds.hpp>`）を実装します。型は `rustorb-idl -bc++11 -Wbdds_only` が書きます（MIT OR Apache-2.0）。
 

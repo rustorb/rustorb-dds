@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
+readme.workspace = true
 
 [lints]
 workspace = true
@@ -24,7 +24,7 @@ default = ["security"]
 security = ["rustorb-dds/security"]
 
 [dependencies]
-rustorb-dds = { path = "../rustorb-dds" }
+rustorb-dds.workspace = true
 rustorb-xtypes.workspace = true
 rustorb-cdr.workspace = true
 

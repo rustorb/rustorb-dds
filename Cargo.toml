@@ -12,29 +12,34 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/rustorb/rustorb-dds"
 homepage = "https://github.com/rustorb/rustorb-dds"
 keywords = ["dds", "rtps", "ddsi", "pubsub", "ros2"]
 categories = ["network-programming"]
 
 [workspace.dependencies]
-rustorb-xtypes = { path = "crates/rustorb-xtypes" }
-rustorb-rtps = { path = "crates/rustorb-rtps", default-features = false }
-rustorb-dds-security = { path = "crates/rustorb-dds-security" }
+# The crates of this workspace, published together with one version
+# (tools/set-version.py).
+rustorb-xtypes = { path = "crates/rustorb-xtypes", version = "0.2.0" }
+rustorb-rtps = { path = "crates/rustorb-rtps", version = "0.2.0", default-features = false }
+rustorb-dds-security = { path = "crates/rustorb-dds-security", version = "0.2.0" }
+rustorb-dds = { path = "crates/rustorb-dds", version = "0.2.0" }
 # Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
 # MIT OR Apache-2.0.
 socket2 = { version = "0.6", features = ["all"] }
 # Mapping the segments of the shared memory transport.
 # MIT OR Apache-2.0.
 memmap2 = "0.9"
-# The shared parts of rustorb, released in 0.2.0 (rustorb/rustorb#114).
+# The shared parts of rustorb (rustorb/rustorb#114); 0.5.0 and later write
+# the XCDR2 encapsulation identifiers of DDS-XTypes Table 60.
 # Both are MIT OR Apache-2.0; the GPL generator is never a dependency.
-rustorb-cdr = "0.2.0"
-rustorb-typesupport = "0.2.0"
+rustorb-cdr = "0.6.0"
+rustorb-typesupport = "0.6.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
