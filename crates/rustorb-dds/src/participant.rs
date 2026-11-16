@@ -313,6 +313,10 @@ pub(crate) struct ReaderState {
     /// payloads protected: to decode them.
     #[cfg(feature = "security")]
     pub(crate) payload_security: Option<Arc<Security>>,
+    /// The pools of the samples that writers of this host send by
+    /// reference, when shared memory is on.
+    #[cfg(feature = "shm")]
+    pub(crate) pools: Option<Arc<rustorb_rtps::shm::Pools>>,
 }
 
 /// What a reader knows of the liveliness of a matched writer.
@@ -355,6 +359,8 @@ impl ReaderState {
             filter: None,
             #[cfg(feature = "security")]
             payload_security: None,
+            #[cfg(feature = "shm")]
+            pools: None,
         }
     }
 
@@ -568,7 +574,19 @@ impl ReaderState {
             }
         } else {
             match &payload {
-                Some(p) if p.kind == PayloadKind::Data => instance::Change::Write(p.bytes.clone()),
+                #[cfg(feature = "shm")]
+                Some(p)
+                    if p.kind == PayloadKind::Data && rustorb_rtps::shm::is_reference(&p.bytes) =>
+                {
+                    // A sample in a writer's pool: unreadable once the
+                    // pool is gone.
+                    instance::Change::Write(instance::Payload::Loaned(
+                        self.pools.as_ref()?.resolve(&p.bytes)?,
+                    ))
+                }
+                Some(p) if p.kind == PayloadKind::Data => {
+                    instance::Change::Write(instance::Payload::Owned(p.bytes.clone()))
+                }
                 _ => return None,
             }
         };
@@ -609,6 +627,16 @@ fn drop_missing_padding(bytes: &mut [u8]) {
     }
 }
 
+/// How many of the newest samples a writer sent by reference it holds on
+/// to after they leave its history, for the readers that have yet to
+/// take them up (a best-effort writer's history keeps none).
+#[cfg(feature = "shm")]
+const LOANS_KEPT: usize = 8;
+
+/// The most slots of a writer's pool.
+#[cfg(feature = "shm")]
+const MAX_POOL_SLOTS: usize = 256;
+
 /// The vendor id that OpenDDS sends.
 const OPENDDS: VendorId = VendorId([0x01, 0x03]);
 
@@ -629,7 +657,7 @@ pub(crate) enum WriteOp {
     /// `write`: a value payload, and the sample it answers (sent in-line
     /// as `PID_RELATED_SAMPLE_IDENTITY`).
     /// The third is the only reader to send it to, if any.
-    Value(Vec<u8>, Option<SampleIdentity>, Option<Guid>),
+    Value(instance::Payload, Option<SampleIdentity>, Option<Guid>),
     /// `dispose` and/or `unregister_instance`.
     Lifecycle { dispose: bool, unregister: bool },
 }
@@ -684,6 +712,14 @@ pub(crate) struct WriterState {
     cleanup_at: Option<Instant>,
     /// The file of a PERSISTENT writer.
     store: Option<Store>,
+    /// The pool of the samples it loans, once one is loaned.
+    #[cfg(feature = "shm")]
+    pool: Option<Arc<rustorb_rtps::shm::Pool>>,
+    /// The loaned samples sent by reference, oldest first: each is held
+    /// while its change is in the history, or is among the newest
+    /// [`LOANS_KEPT`] (for the readers that have yet to take it up).
+    #[cfg(feature = "shm")]
+    loans: VecDeque<(SequenceNumber, rustorb_rtps::shm::PoolLoan)>,
     /// The changes in the history as the file keeps them, for a
     /// PERSISTENT writer.
     persisted: BTreeMap<SequenceNumber, Record>,
@@ -802,13 +838,13 @@ impl WriterState {
         self.restoring = true;
         for r in records {
             let op = match r.value {
-                Some(v) => WriteOp::Value(v, None, None),
+                Some(v) => WriteOp::Value(v.into(), None, None),
                 None => WriteOp::Lifecycle {
                     dispose: r.dispose,
                     unregister: r.unregister,
                 },
             };
-            if self.add(r.instance, op, r.timestamp, false).is_ok() {
+            if self.add(r.instance, op, r.timestamp, false, false).is_ok() {
                 self.trim();
             }
         }
@@ -917,6 +953,15 @@ impl WriterState {
         }
         let rtps = &self.rtps;
         self.change_instance.retain(|sn, _| rtps.contains(*sn));
+        #[cfg(feature = "shm")]
+        {
+            let old = self.loans.len().saturating_sub(LOANS_KEPT);
+            let mut i = 0;
+            self.loans.retain(|(sn, _)| {
+                i += 1;
+                i > old || rtps.contains(*sn)
+            });
+        }
         if self.store.is_some() {
             self.persisted.retain(|sn, _| rtps.contains(*sn));
             let records = self.store.as_ref().map_or(0, Store::records);
@@ -952,12 +997,15 @@ impl WriterState {
     /// Adds a change for instance `h` to the history, registering the
     /// instance or unregistering it as `op` says. Returns the change for
     /// the local readers.
+    ///
+    /// A loaned sample goes by reference if `by_reference`, else copied.
     fn add(
         &mut self,
         h: InstanceHandle,
         op: WriteOp,
         timestamp: Time,
         key_payload: bool,
+        #[allow(unused_variables)] by_reference: bool,
     ) -> Result<(SequenceNumber, instance::Change)> {
         let unregister = matches!(
             op,
@@ -975,7 +1023,7 @@ impl WriterState {
         let restoring = self.restoring;
         let record = self.store.as_mut().map(|store| {
             let (value, dispose) = match &op {
-                WriteOp::Value(v, ..) => (Some(v.clone()), false),
+                WriteOp::Value(v, ..) => (Some(v.to_vec()), false),
                 WriteOp::Lifecycle { dispose, .. } => (None, *dispose),
             };
             let r = Record {
@@ -1006,6 +1054,8 @@ impl WriterState {
             q.push(Parameter::new(pid::KEY_HASH, h.0));
         }
         let mut directed = None;
+        #[cfg(feature = "shm")]
+        let mut lent = None;
         let (payload, change) = match op {
             WriteOp::Value(v, related, to) => {
                 directed = to;
@@ -1022,13 +1072,26 @@ impl WriterState {
                         id.to_bytes(Endianness::NATIVE),
                     ));
                 }
-                #[cfg(feature = "security")]
-                let bytes = match &self.payload_encoder {
-                    Some(e) => e.encode_payload(&v),
-                    None => v.clone(),
+                #[cfg(feature = "shm")]
+                if let instance::Payload::Loaned(l) = &v
+                    && by_reference
+                {
+                    lent = Some(l.clone());
+                }
+                let bytes = || {
+                    #[cfg(feature = "security")]
+                    if let Some(e) = &self.payload_encoder {
+                        return e.encode_payload(&v);
+                    }
+                    v.to_vec()
                 };
-                #[cfg(not(feature = "security"))]
-                let bytes = v.clone();
+                #[cfg(feature = "shm")]
+                let bytes = match &lent {
+                    Some(l) => l.reference(),
+                    None => bytes(),
+                };
+                #[cfg(not(feature = "shm"))]
+                let bytes = bytes();
                 (
                     Some(SerializedPayload {
                         kind: PayloadKind::Data,
@@ -1091,6 +1154,10 @@ impl WriterState {
             self.rtps.direct(sn, r);
         }
         self.change_instance.insert(sn, h);
+        #[cfg(feature = "shm")]
+        if let Some(l) = lent {
+            self.loans.push_back((sn, l));
+        }
         if let Some(r) = record {
             self.persisted.insert(sn, r);
         }
@@ -1725,6 +1792,10 @@ impl Shared {
                 orphan: false,
                 cleanup_at: None,
                 store: None,
+                #[cfg(feature = "shm")]
+                pool: None,
+                #[cfg(feature = "shm")]
+                loans: VecDeque::new(),
                 persisted: BTreeMap::new(),
                 restoring: false,
             };
@@ -1814,6 +1885,10 @@ impl Shared {
                 sec.local_endpoint(&mut data, false)?;
             }
             let mut r = ReaderState::new(data.clone(), &qos, keys, &inner.reader_config);
+            #[cfg(feature = "shm")]
+            {
+                r.pools = self.shm.as_ref().map(|s| s.pools());
+            }
             #[cfg(feature = "security")]
             {
                 r.payload_security = inner
@@ -2073,7 +2148,13 @@ impl Shared {
                         .participant(&r.prefix)
                         .is_some_and(|p| p.vendor_id == OPENDDS)
                 });
-            (sn, change) = w.add(h, op, timestamp, key_payload)?;
+            #[cfg(feature = "shm")]
+            let by_reference = matches!(&op, WriteOp::Value(p, ..) if p.is_loaned())
+                && self.by_reference(inner, &writer);
+            #[cfg(not(feature = "shm"))]
+            let by_reference = false;
+            let w = inner.writers.get_mut(&writer).expect("checked above");
+            (sn, change) = w.add(h, op, timestamp, key_payload, by_reference)?;
             let now = Instant::now();
             out = w.rtps.poll(now);
             w.trim();
@@ -2115,6 +2196,65 @@ impl Shared {
             Some(e) if !sent => Err(e.into()),
             _ => Ok(sn),
         }
+    }
+
+    /// Whether local writer `writer` sends its loaned samples by
+    /// reference: when every reader it matches is of this participant or
+    /// reached by shared memory, the writer is VOLATILE (no late joiner
+    /// needs one) and DDS Security is off.
+    #[cfg(feature = "shm")]
+    fn by_reference(&self, inner: &Inner, writer: &Guid) -> bool {
+        let (Some(shm), Some(w)) = (&self.shm, inner.writers.get(writer)) else {
+            return false;
+        };
+        #[cfg(feature = "security")]
+        if self.security.is_some() {
+            return false;
+        }
+        w.qos.durability == DurabilityKind::Volatile
+            && w.matched.iter().all(|r| {
+                // Only rustorb-dds has shared memory locators.
+                r.prefix == self.prefix
+                    || w.rtps
+                        .reader_destination(r)
+                        .is_some_and(|l| shm.reaches(&l))
+            })
+    }
+
+    /// The pool of local writer `writer` for loaned samples of up to
+    /// `size` octets, made on first use: `None` without shared memory, or
+    /// with DDS Security on (whose samples stay out of files that other
+    /// processes can map).
+    #[cfg(feature = "shm")]
+    pub(crate) fn writer_pool(
+        &self,
+        writer: &Guid,
+        size: usize,
+    ) -> Result<Option<Arc<rustorb_rtps::shm::Pool>>> {
+        let Some(shm) = &self.shm else {
+            return Ok(None);
+        };
+        #[cfg(feature = "security")]
+        if self.security.is_some() {
+            return Ok(None);
+        }
+        let mut g = self.lock()?;
+        let w = g.writers.get_mut(writer).ok_or(Error::AlreadyDeleted)?;
+        if let Some(p) = &w.pool
+            && p.slot_size() >= size
+        {
+            return Ok(Some(p.clone()));
+        }
+        // Room for the history, the readers' samples and the newest
+        // loans kept.
+        let slots = match w.qos.history {
+            History::KeepLast(d) => 2 * d.max(1) + 2 * LOANS_KEPT,
+            History::KeepAll => w.qos.resource_limits.max_samples.unwrap_or(32) + 2 * LOANS_KEPT,
+        }
+        .min(MAX_POOL_SLOTS);
+        let pool = shm.create_pool(slots as u32, size)?;
+        w.pool = Some(pool.clone());
+        Ok(Some(pool))
     }
 
     /// The discovery data of a writer or reader, local or remote.

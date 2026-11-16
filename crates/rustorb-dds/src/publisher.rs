@@ -11,6 +11,7 @@ use crate::condition::StatusCondition;
 use crate::error::{Error, Result};
 use crate::instance::InstanceHandle;
 use crate::listener::{DataWriterListener, PublisherEntity, PublisherListener};
+use crate::loan::{LoanCheck, PlainType, WriteInner, WriteLoan};
 use crate::participant::{Shared, WriteOp, WriterEvent, WriterListener, WriterState};
 use crate::qos::{
     DataWriterQos, DurabilityKind, PublisherQos, data_representation, duration_to_rtps,
@@ -159,6 +160,7 @@ impl Publisher {
             encoding,
             owned: true,
             samples: topic.samples.clone(),
+            loan: Arc::default(),
         })
     }
 }
@@ -178,6 +180,9 @@ pub struct DataWriter<T> {
     /// handle given to a listener.
     owned: bool,
     samples: Arc<dyn SampleType<T>>,
+    /// What loaned samples showed of the type's layout.
+    #[cfg_attr(not(feature = "shm"), allow(dead_code))]
+    loan: Arc<LoanCheck>,
 }
 
 impl<T> std::fmt::Debug for DataWriter<T> {
@@ -245,7 +250,11 @@ impl<T> DataWriter<T> {
         let sequence_number = self.shared.write(
             self.guid,
             self.samples.instance_of(sample)?,
-            WriteOp::Value(payload, params.related_sample_identity, params.directed_to),
+            WriteOp::Value(
+                payload.into(),
+                params.related_sample_identity,
+                params.directed_to,
+            ),
             params.source_timestamp.unwrap_or_else(Time::now),
         )?;
         Ok(SampleIdentity {
@@ -444,6 +453,95 @@ impl<T> DataWriter<T> {
     }
 }
 
+impl<T: PlainType> DataWriter<T> {
+    /// Lends a sample to fill and then publish with
+    /// [`Self::write_loaned`] (zero-copy): a sample in the writer's pool
+    /// in shared memory, which the readers of this host read in place,
+    /// with no serialization and no copy. It holds zeros, or an earlier
+    /// sample of the writer when its slot is used again: set every member.
+    ///
+    /// The sample goes by reference when every reader matched is of this
+    /// participant or reached by shared memory, the writer is VOLATILE
+    /// and DDS Security is off; otherwise its octets are sent, as for
+    /// [`Self::write`], still without serialization. The sample is on
+    /// the heap, and serialized when written, when the pool cannot be
+    /// used: without shared memory (feature `shm` and
+    /// [`ParticipantConfig::shared_memory`](crate::ParticipantConfig)),
+    /// with DDS Security, when every slot of the pool is held, or when
+    /// the layout of `T` is not its serialized form (see [`PlainType`]).
+    ///
+    /// A slot of the pool is used again once the writer's history no
+    /// longer has its sample (and it is not one of the newest few) and
+    /// every reader has dropped it.
+    pub fn loan_sample(&self) -> Result<WriteLoan<T>> {
+        #[cfg(feature = "shm")]
+        if let Some(header) = self.plain_header()
+            && std::mem::align_of::<T>() <= 8
+            && let Some(pool) = self
+                .shared
+                .writer_pool(&self.guid, 4 + std::mem::size_of::<T>())?
+            && let Some(mut slot) = pool.acquire()
+        {
+            slot.bytes_mut()[..4].copy_from_slice(&header);
+            return Ok(WriteLoan {
+                inner: WriteInner::Shared(slot, std::marker::PhantomData),
+            });
+        }
+        Ok(WriteLoan::heap())
+    }
+
+    /// Publishes a loaned sample, as [`Self::write`] does a sample.
+    pub fn write_loaned(&self, sample: WriteLoan<T>) -> Result<()> {
+        self.write_loaned_w_timestamp(sample, Time::now())
+    }
+
+    /// Like [`Self::write_loaned`], with the source timestamp given.
+    pub fn write_loaned_w_timestamp(&self, sample: WriteLoan<T>, timestamp: Time) -> Result<()> {
+        let h = self.samples.instance_of(&sample)?;
+        let payload = match sample.inner {
+            #[cfg(feature = "shm")]
+            WriteInner::Shared(slot, _) => {
+                let len = 4 + std::mem::size_of::<T>();
+                if self.loan.verified() {
+                    crate::instance::Payload::Loaned(slot.publish(len))
+                } else {
+                    // Until a sample shows that the layout is the
+                    // serialized form, the samples are serialized.
+                    let serialized = self.serialize(WriteLoan::<T>::value_of(&slot))?;
+                    if serialized == slot.bytes()[..len] {
+                        self.loan.set_verified();
+                        crate::instance::Payload::Loaned(slot.publish(len))
+                    } else {
+                        serialized.into()
+                    }
+                }
+            }
+            WriteInner::Heap(b) => self.serialize(&b)?.into(),
+        };
+        self.shared
+            .write(self.guid, h, WriteOp::Value(payload, None, None), timestamp)
+            .map(|_| ())
+    }
+
+    fn serialize(&self, v: &T) -> Result<Vec<u8>> {
+        let mut p = self
+            .samples
+            .to_payload(v, self.encoding, ByteOrder::NATIVE)?;
+        table_60_identifier(&mut p);
+        Ok(p)
+    }
+
+    /// The encapsulation of a sample whose memory is its serialized form:
+    /// `None` if the serialized form of a zero `T` is not as long as one.
+    #[cfg(feature = "shm")]
+    fn plain_header(&self) -> Option<[u8; 4]> {
+        *self.loan.header.get_or_init(|| {
+            let p = self.serialize(&crate::loan::zeroed_box::<T>()).ok()?;
+            (p.len() == 4 + std::mem::size_of::<T>()).then(|| [p[0], p[1], p[2], p[3]])
+        })
+    }
+}
+
 impl<T> Drop for DataWriter<T> {
     fn drop(&mut self) {
         if self.owned {
@@ -483,6 +581,7 @@ fn writer_listener<T: 'static>(
             encoding,
             owned: false,
             samples: samples.clone(),
+            loan: Arc::default(),
         };
         match event {
             WriterEvent::PublicationMatched(s) => listener.on_publication_matched(&writer, s),

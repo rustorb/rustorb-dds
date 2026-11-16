@@ -80,6 +80,7 @@ mod condition;
 mod error;
 mod instance;
 mod listener;
+mod loan;
 mod participant;
 mod persistent;
 mod publisher;
@@ -107,6 +108,7 @@ pub use listener::{
     AnyDataReader, AnyDataWriter, DataReaderListener, DataWriterListener,
     DomainParticipantListener, PublisherListener, SubscriberListener, TopicListener,
 };
+pub use loan::{PlainType, ReadLoan, WriteLoan};
 pub use participant::{DomainParticipant, ParticipantConfig, VENDOR_ID};
 pub use publisher::{DataWriter, Publisher, WriteParams};
 pub use qos::{

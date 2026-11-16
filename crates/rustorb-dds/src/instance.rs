@@ -197,11 +197,56 @@ pub struct SampleInfo {
     pub absolute_generation_rank: u32,
 }
 
+/// A serialized payload: octets of its own, or a sample a writer of this
+/// host loaned in shared memory, read in place (feature `shm`).
+#[derive(Clone, Debug)]
+pub(crate) enum Payload {
+    Owned(Vec<u8>),
+    #[cfg(feature = "shm")]
+    Loaned(rustorb_rtps::shm::PoolLoan),
+}
+
+impl Payload {
+    /// Whether it is a sample in shared memory.
+    pub(crate) fn is_loaned(&self) -> bool {
+        match self {
+            Payload::Owned(_) => false,
+            #[cfg(feature = "shm")]
+            Payload::Loaned(_) => true,
+        }
+    }
+}
+
+impl std::ops::Deref for Payload {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Payload::Owned(v) => v,
+            #[cfg(feature = "shm")]
+            Payload::Loaned(l) => l.bytes(),
+        }
+    }
+}
+
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Payload {}
+
+impl From<Vec<u8>> for Payload {
+    fn from(v: Vec<u8>) -> Self {
+        Payload::Owned(v)
+    }
+}
+
 /// What a writer did to an instance, as a reader receives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
     /// A value (a serialized payload).
-    Write(Vec<u8>),
+    Write(Payload),
     /// `dispose`, `unregister`, or both (`PID_STATUS_INFO`, DDSI-RTPS
     /// 2.5, 9.6.4.9).
     Lifecycle { disposed: bool, unregistered: bool },
@@ -221,7 +266,7 @@ pub(crate) struct Incoming {
 #[derive(Debug)]
 struct Stored {
     /// The payload, `None` for a sample without data.
-    payload: Option<Vec<u8>>,
+    payload: Option<Payload>,
     writer: Guid,
     sequence_number: SequenceNumber,
     source_timestamp: Option<Time>,
@@ -274,7 +319,7 @@ impl Instance {
 
 /// A sample returned by [`ReaderHistory::select`]: the payload (`None`
 /// without data) and its information.
-pub(crate) type Selected = (Option<Vec<u8>>, SampleInfo);
+pub(crate) type Selected = (Option<Payload>, SampleInfo);
 
 /// The samples and instances of one reader.
 #[derive(Debug)]
@@ -413,7 +458,11 @@ impl ReaderHistory {
                 }
                 inst.state = InstanceState::Alive;
                 inst.writers.insert(c.writer);
-                inst.last_value = Some(v.clone());
+                // A sample in shared memory is not kept past its take:
+                // its octets are copied for a keyed topic, and not kept
+                // for a keyless one, which needs no key.
+                inst.last_value =
+                    (!v.is_loaned() || c.instance != InstanceHandle::KEYLESS).then(|| v.to_vec());
                 payload = Some(v);
             }
             Change::Lifecycle {
@@ -626,7 +675,7 @@ impl ReaderHistory {
         for h in empty {
             self.instances.remove(&h);
         }
-        let mut picked: Vec<(u64, Option<Vec<u8>>, SampleInfo)> = Vec::new();
+        let mut picked: Vec<(u64, Option<Payload>, SampleInfo)> = Vec::new();
         let handles: Vec<InstanceHandle> = match instance {
             Some(h) => vec![h],
             None => self.instances.keys().copied().collect(),
@@ -745,7 +794,7 @@ mod tests {
             source_timestamp: None,
             related_sample_identity: None,
             instance: h(inst),
-            change: Change::Write(vec![v]),
+            change: Change::Write(vec![v].into()),
         }
     }
 
