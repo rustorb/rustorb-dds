@@ -531,8 +531,13 @@ impl Cert {
         )
     }
 
+    /// The parsed certificate.
+    pub(crate) fn inner(&self) -> &Certificate {
+        &self.cert
+    }
+
     /// The DER of its issuer name.
-    fn issuer_der(&self) -> Vec<u8> {
+    pub(crate) fn issuer_der(&self) -> Vec<u8> {
         self.cert
             .tbs_certificate
             .issuer
@@ -572,7 +577,7 @@ impl Cert {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

@@ -30,6 +30,7 @@ use rustorb_dds_security::crypto::{
     read_submessage, submessage_id,
 };
 use rustorb_dds_security::message::{self as gm, GenericMessage, MessageIdentity};
+use rustorb_dds_security::ocsp::OcspOptions;
 use rustorb_dds_security::pki::{Cert, read_uri};
 use rustorb_dds_security::smime;
 use rustorb_dds_security::token::{BinaryProperty, DataHolder};
@@ -80,6 +81,14 @@ pub struct SecurityConfig {
     /// DER). A revoked identity certificate, this participant's or a
     /// peer's, fails authentication.
     pub crl: Option<String>,
+    /// OCSP (RFC 6960), [`Self::OCSP`]: `None` takes only the responses
+    /// that peers staple to their handshake messages. With it, the
+    /// responder must say that this participant's certificate is good
+    /// (and the response is stapled), and a peer's certificate must be
+    /// good too; the statuses are asked again every
+    /// [`OcspOptions::refresh`], and a peer found revoked is revoked as
+    /// [`crate::DomainParticipant::revoke_participant`] does.
+    pub ocsp: Option<OcspOptions>,
     /// The builtin logging plugin (DDS:Logging:DDS_LogTopic): `None`
     /// logs nothing. See [`crate::security_log`].
     pub logging: Option<LogOptions>,
@@ -89,6 +98,16 @@ impl SecurityConfig {
     /// The property of the URI of the CRLs of the identity CA, which DDS
     /// Security 1.2 does not name.
     pub const CRL: &'static str = "rustorb.dds.sec.auth.crl";
+
+    /// The property that turns OCSP on, which DDS Security 1.2 does not
+    /// name: the responder's URL (`http://host[:port]/path`), or `aia` for
+    /// the one in each certificate's Authority Information Access.
+    pub const OCSP: &'static str = "rustorb.dds.sec.auth.ocsp";
+    /// The timeout of an OCSP query, in seconds (3 by default).
+    pub const OCSP_TIMEOUT: &'static str = "rustorb.dds.sec.auth.ocsp_timeout";
+    /// How often the OCSP statuses are asked again, in seconds (300 by
+    /// default; 0 only at authentication).
+    pub const OCSP_REFRESH: &'static str = "rustorb.dds.sec.auth.ocsp_refresh";
 
     /// The standard names of the properties it needs, those of the
     /// builtin authentication and access control plugins (DDS Security
@@ -111,7 +130,11 @@ impl SecurityConfig {
         props: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Option<Self> {
         let props: HashMap<&str, &str> = props.into_iter().collect();
-        Self::make(&props, LogOptions::from_properties(&props).ok().flatten())
+        Self::make(
+            &props,
+            LogOptions::from_properties(&props).ok().flatten(),
+            ocsp_options(&props).ok().flatten(),
+        )
     }
 
     /// As [`Self::from_properties`], with an error for a property that is
@@ -129,10 +152,15 @@ impl SecurityConfig {
             return Err(format!("missing properties: {}", missing.join(", ")));
         }
         let logging = LogOptions::from_properties(&props)?;
-        Ok(Self::make(&props, logging).expect("none missing"))
+        let ocsp = ocsp_options(&props)?;
+        Ok(Self::make(&props, logging, ocsp).expect("none missing"))
     }
 
-    fn make(props: &HashMap<&str, &str>, logging: Option<LogOptions>) -> Option<Self> {
+    fn make(
+        props: &HashMap<&str, &str>,
+        logging: Option<LogOptions>,
+        ocsp: Option<OcspOptions>,
+    ) -> Option<Self> {
         let get = |n: &str| props.get(n).map(|v| v.to_string());
         Some(SecurityConfig {
             identity_ca: get("dds.sec.auth.identity_ca")?,
@@ -143,9 +171,45 @@ impl SecurityConfig {
             permissions: get("dds.sec.access.permissions")?,
             password: get("dds.sec.auth.password"),
             crl: get(Self::CRL),
+            ocsp,
             logging,
         })
     }
+}
+
+/// The OCSP options of the properties: `None` without [`SecurityConfig::OCSP`].
+fn ocsp_options(props: &HashMap<&str, &str>) -> std::result::Result<Option<OcspOptions>, String> {
+    let Some(r) = props.get(SecurityConfig::OCSP) else {
+        return Ok(None);
+    };
+    let mut o = OcspOptions::default();
+    match *r {
+        "aia" => {}
+        u if u.starts_with("http://") => o.responder = Some(u.to_string()),
+        u => {
+            return Err(format!(
+                "{}: not aia or an http: URL: {u}",
+                SecurityConfig::OCSP
+            ));
+        }
+    }
+    let secs = |n: &str| -> std::result::Result<Option<Duration>, String> {
+        props
+            .get(n)
+            .map(|v| {
+                v.parse::<u64>()
+                    .map(Duration::from_secs)
+                    .map_err(|_| format!("{n}: not a number of seconds: {v}"))
+            })
+            .transpose()
+    };
+    if let Some(t) = secs(SecurityConfig::OCSP_TIMEOUT)? {
+        o.timeout = t;
+    }
+    if let Some(t) = secs(SecurityConfig::OCSP_REFRESH)? {
+        o.refresh = t;
+    }
+    Ok(Some(o))
 }
 
 fn sec_error(what: &str) -> impl Fn(SecError) -> Error + '_ {
@@ -455,6 +519,7 @@ impl Security {
             &config.private_key,
             config.password.as_deref(),
             config.crl.as_deref(),
+            config.ocsp.clone(),
         )
         .map_err(sec_error("identity"))?;
         let permissions_ca =
@@ -1495,6 +1560,49 @@ impl Security {
             self.revise_keys(now);
         }
         true
+    }
+
+    /// How often the OCSP statuses are asked again, if OCSP is on and
+    /// they are.
+    pub(crate) fn ocsp_refresh(&self) -> Option<Duration> {
+        self.identity
+            .ocsp_options()
+            .map(|o| o.refresh)
+            .filter(|r| !r.is_zero())
+    }
+
+    /// Asks OCSP again for this participant's status (stapled to its
+    /// handshakes from then on) and for those of its authenticated peers:
+    /// the peers found revoked. The queries are made without the lock.
+    pub(crate) fn check_ocsp(&self) -> Vec<GuidPrefix> {
+        if let Err(e) = self.identity.refresh_own_ocsp() {
+            self.log(
+                LoggingLevel::WarningLevel,
+                Plugin::Authentication,
+                "validate_local_identity",
+                &format!("OCSP: {e}"),
+            );
+        }
+        let peers: Vec<(GuidPrefix, Cert)> = self
+            .state()
+            .peers
+            .iter()
+            .filter_map(|(p, peer)| Some((*p, peer.authenticated.as_ref()?.peer_cert.clone())))
+            .collect();
+        let mut revoked = Vec::new();
+        for (prefix, cert) in peers {
+            match self.identity.ocsp_status(&cert) {
+                Some(Ok(rustorb_dds_security::ocsp::CertStatus::Revoked)) => revoked.push(prefix),
+                Some(Ok(_)) | None => {}
+                Some(Err(e)) => self.log(
+                    LoggingLevel::WarningLevel,
+                    Plugin::Authentication,
+                    "validate_remote_identity",
+                    &format!("OCSP for {}: {e}", prefix_text(&prefix)),
+                ),
+            }
+        }
+        revoked
     }
 
     /// Revises the key material of the participant and of its endpoints

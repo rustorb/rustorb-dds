@@ -13,6 +13,7 @@ pub mod auth;
 pub mod cdr;
 pub mod crypto;
 pub mod message;
+pub mod ocsp;
 pub mod pki;
 pub mod smime;
 pub mod token;

@@ -28,6 +28,7 @@ fn identity(
         &IdentityOptions {
             password: password.map(str::to_string),
             crl: crl.map(r),
+            ocsp: None,
         },
     )
     .map_err(|e| e.to_string())
@@ -84,6 +85,7 @@ fn the_password_can_be_in_the_uri_of_the_key() {
         &format!("file:{D}identity_ca.pem"),
         &format!("file:{D}p1_cert.pem"),
         &format!("file:{D}p1_key_dek.pem?password=OpenSesame"),
+        None,
         None,
         None,
     );

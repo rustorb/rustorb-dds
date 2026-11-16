@@ -114,6 +114,8 @@ pub use qos::{
     LivelinessKind, PublisherQos, QosPolicyId, Reliability, ResourceLimits, SubscriberQos,
     TypeConsistency, TypeConsistencyKind, WriterDataLifecycle, data_representation,
 };
+#[cfg(feature = "security")]
+pub use rustorb_dds_security::ocsp::OcspOptions;
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
 pub use rustorb_rtps::{Guid, GuidPrefix, SampleIdentity, SequenceNumber, Time};
