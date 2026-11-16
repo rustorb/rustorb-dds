@@ -11,7 +11,7 @@ use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce, Tag};
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::Error;
@@ -72,14 +72,15 @@ impl TransformKind {
         ]
     }
 
-    /// From the four octets on the wire.
+    /// From the four octets on the wire, whatever the key revision in
+    /// the first three.
     pub fn from_octets(o: [u8; 4]) -> Result<Self, Error> {
-        Ok(match o {
-            [0, 0, 0, 0] => TransformKind::None,
-            [0, 0, 0, 1] => TransformKind::Aes128Gmac,
-            [0, 0, 0, 2] => TransformKind::Aes128Gcm,
-            [0, 0, 0, 3] => TransformKind::Aes256Gmac,
-            [0, 0, 0, 4] => TransformKind::Aes256Gcm,
+        Ok(match o[3] {
+            0 => TransformKind::None,
+            1 => TransformKind::Aes128Gmac,
+            2 => TransformKind::Aes128Gcm,
+            3 => TransformKind::Aes256Gmac,
+            4 => TransformKind::Aes256Gcm,
             _ => return Err(Error::new(format!("unknown transformation kind {o:?}"))),
         })
     }
@@ -102,8 +103,11 @@ impl TransformKind {
 /// KeyMaterial_AES_GCM_GMAC (10.5.2.1.1).
 #[derive(Clone, PartialEq, Eq)]
 pub struct KeyMaterial {
-    /// transformation_kind.
+    /// transformation_kind: its transformation_algorithm_id.
     pub kind: TransformKind,
+    /// transformation_kind: its transformation_key_revision (7.3.17),
+    /// {0, 0, 0} until the key material is revised.
+    pub revision: [u8; 3],
     /// master_salt.
     pub master_salt: Vec<u8>,
     /// sender_key_id.
@@ -120,6 +124,7 @@ impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyMaterial")
             .field("kind", &self.kind)
+            .field("revision", &self.revision)
             .field("sender_key_id", &self.sender_key_id)
             .field("receiver_specific_key_id", &self.receiver_specific_key_id)
             .finish_non_exhaustive()
@@ -151,6 +156,7 @@ impl KeyMaterial {
         let n = kind.key_len();
         KeyMaterial {
             kind,
+            revision: [0; 3],
             master_salt: random(n),
             sender_key_id: if n == 0 { [0; 4] } else { new_key_id() },
             master_sender_key: random(n),
@@ -171,6 +177,50 @@ impl KeyMaterial {
         k
     }
 
+    /// The four octets of its transformation_kind: the key revision, then
+    /// the algorithm.
+    pub fn kind_octets(&self) -> [u8; 4] {
+        let r = self.revision;
+        [r[0], r[1], r[2], self.kind.octets()[3]]
+    }
+
+    /// The key revision as an integer (CryptoTransformKeyRevisionIntHolder,
+    /// 7.3.17).
+    pub fn revision_number(&self) -> i32 {
+        let r = self.revision;
+        i32::from(r[0]) << 16 | i32::from(r[1]) << 8 | i32::from(r[2])
+    }
+
+    /// The next revision of this key material (revise_local_entity_keys,
+    /// 9.5.1.6 and 10.5.3.2): the same kind, key ids and receiver-specific
+    /// key, a new master salt and master sender key, and the key revision
+    /// incremented ({0xFF, 0xFF, 0xFF} rolls over to {0, 0, 1}). Key
+    /// material of kind NONE has nothing to revise.
+    pub fn revised(&self) -> Self {
+        if self.kind == TransformKind::None {
+            return self.clone();
+        }
+        let n = self.kind.key_len();
+        let next = (self.revision_number() + 1) & 0xFF_FFFF;
+        let next = if next == 0 { 1 } else { next };
+        KeyMaterial {
+            revision: [(next >> 16) as u8, (next >> 8) as u8, next as u8],
+            master_salt: random(n),
+            master_sender_key: random(n),
+            ..self.clone()
+        }
+    }
+
+    /// This key material with the receiver-specific key of `other` (one
+    /// sent to a receiver before): what that receiver gets of a revision.
+    pub fn with_receiver_key_of(&self, other: &KeyMaterial) -> Self {
+        KeyMaterial {
+            receiver_specific_key_id: other.receiver_specific_key_id,
+            master_receiver_specific_key: other.master_receiver_specific_key.clone(),
+            ..self.clone()
+        }
+    }
+
     /// The key material of the volatile message secure endpoints, derived
     /// from the shared secret of a handshake (10.5.2.1.2).
     pub fn key_exchange(challenge1: &[u8], challenge2: &[u8], shared_secret: &[u8]) -> Self {
@@ -186,6 +236,7 @@ impl KeyMaterial {
             .finalize();
         KeyMaterial {
             kind: TransformKind::Aes256Gcm,
+            revision: [0; 3],
             master_salt: hmac256(&salt_in, &[shared_secret]).to_vec(),
             sender_key_id: [0; 4],
             master_sender_key: hmac256(&key_in, &[shared_secret]).to_vec(),
@@ -197,7 +248,7 @@ impl KeyMaterial {
     /// The big-endian CDR of the key material (10.5.2.1).
     pub fn to_cdr(&self) -> Vec<u8> {
         let mut w = CdrWriter::new();
-        w.octets(&self.kind.octets());
+        w.octets(&self.kind_octets());
         w.sequence(&self.master_salt);
         w.octets(&self.sender_key_id);
         w.sequence(&self.master_sender_key);
@@ -209,9 +260,11 @@ impl KeyMaterial {
     /// From its big-endian CDR.
     pub fn from_cdr(b: &[u8]) -> Result<Self, Error> {
         let mut r = CdrReader::new(b);
-        let kind = TransformKind::from_octets(r.array()?)?;
+        let o: [u8; 4] = r.array()?;
+        let kind = TransformKind::from_octets(o)?;
         let k = KeyMaterial {
             kind,
+            revision: [o[0], o[1], o[2]],
             master_salt: r.sequence(32)?,
             sender_key_id: r.array()?,
             master_sender_key: r.sequence(32)?,
@@ -398,12 +451,14 @@ pub const MAX_BLOCKS_PER_SESSION: u64 = 1 << 32;
 /// initialization vector (10.5.3.3.2).
 #[derive(Debug)]
 pub struct Encoder {
-    key: KeyMaterial,
+    kind: TransformKind,
     max_blocks: u64,
     state: Mutex<Session>,
 }
 
 struct Session {
+    /// The key material in use: it changes with a key revision.
+    key: KeyMaterial,
     id: u32,
     iv: u64,
     blocks: u64,
@@ -418,19 +473,22 @@ impl std::fmt::Debug for Session {
     }
 }
 
-/// What one transform used: the header and the cipher of the session.
+/// What one transform used: the header, the cipher of the session and
+/// the master salt.
 struct Use {
     header: CryptoHeader,
     cipher: Option<Cipher>,
+    salt: Vec<u8>,
 }
 
 impl Encoder {
     /// An encoder of `key`.
     pub fn new(key: KeyMaterial) -> Self {
         Encoder {
-            key,
+            kind: key.kind,
             max_blocks: MAX_BLOCKS_PER_SESSION,
             state: Mutex::new(Session {
+                key,
                 id: OsRng.next_u32(),
                 iv: OsRng.next_u64(),
                 blocks: 0,
@@ -439,15 +497,26 @@ impl Encoder {
         }
     }
 
-    /// The key material.
-    pub fn key_material(&self) -> &KeyMaterial {
-        &self.key
+    /// The key material in use.
+    pub fn key_material(&self) -> KeyMaterial {
+        self.state.lock().expect("not poisoned").key.clone()
+    }
+
+    /// Uses `key`, a revision of the key material, from now on
+    /// (activate_key_revision, 9.5.1.8.8), with a new session.
+    pub fn set_key_material(&self, key: KeyMaterial) {
+        let mut s = self.state.lock().expect("not poisoned");
+        s.key = key;
+        s.id = OsRng.next_u32();
+        s.blocks = 0;
+        s.cipher = None;
     }
 
     /// Takes the next initialization vector for `len` octets.
     fn next(&self, len: usize) -> Use {
-        let k = &self.key;
         let mut s = self.state.lock().expect("not poisoned");
+        let s = &mut *s;
+        let k = &s.key;
         let blocks = (len as u64).div_ceil(16) + 1;
         if s.cipher.is_none() || s.blocks + blocks > self.max_blocks {
             if s.cipher.is_some() {
@@ -468,12 +537,13 @@ impl Encoder {
         s.iv = s.iv.wrapping_add(1);
         Use {
             header: CryptoHeader {
-                kind: k.kind.octets(),
+                kind: k.kind_octets(),
                 key_id: k.sender_key_id,
                 session_id: s.id.to_be_bytes(),
                 iv_suffix: s.iv.to_be_bytes(),
             },
             cipher: s.cipher.clone(),
+            salt: k.master_salt.clone(),
         }
     }
 
@@ -489,7 +559,7 @@ impl Encoder {
         let iv = u.header.iv();
         let common_mac = match &u.cipher {
             None => [0; 16],
-            Some(c) if self.key.kind.encrypts() => c.seal(&iv, aad, data),
+            Some(c) if self.kind.encrypts() => c.seal(&iv, aad, data),
             Some(c) => {
                 if aad.is_empty() {
                     c.mac(&iv, data)
@@ -504,10 +574,12 @@ impl Encoder {
             .iter()
             .filter(|r| r.receiver_specific_key_id != [0; 4] && r.kind != TransformKind::None)
             .map(|r| {
+                // The master salt of the key material in use: the one of
+                // `r` may be of another revision.
                 let key = session_key(
                     r.kind,
                     &r.master_receiver_specific_key,
-                    &r.master_salt,
+                    &u.salt,
                     b"SessionReceiverKey",
                     u.header.session_id,
                 );
@@ -532,7 +604,7 @@ impl Encoder {
         u.header.write(&mut out);
         let mut data = payload.to_vec();
         let footer = self.seal(&u, &[], &mut data, &[]);
-        if self.key.kind.encrypts() {
+        if self.kind.encrypts() {
             out.extend_from_slice(&(data.len() as u32).to_be_bytes());
         }
         out.extend_from_slice(&data);
@@ -553,7 +625,7 @@ impl Encoder {
         put_submessage(&mut out, SEC_PREFIX, 0, &h);
         let mut data = submessage.to_vec();
         let footer = self.seal(&u, &[], &mut data, receivers);
-        if self.key.kind.encrypts() {
+        if self.kind.encrypts() {
             let mut body = (data.len() as u32).to_be_bytes().to_vec();
             body.extend_from_slice(&data);
             put_submessage(&mut out, SEC_BODY, 0, &body);
@@ -593,7 +665,7 @@ impl Encoder {
         u.header.write(&mut h);
         put_submessage(&mut out, SRTPS_PREFIX, 0, &h);
         let footer = self.seal(&u, &[], &mut body, receivers);
-        if self.key.kind.encrypts() {
+        if self.kind.encrypts() {
             let mut b = (body.len() as u32).to_be_bytes().to_vec();
             b.extend_from_slice(&body);
             put_submessage(&mut out, SEC_BODY, 0, &b);
@@ -667,17 +739,30 @@ pub fn read_submessage(b: &[u8]) -> Result<(RawSubmessage<'_>, &[u8]), Error> {
     ))
 }
 
-/// The receiving side of one remote key material.
+/// How many revisions of a remote key material a [`Decoder`] keeps: a
+/// DataReader that is not VOLATILE keeps at least the last 8 (9.3.2.12.2).
+pub const KEPT_REVISIONS: usize = 8;
+
+/// The receiving side of one remote key material, in its last revisions.
 #[derive(Debug)]
 pub struct Decoder {
+    kind: TransformKind,
+    sender_key_id: [u8; 4],
+    /// The newest first.
+    revisions: Mutex<VecDeque<Revision>>,
+}
+
+#[derive(Debug)]
+struct Revision {
     key: KeyMaterial,
-    sessions: Mutex<HashMap<[u8; 4], Keys>>,
+    sessions: HashMap<[u8; 4], Keys>,
 }
 
 #[derive(Clone)]
 struct Keys {
     sender: Cipher,
     receiver: Option<Cipher>,
+    receiver_id: [u8; 4],
 }
 
 impl std::fmt::Debug for Keys {
@@ -700,36 +785,76 @@ impl Decoder {
     /// one this side checks.
     pub fn new(key: KeyMaterial) -> Self {
         Decoder {
-            key,
-            sessions: Mutex::new(HashMap::new()),
+            kind: key.kind,
+            sender_key_id: key.sender_key_id,
+            revisions: Mutex::new(VecDeque::from([Revision {
+                key,
+                sessions: HashMap::new(),
+            }])),
         }
     }
 
-    /// The key material.
-    pub fn key_material(&self) -> &KeyMaterial {
-        &self.key
+    /// The newest revision of the key material.
+    pub fn key_material(&self) -> KeyMaterial {
+        self.revisions.lock().expect("not poisoned")[0].key.clone()
     }
 
-    /// Whether `header` was made with this key material.
+    /// Takes `key` as a revision of this key material: `false` if it is
+    /// another key material (another sender key id or kind). A revision
+    /// already known is replaced; past [`KEPT_REVISIONS`], the oldest is
+    /// dropped.
+    pub fn add_revision(&self, key: KeyMaterial) -> bool {
+        if key.sender_key_id != self.sender_key_id || key.kind != self.kind {
+            return false;
+        }
+        let mut rs = self.revisions.lock().expect("not poisoned");
+        rs.retain(|r| r.key.revision != key.revision);
+        rs.push_front(Revision {
+            key,
+            sessions: HashMap::new(),
+        });
+        rs.truncate(KEPT_REVISIONS);
+        true
+    }
+
+    /// The key revisions known, the newest first.
+    pub fn revisions(&self) -> Vec<i32> {
+        let rs = self.revisions.lock().expect("not poisoned");
+        rs.iter().map(|r| r.key.revision_number()).collect()
+    }
+
+    /// Whether `header` was made with this key material, in one of the
+    /// revisions known.
     pub fn matches(&self, header: &CryptoHeader) -> bool {
-        header.key_id == self.key.sender_key_id && header.kind == self.key.kind.octets()
+        header.key_id == self.sender_key_id
+            && self
+                .revisions
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .any(|r| r.key.kind_octets() == header.kind)
     }
 
     fn keys(&self, header: &CryptoHeader) -> Result<Option<Keys>, Error> {
-        if !self.matches(header) {
+        if header.key_id != self.sender_key_id {
             return Err(Error::new("unknown key material"));
         }
-        let k = &self.key;
+        let mut rs = self.revisions.lock().expect("not poisoned");
+        let Some(rev) = rs.iter_mut().find(|r| r.key.kind_octets() == header.kind) else {
+            return Err(Error::new("unknown key material or key revision"));
+        };
+        let k = &rev.key;
         if k.kind == TransformKind::None {
             return Ok(None);
         }
-        let mut s = self.sessions.lock().expect("not poisoned");
+        let s = &mut rev.sessions;
         if s.len() > 16 {
             s.clear();
         }
         Ok(Some(
             s.entry(header.session_id)
                 .or_insert_with(|| Keys {
+                    receiver_id: k.receiver_specific_key_id,
                     sender: Cipher::new(&session_key(
                         k.kind,
                         &k.master_sender_key,
@@ -762,13 +887,13 @@ impl Decoder {
             return Ok(());
         };
         let iv = header.iv();
-        if self.key.kind.encrypts() {
+        if self.kind.encrypts() {
             keys.sender.open(&iv, &[], data, &footer.common_mac)?;
         } else if keys.sender.mac(&iv, data) != footer.common_mac {
             return Err(Error::new("the common MAC does not verify"));
         }
         if let Some(r) = &keys.receiver {
-            let id = self.key.receiver_specific_key_id;
+            let id = keys.receiver_id;
             let (_, mac) = footer
                 .receiver_specific_macs
                 .iter()
@@ -786,7 +911,7 @@ impl Decoder {
     pub fn decode_payload(&self, b: &[u8]) -> Result<Vec<u8>, Error> {
         let header = CryptoHeader::read(b)?;
         let rest = &b[CryptoHeader::LEN..];
-        let (mut data, rest) = if self.key.kind.encrypts() {
+        let (mut data, rest) = if self.kind.encrypts() {
             if rest.len() < 4 {
                 return Err(Error::new("the CryptoContent is cut short"));
             }
@@ -818,7 +943,7 @@ impl Decoder {
         }
         let header = CryptoHeader::read(prefix.body)?;
         let (inner, rest) = read_submessage(rest)?;
-        let mut data = if self.key.kind.encrypts() {
+        let mut data = if self.kind.encrypts() {
             if inner.id != SEC_BODY {
                 return Err(Error::new("no SEC_BODY after the SEC_PREFIX"));
             }
@@ -849,7 +974,7 @@ impl Decoder {
             return Err(Error::new("not an SRTPS_PREFIX"));
         }
         let header = CryptoHeader::read(prefix.body)?;
-        let (mut body, footer) = if self.key.kind.encrypts() {
+        let (mut body, footer) = if self.kind.encrypts() {
             let (inner, rest) = read_submessage(rest)?;
             if inner.id != SEC_BODY {
                 return Err(Error::new("no SEC_BODY after the SRTPS_PREFIX"));
@@ -989,6 +1114,65 @@ mod tests {
         let b = e.encode_payload(&[2; 40]);
         assert_ne!(a[8..12], b[8..12]);
         assert_eq!(d.decode_payload(&b).unwrap(), vec![2; 40]);
+    }
+
+    #[test]
+    fn revisions_keep_the_key_ids_and_renew_the_keys() {
+        let k = KeyMaterial::generate(TransformKind::Aes256Gcm).with_receiver_specific_key();
+        let r = k.revised();
+        assert_eq!(r.revision, [0, 0, 1]);
+        assert_eq!(r.revision_number(), 1);
+        assert_eq!(r.kind_octets(), [0, 0, 1, 4]);
+        assert_eq!(r.sender_key_id, k.sender_key_id);
+        assert_eq!(r.receiver_specific_key_id, k.receiver_specific_key_id);
+        assert_eq!(
+            r.master_receiver_specific_key,
+            k.master_receiver_specific_key
+        );
+        assert_ne!(r.master_salt, k.master_salt);
+        assert_ne!(r.master_sender_key, k.master_sender_key);
+        assert_eq!(KeyMaterial::from_cdr(&r.to_cdr()).unwrap(), r);
+        let mut last = r.clone();
+        last.revision = [0xFF, 0xFF, 0xFF];
+        assert_eq!(last.revised().revision, [0, 0, 1]);
+        last.revision = [0, 0, 0xFF];
+        assert_eq!(last.revised().revision, [0, 1, 0]);
+        let none = KeyMaterial::generate(TransformKind::None);
+        assert_eq!(none.revised(), none);
+    }
+
+    #[test]
+    fn decoders_keep_the_last_revisions() {
+        let local = KeyMaterial::generate(TransformKind::Aes128Gmac);
+        let to_reader = local.with_receiver_specific_key();
+        let e = Encoder::new(local.clone());
+        let d = Decoder::new(to_reader.clone());
+        let sub = [0x15u8, 0x05, 4, 0, 1, 2, 3, 4];
+        let old = e.encode_submessage(&sub, &[&to_reader]);
+        let mut revs = vec![local.clone()];
+        for _ in 0..KEPT_REVISIONS {
+            let r = revs.last().unwrap().revised();
+            assert!(d.add_revision(r.with_receiver_key_of(&to_reader)));
+            revs.push(r);
+        }
+        // Another key material is not a revision.
+        assert!(!d.add_revision(KeyMaterial::generate(TransformKind::Aes128Gmac)));
+        assert_eq!(d.revisions().len(), KEPT_REVISIONS);
+        assert_eq!(d.key_material().revision_number(), KEPT_REVISIONS as i32);
+        // The first revision is dropped: what it made is not decoded.
+        assert!(!d.matches(&header_of(&old[4..]).unwrap()));
+        assert!(d.decode_submessage(&old).is_err());
+        // The encoder switches to the newest, with the receiver-specific
+        // keys sent before.
+        e.set_key_material(revs.last().unwrap().clone());
+        let new = e.encode_submessage(&sub, &[&to_reader]);
+        assert_eq!(d.decode_submessage(&new).unwrap().plain, sub);
+        // And an older one still known is decoded too.
+        let e2 = Encoder::new(revs[1].clone());
+        let c = e2.encode_submessage(&sub, &[&to_reader]);
+        assert_eq!(d.decode_submessage(&c).unwrap().plain, sub);
+        // A decoder that only has the old revision cannot read the new.
+        assert!(Decoder::new(to_reader).decode_submessage(&new).is_err());
     }
 
     #[test]

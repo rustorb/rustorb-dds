@@ -105,6 +105,11 @@ pub fn governance(xml: &[u8]) -> Result<Governance, Error> {
             domains: domains(required(r, "domains")?)?,
             allow_unauthenticated_participants: boolean(r, "allow_unauthenticated_participants")?,
             enable_join_access_control: boolean(r, "enable_join_access_control")?,
+            // DDS Security 1.2; documents of 1.1 do not have it.
+            enable_key_revision: match child(r, "enable_key_revision") {
+                Some(_) => boolean(r, "enable_key_revision")?,
+                None => false,
+            },
             discovery_protection_kind: protection(r, "discovery_protection_kind")?,
             liveliness_protection_kind: protection(r, "liveliness_protection_kind")?,
             rtps_protection_kind: protection(r, "rtps_protection_kind")?,

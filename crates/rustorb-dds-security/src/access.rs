@@ -156,6 +156,8 @@ pub struct DomainRule {
     pub allow_unauthenticated_participants: bool,
     /// enable_join_access_control.
     pub enable_join_access_control: bool,
+    /// enable_key_revision (10.4.1.2.5.4); `false` when absent.
+    pub enable_key_revision: bool,
     /// discovery_protection_kind.
     pub discovery_protection_kind: ProtectionKind,
     /// liveliness_protection_kind.

@@ -2935,6 +2935,57 @@ impl DomainParticipant {
         v.sort();
         v
     }
+
+    /// Revokes the identity of the authenticated participant `prefix`
+    /// (DDS Security 1.2, on_revoke_identity, 9.3.2.12.2): communication
+    /// with it ends and its certificate is not authenticated again. When
+    /// the governance has `<enable_key_revision>true</enable_key_revision>`,
+    /// the key material it had is revised as [`Self::revise_keys`] does,
+    /// so that it cannot read what is sent from now on. Whether `prefix`
+    /// was an authenticated participant; `PreconditionNotMet` without
+    /// DDS Security.
+    #[cfg(feature = "security")]
+    pub fn revoke_participant(&self, prefix: GuidPrefix) -> Result<bool> {
+        let sec = self
+            .shared
+            .security
+            .clone()
+            .ok_or(Error::PreconditionNotMet)?;
+        let now = Instant::now();
+        if !sec.revoke_participant(&prefix, now) {
+            return Ok(false);
+        }
+        {
+            let mut g = self.shared.lock()?;
+            participant_event(
+                &mut g,
+                ParticipantEvent::Removed(prefix, rustorb_rtps::spdp::RemovalReason::Disposed),
+                now,
+            );
+        }
+        self.shared.flush();
+        Ok(true)
+    }
+
+    /// Revises the key material of the participant and of its endpoints
+    /// (DDS Security 1.2, revise_local_entity_keys, 9.8.9.5): the new
+    /// revision goes to the authenticated participants matched, and is
+    /// used once they acknowledge it or after 2 seconds. The volatile
+    /// message endpoints keep their keys, which belong to one peer each.
+    /// Readers keep the last 8 revisions of what they receive, and writers
+    /// send the earlier revisions to readers that match later, for the
+    /// changes kept in their history. The revision number of the
+    /// participant's key material (0 without RTPS protection);
+    /// `PreconditionNotMet` without DDS Security.
+    #[cfg(feature = "security")]
+    pub fn revise_keys(&self) -> Result<i32> {
+        let sec = self
+            .shared
+            .security
+            .as_ref()
+            .ok_or(Error::PreconditionNotMet)?;
+        Ok(sec.revise_keys(Instant::now()))
+    }
 }
 
 impl Drop for DomainParticipant {

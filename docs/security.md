@@ -88,6 +88,16 @@ let participant = DomainParticipant::with_config(config)?;
 - 自分の writer・reader は、作るときに確かめる（check_create_datawriter・datareader）。相手の writer・reader は、match するときに、相手の permissions とタグで確かめる。
 - writer と reader のタグどうしは比べない（仕様にない）。タグは今は Rust の QoS にだけあり、他の言語の QoS にはない。
 
+### 失効と鍵の更新（key revision）
+
+#73 で足した（9.3.2.12.2、9.5.1.6、9.8.9.5、10.5.3.2）。
+
+- `DomainParticipant::revoke_participant(prefix)` は、認証の済んだ相手の identity を失効させる（on_revoke_identity）。その相手とのやりとりをやめ（discovery から外す）、その証明書は二度と認証しない。governance の `<enable_key_revision>true</enable_key_revision>` のとき、続けて鍵を更新する。`<enable_key_revision>` のない（1.1 の）governance では偽とみなす。
+- `DomainParticipant::revise_keys()` は鍵を更新する（revise_local_entity_keys）。参加者の鍵（RTPS protection）と、writer・reader の submessage と payload の鍵の、新しい revision を作る。transformation_kind の先頭 3 octet の revision を 1 つ進め、master_salt と master_sender_key は新しくし、sender_key_id と receiver-specific key はそのままにする。volatile message の鍵（相手ごとの KxKey）は更新しない。
+- 新しい revision は、認証の済んだ match している相手に volatile message で送る。相手がみな ack するか、2 秒たったら使い始める（activate_key_revision）。それより前に失効した相手には送らないので、使い始めたあとのものは読めない。
+- 受け取る側は、同じ sender_key_id の鍵を revision として足し、最後の 8 個を持つ。writer は、あとで match した reader に、今の鍵に加えて 7 個前までの payload の鍵も送る（history に残るサンプルは、書いたときの鍵で暗号化してあるため）。8 個以上前の鍵で書いたサンプルは、あとで match した reader には読めない。
+- 他の実装（Cyclone DDS 0.10.4、Fast DDS 2.11）は revision を作らないので、相互接続では revision 0 のままで、これまでと変わらない。
+
 ### ほかの言語から
 
 どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
@@ -111,7 +121,7 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags、identity の失効と鍵の更新（あとで match した reader が古い revision のサンプルを読めること）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
 - `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
@@ -121,4 +131,4 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 - OCSP、PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK）。
 - 他の言語の QoS の data tags。
 - ログの LoggerListener、レガシーの `DDS:Security:LogTopic` への publish、他の言語でのログのトピックの型。
-- 鍵の更新（key revision）。
+- 他の言語からの `revoke_participant`・`revise_keys`。

@@ -441,3 +441,124 @@ fn data_tags_are_checked_against_the_permissions() {
         .iter()
         .any(|s| s.data.is_some())));
 }
+
+fn take_messages(reader: &rustorb_dds::DataReader<Greeting>, got: &mut Vec<String>) {
+    got.extend(
+        reader
+            .take()
+            .into_iter()
+            .filter_map(|s| s.data)
+            .map(|g| g.message),
+    );
+}
+
+/// Revoking the identity of a participant (on_revoke_identity) ends the
+/// communication with it, keeps it from authenticating again, and revises
+/// the keys of the others (the governance enables key revision); a reader
+/// that matches after revisions still reads the history written before.
+#[test]
+fn revoked_identities_and_key_revisions() {
+    use rustorb_dds::{DataWriterQos, DurabilityKind, Reliability};
+    let p1 = participant(40, Some("p1")).unwrap();
+    let p2 = participant(40, Some("p2")).unwrap();
+    let p3 = participant(40, Some("p3")).unwrap();
+    let t1 = p1.create_topic::<Greeting>("Square").unwrap();
+    let writer = p1
+        .create_publisher()
+        .unwrap()
+        .create_datawriter_with_qos(
+            &t1,
+            DataWriterQos {
+                reliability: Reliability::reliable(),
+                durability: DurabilityKind::TransientLocal,
+                history: History::KeepAll,
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let reader_qos = DataReaderQos {
+        reliability: Reliability::reliable(),
+        durability: DurabilityKind::TransientLocal,
+        ..keep_all()
+    };
+    let t2 = p2.create_topic::<Greeting>("Square").unwrap();
+    let r2 = p2
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t2, reader_qos.clone())
+        .unwrap();
+    let t3 = p3.create_topic::<Greeting>("Square").unwrap();
+    let r3 = p3
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t3, reader_qos.clone())
+        .unwrap();
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 2),
+        "not matched"
+    );
+    let write = |m: &str| {
+        writer
+            .write(&Greeting {
+                index: 0,
+                message: m.into(),
+            })
+            .unwrap()
+    };
+    write("before");
+    let (mut got2, mut got3) = (Vec::new(), Vec::new());
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        take_messages(&r3, &mut got3);
+        got2.len() == 1 && got3.len() == 1
+    }));
+
+    // Only an authenticated participant can be revoked.
+    assert!(!p1.revoke_participant(p1.guid().prefix).unwrap());
+    assert!(p1.revoke_participant(p3.guid().prefix).unwrap());
+    assert!(
+        wait_until(|| writer.matched_subscriptions().len() == 1),
+        "the revoked reader is still matched"
+    );
+    write("after revocation");
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        got2.len() == 2
+    }));
+    // A second explicit revision: the participant's key material is at
+    // its second revision.
+    assert_eq!(p1.revise_keys().unwrap(), 2);
+    std::thread::sleep(Duration::from_millis(300));
+    write("after two revisions");
+    assert!(wait_until(|| {
+        take_messages(&r2, &mut got2);
+        got2.len() == 3
+    }));
+    assert_eq!(got2, ["before", "after revocation", "after two revisions"]);
+
+    // A late joiner reads the history encoded with all three revisions:
+    // the writer sends it the earlier ones.
+    let p4 = participant(40, Some("p2")).unwrap();
+    let t4 = p4.create_topic::<Greeting>("Square").unwrap();
+    let late = p4
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(&t4, reader_qos)
+        .unwrap();
+    let mut got_late = Vec::new();
+    assert!(
+        wait_until(|| {
+            take_messages(&late, &mut got_late);
+            got_late.len() == 3
+        }),
+        "late joiner got {got_late:?}"
+    );
+
+    // The revoked participant got nothing more and does not authenticate
+    // again.
+    std::thread::sleep(Duration::from_secs(1));
+    take_messages(&r3, &mut got3);
+    assert_eq!(got3, ["before"]);
+    // The readers of participant2 and of the late joiner.
+    assert_eq!(writer.matched_subscriptions().len(), 2);
+}
