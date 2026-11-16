@@ -314,6 +314,8 @@ pub struct ShmTransport {
     path: PathBuf,
     /// Peers by segment; `None` for one that could not be opened.
     peers: Mutex<HashMap<u64, Option<Arc<Peer>>>>,
+    /// The pools of the samples sent by reference to this participant.
+    pools: Arc<Pools>,
     /// Rings the peers' bells.
     bell: UdpSocket,
     stop: Arc<AtomicBool>,
@@ -359,6 +361,7 @@ impl ShmTransport {
             directory: config.directory.clone(),
             path,
             peers: Mutex::new(HashMap::new()),
+            pools: Arc::new(Pools::new(&config.directory)),
             bell,
             stop,
             thread: Some(thread),
@@ -415,6 +418,23 @@ impl ShmTransport {
         } else {
             shm
         }
+    }
+
+    /// Whether one of a peer's locators can be sent to by shared memory.
+    pub fn reaches(&self, locators: &[Locator]) -> bool {
+        locators.iter().any(|l| self.peer(l).is_some())
+    }
+
+    /// A pool of `slots` samples of up to `slot_size` octets, for a
+    /// writer to lend samples from.
+    pub fn create_pool(&self, slots: u32, slot_size: usize) -> io::Result<Arc<Pool>> {
+        Pool::create(&self.directory, slots, slot_size)
+    }
+
+    /// The pools of the samples that writers of this host send to this
+    /// participant by reference (see [`PoolLoan::reference`]).
+    pub fn pools(&self) -> Arc<Pools> {
+        self.pools.clone()
     }
 
     /// Sends one message to a shared memory locator. Fails with
@@ -495,6 +515,385 @@ fn receive_loop(
     }
 }
 
+/// "RPOL" and the layout version of a [`Pool`].
+const POOL_MAGIC: u64 = 0x5250_4f4c_0000_0001;
+/// The header of a pool: magic, slots, slot size, then the control words
+/// of each slot.
+const POOL_HEADER: usize = 64;
+/// The control of a slot: its state (generation in the high 32 bits,
+/// references in the low 32) and the length of its payload.
+const SLOT_CONTROL: usize = 16;
+/// Where a payload starts in its slot (whose alignment is 64): 4 octets
+/// in, so that what follows its 4-octet encapsulation header is aligned
+/// to 8.
+const PAYLOAD_OFFSET: usize = 4;
+
+fn pool_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("rustorb-dds-pool-{id:016x}"))
+}
+
+/// A pool of samples in shared memory, made by a writer for the samples
+/// it loans (zero-copy): fixed-size slots that the writer fills and the
+/// readers of this host map and read in place. A slot is reused once no
+/// one holds a reference to it: the writer, while the sample is in its
+/// history, and each reader, while it has the sample.
+///
+/// Each slot has a generation, changed each time the writer takes it, so
+/// that a reference to an older sample of the slot is not taken for the
+/// new one.
+pub struct Pool {
+    map: MmapMut,
+    id: u64,
+    slots: u32,
+    slot_size: usize,
+    data: usize,
+    /// The file, removed when the writer's pool goes; `None` in readers.
+    path: Option<PathBuf>,
+}
+
+// SAFETY: the control words are atomics; a slot's data is written only by
+// the writer while it holds the slot alone, and read after it is
+// published.
+unsafe impl Send for Pool {}
+unsafe impl Sync for Pool {}
+
+impl std::fmt::Debug for Pool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pool")
+            .field("id", &format_args!("{:016x}", self.id))
+            .field("slots", &self.slots)
+            .field("slot_size", &self.slot_size)
+            .finish()
+    }
+}
+
+impl Pool {
+    /// Makes a pool of `slots` slots for payloads of up to `slot_size`
+    /// octets (rounded up, see [`Self::slot_size`]) in `dir`.
+    pub fn create(dir: &Path, slots: u32, slot_size: usize) -> io::Result<Arc<Pool>> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let id = fnv(&[
+            u64::from(std::process::id()).to_le_bytes(),
+            nanos.to_le_bytes(),
+            NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes(),
+        ]
+        .concat());
+        let slot_size = (slot_size.max(8) + PAYLOAD_OFFSET).next_multiple_of(64);
+        let data = (POOL_HEADER + slots as usize * SLOT_CONTROL).next_multiple_of(64);
+        let path = pool_path(dir, id);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.set_len((data + slots as usize * slot_size) as u64)?;
+        // SAFETY: a new file of this process; others change it only
+        // through the protocol of this type.
+        let map = unsafe { MmapMut::map_mut(&file) }?;
+        let pool = Pool {
+            map,
+            id,
+            slots,
+            slot_size,
+            data,
+            path: Some(path),
+        };
+        pool.word(8).store(u64::from(slots), Ordering::Relaxed);
+        pool.word(16).store(slot_size as u64, Ordering::Relaxed);
+        pool.word(0).store(POOL_MAGIC, Ordering::Release);
+        Ok(Arc::new(pool))
+    }
+
+    /// Maps the pool `id` of `dir`, made by a writer of this host.
+    pub fn open(dir: &Path, id: u64) -> io::Result<Arc<Pool>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(pool_path(dir, id))?;
+        let len = file.metadata()?.len() as usize;
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "not a pool");
+        if len < POOL_HEADER {
+            return Err(bad());
+        }
+        // SAFETY: as in `create`.
+        let map = unsafe { MmapMut::map_mut(&file) }?;
+        let word = |off: usize| {
+            // SAFETY: page aligned, and off < POOL_HEADER <= len.
+            unsafe { &*(map.as_ptr().add(off) as *const AtomicU64) }
+        };
+        if word(0).load(Ordering::Acquire) != POOL_MAGIC {
+            return Err(bad());
+        }
+        let slots = word(8).load(Ordering::Relaxed) as u32;
+        let slot_size = word(16).load(Ordering::Relaxed) as usize;
+        let data = (POOL_HEADER + slots as usize * SLOT_CONTROL).next_multiple_of(64);
+        if slot_size < 64
+            || !slot_size.is_multiple_of(64)
+            || (slots as usize)
+                .checked_mul(slot_size)
+                .and_then(|n| n.checked_add(data))
+                != Some(len)
+        {
+            return Err(bad());
+        }
+        Ok(Arc::new(Pool {
+            map,
+            id,
+            slots,
+            slot_size,
+            data,
+            path: None,
+        }))
+    }
+
+    /// Its id, which references name it by.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The largest payload a slot holds.
+    pub fn slot_size(&self) -> usize {
+        self.slot_size - PAYLOAD_OFFSET
+    }
+
+    /// The number of slots.
+    pub fn slots(&self) -> u32 {
+        self.slots
+    }
+
+    fn word(&self, off: usize) -> &AtomicU64 {
+        // SAFETY: the mapping is page aligned; off is a multiple of 8
+        // within the header and the slot controls.
+        unsafe { &*(self.map.as_ptr().add(off) as *const AtomicU64) }
+    }
+
+    fn state(&self, i: u32) -> &AtomicU64 {
+        self.word(POOL_HEADER + i as usize * SLOT_CONTROL)
+    }
+
+    fn len_word(&self, i: u32) -> &AtomicU64 {
+        self.word(POOL_HEADER + i as usize * SLOT_CONTROL + 8)
+    }
+
+    /// The payload of slot `i`.
+    fn slot_ptr(&self, i: u32) -> *mut u8 {
+        // SAFETY: slot i is within the mapping.
+        unsafe {
+            self.map
+                .as_ptr()
+                .add(self.data + i as usize * self.slot_size + PAYLOAD_OFFSET)
+                as *mut u8
+        }
+    }
+
+    /// Takes a free slot for the writer; `None` if every slot is held. It
+    /// holds zeros the first time, then the sample it held last.
+    pub fn acquire(self: &Arc<Self>) -> Option<PoolSlot> {
+        for i in 0..self.slots {
+            let s = self.state(i);
+            let v = s.load(Ordering::Acquire);
+            if v & 0xffff_ffff != 0 {
+                continue;
+            }
+            let generation = ((v >> 32) as u32).wrapping_add(1);
+            if s.compare_exchange(
+                v,
+                (u64::from(generation) << 32) | 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+            {
+                return Some(PoolSlot(PoolLoan {
+                    pool: self.clone(),
+                    index: i,
+                    generation,
+                }));
+            }
+        }
+        None
+    }
+
+    /// How many slots are held.
+    pub fn held(&self) -> usize {
+        (0..self.slots)
+            .filter(|i| self.state(*i).load(Ordering::Relaxed) & 0xffff_ffff != 0)
+            .count()
+    }
+
+    /// Takes a reference to slot `index` if it still holds the sample of
+    /// `generation`.
+    fn retain(self: &Arc<Self>, index: u32, generation: u32) -> Option<PoolLoan> {
+        if index >= self.slots {
+            return None;
+        }
+        let s = self.state(index);
+        let mut v = s.load(Ordering::Acquire);
+        loop {
+            if (v >> 32) as u32 != generation || v & 0xffff_ffff == 0 {
+                return None;
+            }
+            match s.compare_exchange_weak(v, v + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    return Some(PoolLoan {
+                        pool: self.clone(),
+                        index,
+                        generation,
+                    });
+                }
+                Err(now) => v = now,
+            }
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Readers that still map it keep their mapping.
+        if let Some(p) = &self.path {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// A slot the writer holds alone, to fill before it publishes it.
+#[derive(Debug)]
+pub struct PoolSlot(PoolLoan);
+
+impl PoolSlot {
+    /// The slot, to write the payload in: its address is 4 past a
+    /// multiple of 64, so that octet 4 on is aligned to 8.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        let p = &self.0.pool;
+        // SAFETY: the slot is held by this writer alone until published.
+        unsafe { std::slice::from_raw_parts_mut(p.slot_ptr(self.0.index), p.slot_size()) }
+    }
+
+    /// The slot, as [`Self::bytes_mut`].
+    pub fn bytes(&self) -> &[u8] {
+        let p = &self.0.pool;
+        // SAFETY: as in `bytes_mut`.
+        unsafe { std::slice::from_raw_parts(p.slot_ptr(self.0.index), p.slot_size()) }
+    }
+
+    /// Publishes the first `len` octets of the slot: from then on it is
+    /// only read.
+    pub fn publish(self, len: usize) -> PoolLoan {
+        let len = len.min(self.0.pool.slot_size());
+        self.0
+            .pool
+            .len_word(self.0.index)
+            .store(len as u64, Ordering::Release);
+        self.0
+    }
+}
+
+/// A reference to a published sample of a [`Pool`]: the slot is not
+/// reused while one is alive. Cloning takes another reference.
+#[derive(Debug)]
+pub struct PoolLoan {
+    pool: Arc<Pool>,
+    index: u32,
+    generation: u32,
+}
+
+/// The encapsulation identifier of a payload that is a reference to a
+/// sample in a pool, not the sample: a vendor value, sent only to
+/// participants of rustorb-dds on this host.
+pub const REFERENCE_ENCAPSULATION: [u8; 2] = [0x52, 0x44];
+
+impl PoolLoan {
+    /// The payload.
+    pub fn bytes(&self) -> &[u8] {
+        let len = (self.pool.len_word(self.index).load(Ordering::Acquire) as usize)
+            .min(self.pool.slot_size());
+        // SAFETY: published, so no longer written while referenced.
+        unsafe { std::slice::from_raw_parts(self.pool.slot_ptr(self.index), len) }
+    }
+
+    /// The payload that refers to this sample: [`REFERENCE_ENCAPSULATION`]
+    /// and two octets of options, then the pool id, the slot and its
+    /// generation (little endian).
+    pub fn reference(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(20);
+        b.extend_from_slice(&REFERENCE_ENCAPSULATION);
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&self.pool.id.to_le_bytes());
+        b.extend_from_slice(&self.index.to_le_bytes());
+        b.extend_from_slice(&self.generation.to_le_bytes());
+        b
+    }
+}
+
+impl Clone for PoolLoan {
+    fn clone(&self) -> Self {
+        self.pool.state(self.index).fetch_add(1, Ordering::AcqRel);
+        PoolLoan {
+            pool: self.pool.clone(),
+            index: self.index,
+            generation: self.generation,
+        }
+    }
+}
+
+impl Drop for PoolLoan {
+    fn drop(&mut self) {
+        self.pool.state(self.index).fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Whether a payload is a reference to a pooled sample.
+pub fn is_reference(payload: &[u8]) -> bool {
+    payload.len() == 20 && payload[..2] == REFERENCE_ENCAPSULATION
+}
+
+/// The pools of other writers that a reader opened, by id: each is kept
+/// mapped while its file exists.
+#[derive(Debug)]
+pub struct Pools {
+    directory: PathBuf,
+    open: Mutex<HashMap<u64, Arc<Pool>>>,
+}
+
+impl Pools {
+    /// The pools of directory `directory`.
+    pub fn new(directory: &Path) -> Pools {
+        Pools {
+            directory: directory.to_path_buf(),
+            open: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The sample a reference payload names: `None` if its pool cannot
+    /// be opened or its slot holds another sample by now.
+    pub fn resolve(&self, reference: &[u8]) -> Option<PoolLoan> {
+        if !is_reference(reference) {
+            return None;
+        }
+        let id = u64::from_le_bytes(reference[4..12].try_into().ok()?);
+        let index = u32::from_le_bytes(reference[12..16].try_into().ok()?);
+        let generation = u32::from_le_bytes(reference[16..20].try_into().ok()?);
+        let pool = {
+            let mut pools = self.open.lock().ok()?;
+            match pools.get(&id) {
+                Some(p) => p.clone(),
+                None => {
+                    // The pools of writers that are gone.
+                    let dir = &self.directory;
+                    pools.retain(|id, _| pool_path(dir, *id).exists());
+                    let p = Pool::open(dir, id).ok()?;
+                    pools.insert(id, p.clone());
+                    p
+                }
+            }
+        };
+        pool.retain(index, generation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +967,40 @@ mod tests {
         let (tx_b, _rx_b) = mpsc::channel();
         let b = ShmTransport::open(&config(), prefix(4), tx_b).unwrap();
         assert!(a.send(&[0u8; 2048], &b.user_locator()).is_err());
+    }
+
+    #[test]
+    fn pooled_samples_are_shared_until_released() {
+        let dir = ShmConfig::default().directory;
+        let pool = Pool::create(&dir, 2, 100).unwrap();
+        assert_eq!(pool.slot_size(), 124);
+        let mut a = pool.acquire().unwrap();
+        a.bytes_mut()[..5].copy_from_slice(b"hello");
+        let a = a.publish(5);
+        assert_eq!(a.bytes(), b"hello");
+        let r = a.reference();
+        assert!(is_reference(&r));
+        // A reader maps it and holds the sample after the writer lets go.
+        let pools = Pools::new(&dir);
+        let got = pools.resolve(&r).unwrap();
+        assert_eq!(got.bytes(), b"hello");
+        let b = pool.acquire().unwrap();
+        assert!(pool.acquire().is_none(), "two slots held");
+        drop(a);
+        assert!(pool.acquire().is_none(), "the reader holds the first");
+        drop(got);
+        // The slot is reused, with another generation: the old reference
+        // no longer resolves.
+        let c = pool.acquire().unwrap().publish(1);
+        assert!(pools.resolve(&r).is_none());
+        assert!(pools.resolve(&c.reference()).is_some());
+        drop((b, c));
+        assert_eq!(pool.held(), 0);
+        let path = pool_path(&dir, pool.id());
+        assert!(path.exists());
+        drop(pool);
+        assert!(!path.exists());
+        assert!(pools.resolve(&r).is_none());
     }
 
     #[test]

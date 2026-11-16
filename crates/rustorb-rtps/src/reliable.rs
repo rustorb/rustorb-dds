@@ -490,6 +490,13 @@ impl ReliableWriter {
         self.readers.keys()
     }
 
+    /// The locators a matched reader is sent to: its unicast ones, or
+    /// its multicast ones if it has no unicast one.
+    pub fn reader_destination(&self, guid: &Guid) -> Option<Vec<Locator>> {
+        let p = self.readers.get(guid)?;
+        Some(destination(&p.unicast, &p.multicast))
+    }
+
     /// Whether every matched reader has acknowledged `sn` (a best-effort
     /// reader, once it was sent).
     pub fn is_acked_by_all(&self, sn: SequenceNumber) -> bool {

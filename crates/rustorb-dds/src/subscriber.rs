@@ -8,8 +8,11 @@ use rustorb_rtps::{Guid, entity_kind};
 
 use crate::condition::{ReadCondition, StatusCondition};
 use crate::error::{Error, Result};
+#[cfg(feature = "shm")]
+use crate::instance::Payload;
 use crate::instance::{InstanceHandle, SampleInfo, Selected, StateFilter};
 use crate::listener::{DataReaderListener, SubscriberEntity, SubscriberListener};
+use crate::loan::{PlainType, ReadLoan};
 use crate::participant::{ReaderEvent, ReaderListener, ReaderState, Shared};
 use crate::qos::{DataReaderQos, SubscriberQos, TypeConsistency, duration_to_rtps};
 use crate::status::{
@@ -253,32 +256,35 @@ impl<T> DataReader<T> {
         take: bool,
         max: usize,
     ) -> Vec<Sample<T>> {
-        let raw = {
-            let mut g = self.shared.lock_any();
-            match g.readers.get_mut(&self.guid) {
-                Some(r) => {
-                    r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
-                    r.samples.select_max(filter, instance, take, max)
-                }
-                None => Vec::new(),
-            }
-        };
-        raw.into_iter()
+        self.select_raw(filter, instance, take, max)
+            .into_iter()
             .filter_map(|r| decode(&*self.samples, r))
             .collect()
     }
 
-    /// Removes and returns the samples received, still serialized.
-    pub(crate) fn take_raw(&self) -> Vec<(Option<Vec<u8>>, SampleInfo)> {
+    fn select_raw(
+        &self,
+        filter: StateFilter,
+        instance: Option<InstanceHandle>,
+        take: bool,
+        max: usize,
+    ) -> Vec<Selected> {
         let mut g = self.shared.lock_any();
         match g.readers.get_mut(&self.guid) {
             Some(r) => {
                 r.changes = r.changes & !StatusMask::DATA_AVAILABLE;
-                r.samples
-                    .select_max(StateFilter::ANY, None, true, usize::MAX)
+                r.samples.select_max(filter, instance, take, max)
             }
             None => Vec::new(),
         }
+    }
+
+    /// Removes and returns the samples received, still serialized.
+    pub(crate) fn take_raw(&self) -> Vec<(Option<Vec<u8>>, SampleInfo)> {
+        self.select_raw(StateFilter::ANY, None, true, usize::MAX)
+            .into_iter()
+            .map(|(p, i)| (p.map(|p| p.to_vec()), i))
+            .collect()
     }
 
     /// Deserializes a payload of the reader's type.
@@ -585,6 +591,59 @@ impl<T> DataReader<T> {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+impl<T: PlainType> DataReader<T> {
+    /// Removes and returns the samples received, in the order they
+    /// arrived, without copying them: the samples that a writer of this
+    /// host loaned (see
+    /// [`DataWriter::loan_sample`](crate::DataWriter::loan_sample)) are
+    /// read in place in its shared memory, and its slot stays held until
+    /// the [`ReadLoan`] is dropped. Other samples are deserialized.
+    pub fn take_loaned(&self) -> Vec<Sample<ReadLoan<T>>> {
+        self.select_loaned(StateFilter::ANY, None, true, usize::MAX)
+    }
+
+    /// Like [`Self::take_loaned`], leaving the samples in the reader,
+    /// marked as read.
+    pub fn read_loaned(&self) -> Vec<Sample<ReadLoan<T>>> {
+        self.select_loaned(StateFilter::ANY, None, false, usize::MAX)
+    }
+
+    /// Like [`Self::take_loaned`], at most `max` samples.
+    pub fn take_loaned_max(&self, max: usize) -> Vec<Sample<ReadLoan<T>>> {
+        self.select_loaned(StateFilter::ANY, None, true, max)
+    }
+
+    fn select_loaned(
+        &self,
+        filter: StateFilter,
+        instance: Option<InstanceHandle>,
+        take: bool,
+        max: usize,
+    ) -> Vec<Sample<ReadLoan<T>>> {
+        self.select_raw(filter, instance, take, max)
+            .into_iter()
+            .filter_map(|(payload, info)| {
+                let data = match payload {
+                    None => None,
+                    Some(p) => {
+                        #[cfg(feature = "shm")]
+                        if let Payload::Loaned(l) = &p
+                            && let Some(r) = ReadLoan::shared(l)
+                        {
+                            return Some(Sample {
+                                data: Some(r),
+                                info,
+                            });
+                        }
+                        Some(ReadLoan::owned(self.samples.decode(&p)?))
+                    }
+                };
+                Some(Sample { data, info })
+            })
+            .collect()
     }
 }
 

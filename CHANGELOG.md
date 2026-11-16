@@ -8,6 +8,24 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- Loaned samples (zero-copy) through shared memory (#74), a rustorb API
+  in the style of Cyclone DDS's loans, for types of a fixed size that
+  implement the new unsafe trait `PlainType` (`#[repr(C)]` plain data
+  whose layout is its serialized form; the primitives and arrays of them
+  do). `DataWriter::loan_sample` lends a sample in the writer's pool in
+  shared memory (`WriteLoan`), `DataWriter::write_loaned` publishes it,
+  and `DataReader::take_loaned`, `read_loaned` and `take_loaned_max`
+  return `ReadLoan`s, which read the sample in place. A slot is used
+  again once the writer's history no longer has it and every reader has
+  dropped it. The sample goes by reference (a 20-octet payload naming its
+  slot) only to readers of this participant or reached by shared memory,
+  from a VOLATILE writer without DDS Security; otherwise it is copied (and,
+  without a pool, serialized). The writer checks the layout on the first
+  loaned sample. For a 1 MiB sample, write and take between two
+  participants take about 0.07 ms against 12 ms. In rustorb-rtps:
+  `shm::Pool`, `PoolSlot`, `PoolLoan`, `Pools` and
+  `ShmTransport::create_pool`, `pools` and `reaches`.
+
 - DDS Security: OCSP (RFC 6960; DDS Security 1.2, 10.3.2.5 and 10.3.3,
   #73). `SecurityConfig::ocsp` (`OcspOptions`), or the properties
   `rustorb.dds.sec.auth.ocsp` (a responder URL, or `aia`),
