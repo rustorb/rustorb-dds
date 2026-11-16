@@ -1112,9 +1112,13 @@ impl Security {
             (Action::Subscribe, rule.enable_read_access_control)
         };
         if controlled
-            && !self
-                .grant
-                .allows(self.domain_id, action, topic, &data.partitions)
+            && !self.grant.allows_tagged(
+                self.domain_id,
+                action,
+                topic,
+                &data.partitions,
+                &data.data_tags,
+            )
         {
             let e = format!(
                 "not allowed to {} {topic}",
@@ -1289,11 +1293,12 @@ impl Security {
             Some(p) => match &p.grant {
                 Some(g) => {
                     let ok = !controlled
-                        || g.allows(
+                        || g.allows_tagged(
                             self.domain_id,
                             action,
                             &remote.topic_name,
                             &remote.partitions,
+                            &remote.data_tags,
                         );
                     if !ok {
                         drop(st);

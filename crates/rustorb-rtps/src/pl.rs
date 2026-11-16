@@ -261,6 +261,30 @@ impl PlValues {
         Ok(out)
     }
 
+    /// `sequence<struct { string; string; }>`, as `DataTags` (DDS
+    /// Security 1.2, 7.2.5): pairs of strings, each aligned to 4 from the
+    /// start of the value.
+    pub fn string_pairs(&self, p: &Parameter) -> Result<Vec<(String, String)>, DecodeError> {
+        let mut r = self.reader(p);
+        let n = r.u32().map_err(|_| bad(p.id))? as usize;
+        // Each pair takes at least 8 octets, which bounds `n`.
+        if n > r.remaining() / 8 {
+            return Err(bad(p.id));
+        }
+        let string = |r: &mut Reader<'_>| -> Result<String, DecodeError> {
+            let pad = (4 - r.position() % 4) % 4;
+            r.skip(pad).map_err(|_| bad(p.id))?;
+            read_string(r).ok_or(bad(p.id))
+        };
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let a = string(&mut r)?;
+            let b = string(&mut r)?;
+            out.push((a, b));
+        }
+        Ok(out)
+    }
+
     /// `ContentFilterProperty_t` (9.6.2.2.1): four strings and a
     /// `sequence<string>`, each string aligned to 4 from the start of the
     /// value.
@@ -381,6 +405,19 @@ impl PlBuilder {
             for s in v {
                 w.align4();
                 write_string(w, s);
+            }
+        })
+    }
+
+    /// `sequence<struct { string; string; }>`, as `DataTags`.
+    pub fn string_pairs(&self, id: ParameterId, v: &[(String, String)]) -> Parameter {
+        self.build(id, |w| {
+            w.u32(v.len() as u32);
+            for (a, b) in v {
+                w.align4();
+                write_string(w, a);
+                w.align4();
+                write_string(w, b);
             }
         })
     }

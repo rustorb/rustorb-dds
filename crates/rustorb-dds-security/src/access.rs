@@ -315,6 +315,8 @@ pub struct Criteria {
     pub topics: Vec<String>,
     /// partitions: `None` when the section is absent.
     pub partitions: Option<Vec<String>>,
+    /// data_tags, (name, value): `None` when the section is absent.
+    pub data_tags: Option<Vec<(String, String)>>,
 }
 
 /// An allow or deny rule (10.4.1.5.3.4).
@@ -330,8 +332,15 @@ pub struct Rule {
 
 impl Rule {
     /// Whether the rule applies to `action` on `topic` with `partitions`
-    /// in `domain`.
-    fn applies(&self, domain: u32, action: Action, topic: &str, partitions: &[String]) -> bool {
+    /// and the data tags `tags` in `domain`.
+    fn applies(
+        &self,
+        domain: u32,
+        action: Action,
+        topic: &str,
+        partitions: &[String],
+        tags: &[(String, String)],
+    ) -> bool {
         if !self.domains.contains(domain, "") {
             return false;
         }
@@ -348,11 +357,21 @@ impl Rule {
                 // Every partition of the entity is allowed; no section
                 // allows only the empty partition.
                 let allowed = c.partitions.clone().unwrap_or_else(|| vec![String::new()]);
+                // Every tag of the entity is allowed; no section allows
+                // none (10.4.1.5.3.4.1.5).
+                let allowed_tags = c.data_tags.as_deref().unwrap_or(&[]);
                 parts.iter().all(|p| allowed.iter().any(|a| fnmatch(a, p)))
+                    && tags.iter().all(|t| allowed_tags.contains(t))
             } else {
                 // Some partition is denied; no section denies all.
                 let denied = c.partitions.clone().unwrap_or_else(|| vec!["*".into()]);
-                parts.iter().any(|p| denied.iter().any(|d| fnmatch(d, p)))
+                // Some tag of the entity is denied; no section denies
+                // whatever the tags (10.4.1.5.3.4.2.5).
+                let tags_denied = c
+                    .data_tags
+                    .as_ref()
+                    .is_none_or(|d| tags.iter().any(|t| d.contains(t)));
+                parts.iter().any(|p| denied.iter().any(|d| fnmatch(d, p))) && tags_denied
             }
         })
     }
@@ -414,9 +433,22 @@ impl Grant {
     /// Whether `action` on `topic` with `partitions` in `domain` is
     /// allowed (10.4.1.5.3.4).
     pub fn allows(&self, domain: u32, action: Action, topic: &str, partitions: &[String]) -> bool {
+        self.allows_tagged(domain, action, topic, partitions, &[])
+    }
+
+    /// As [`Self::allows`], for an entity with the data tags `tags`
+    /// (DataTagQosPolicy, (name, value) pairs).
+    pub fn allows_tagged(
+        &self,
+        domain: u32,
+        action: Action,
+        topic: &str,
+        partitions: &[String],
+        tags: &[(String, String)],
+    ) -> bool {
         self.rules
             .iter()
-            .find(|r| r.applies(domain, action, topic, partitions))
+            .find(|r| r.applies(domain, action, topic, partitions, tags))
             .map_or(self.default_allow, |r| r.allow)
     }
 
@@ -503,9 +535,63 @@ mod tests {
                 Criteria {
                     topics: topics.iter().map(|s| s.to_string()).collect(),
                     partitions: partitions.map(|p| p.iter().map(|s| s.to_string()).collect()),
+                    data_tags: None,
                 },
             )],
         }
+    }
+
+    fn tags(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The examples of 10.4.1.5.3.4.1.5 and 10.4.1.5.3.4.2.5.
+    #[test]
+    fn data_tags_of_allow_and_deny_rules() {
+        let mut allow = rule(true, Action::Publish, &["Cir*"], None);
+        allow.actions[0].1.data_tags = Some(tags(&[("aTagName1", "aTagValue1")]));
+        let untagged = rule(true, Action::Subscribe, &["*"], None);
+        let g = Grant {
+            name: "g".into(),
+            subject_name: "CN=x".into(),
+            expression: false,
+            validity: (0, i64::MAX),
+            rules: vec![allow, untagged],
+            default_allow: false,
+        };
+        let pubs =
+            |t: &[(&str, &str)]| g.allows_tagged(0, Action::Publish, "Circle", &[], &tags(t));
+        assert!(pubs(&[]));
+        assert!(pubs(&[("aTagName1", "aTagValue1")]));
+        assert!(!pubs(&[("aTagName1", "aTagValue2")]));
+        assert!(!pubs(&[
+            ("aTagName1", "aTagValue1"),
+            ("aTagName2", "aTagValue2")
+        ]));
+        // No data_tags section: only entities without tags.
+        assert!(g.allows_tagged(0, Action::Subscribe, "Square", &[], &[]));
+        assert!(!g.allows_tagged(0, Action::Subscribe, "Square", &[], &tags(&[("a", "b")])));
+
+        let mut deny = rule(false, Action::Publish, &["*"], None);
+        deny.actions[0].1.data_tags = Some(tags(&[("aTagName1", "aTagValue1")]));
+        let g = Grant {
+            rules: vec![deny, rule(false, Action::Subscribe, &["*"], None)],
+            default_allow: true,
+            ..g
+        };
+        let pubs = |t: &[(&str, &str)]| g.allows_tagged(0, Action::Publish, "T", &[], &tags(t));
+        assert!(pubs(&[]));
+        assert!(pubs(&[("aTagName2", "x")]));
+        assert!(pubs(&[("aTagName1", "aTagValue2")]));
+        assert!(!pubs(&[
+            ("aTagName1", "aTagValue1"),
+            ("aTagName2", "aTagValue2")
+        ]));
+        // No data_tags section: denied whatever the tags.
+        assert!(!g.allows_tagged(0, Action::Subscribe, "T", &[], &[]));
+        assert!(!g.allows_tagged(0, Action::Subscribe, "T", &[], &tags(&[("a", "b")])));
     }
 
     #[test]

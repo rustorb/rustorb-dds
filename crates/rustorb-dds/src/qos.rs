@@ -253,6 +253,11 @@ pub struct DataWriterQos {
     /// and offers it to readers. Empty, the default, is XCDR, which every
     /// reader accepts; it is then not announced.
     pub data_representation: Vec<i16>,
+    /// DATA_TAGS (DataTagQosPolicy, DDS Security 1.2, 7.2.5 and 9.7):
+    /// (name, value) tags of every sample the writer writes, announced
+    /// with it. With DDS Security, the permissions must allow publishing
+    /// with them (10.4.1.5.3.4.1.5). Empty by default.
+    pub data_tags: Vec<(String, String)>,
 }
 
 impl Default for DataWriterQos {
@@ -269,6 +274,7 @@ impl Default for DataWriterQos {
             liveliness: Liveliness::default(),
             user_data: Vec::new(),
             data_representation: Vec::new(),
+            data_tags: Vec::new(),
         }
     }
 }
@@ -308,6 +314,11 @@ pub struct DataReaderQos {
     /// types ([`crate::DomainParticipant::register_type`]); otherwise the
     /// type names must be the same.
     pub type_consistency: TypeConsistency,
+    /// DATA_TAGS (DataTagQosPolicy, DDS Security 1.2, 7.2.5 and 9.7):
+    /// (name, value) tags announced with the reader. With DDS Security,
+    /// the permissions must allow subscribing with them. Empty by
+    /// default.
+    pub data_tags: Vec<(String, String)>,
 }
 
 impl Default for DataReaderQos {
@@ -323,6 +334,7 @@ impl Default for DataReaderQos {
             user_data: Vec::new(),
             data_representation: vec![data_representation::XCDR, data_representation::XCDR2],
             type_consistency: TypeConsistency::default(),
+            data_tags: Vec::new(),
         }
     }
 }

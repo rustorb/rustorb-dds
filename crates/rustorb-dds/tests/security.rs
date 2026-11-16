@@ -369,3 +369,75 @@ fn logging_properties() {
         .unwrap_err();
     assert!(e.to_string().contains("distribute"), "{e}");
 }
+
+/// Data tags (DataTagQosPolicy, DDS Security 1.2, 9.7): the permissions
+/// allow "SquareTagged" with the tag level=secret only. A tagged reader of
+/// participant2 matches participant1's tagged writer and gets its samples.
+#[test]
+fn data_tags_are_checked_against_the_permissions() {
+    use rustorb_dds::DataWriterQos;
+    let secret = vec![("level".to_string(), "secret".to_string())];
+    let p1 = participant(39, Some("p1")).unwrap();
+    let p2 = participant(39, Some("p2")).unwrap();
+    let t1 = p1.create_topic::<Greeting>("SquareTagged").unwrap();
+    let t2 = p2.create_topic::<Greeting>("SquareTagged").unwrap();
+    let publisher = p1.create_publisher().unwrap();
+    match publisher.create_datawriter_with_qos(
+        &t1,
+        DataWriterQos {
+            data_tags: vec![("level".into(), "top".into())],
+            ..DataWriterQos::default()
+        },
+    ) {
+        Err(Error::Security(e)) => assert!(e.contains("not allowed to publish"), "{e}"),
+        other => panic!("created: {:?}", other.map(|_| ())),
+    }
+    // Not on a topic whose grant has no data_tags section.
+    let square = p1.create_topic::<Greeting>("Square").unwrap();
+    assert!(
+        publisher
+            .create_datawriter_with_qos(
+                &square,
+                DataWriterQos {
+                    data_tags: secret.clone(),
+                    ..DataWriterQos::default()
+                },
+            )
+            .is_err()
+    );
+    let writer = publisher
+        .create_datawriter_with_qos(
+            &t1,
+            DataWriterQos {
+                data_tags: secret.clone(),
+                ..DataWriterQos::default()
+            },
+        )
+        .unwrap();
+    let reader = p2
+        .create_subscriber()
+        .unwrap()
+        .create_datareader_with_qos(
+            &t2,
+            DataReaderQos {
+                reliability: rustorb_dds::Reliability::reliable(),
+                data_tags: secret,
+                ..keep_all()
+            },
+        )
+        .unwrap();
+    assert!(
+        wait_until(|| !writer.matched_subscriptions().is_empty()),
+        "not matched"
+    );
+    writer
+        .write(&Greeting {
+            index: 1,
+            message: "tagged".into(),
+        })
+        .unwrap();
+    assert!(wait_until(|| reader
+        .take()
+        .iter()
+        .any(|s| s.data.is_some())));
+}

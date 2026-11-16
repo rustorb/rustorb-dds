@@ -49,6 +49,14 @@ fn permission_grants() {
     assert!(g.allows(0, Action::Subscribe, "Squares", &[]));
     assert!(!g.allows(0, Action::Publish, "Circle", &[]));
     assert!(!g.allows(231, Action::Publish, "Square", &[]));
+    // The data tags of the second allow rule.
+    let secret = [("level".to_string(), "secret".to_string())];
+    let top = [("level".to_string(), "top".to_string())];
+    assert!(g.allows_tagged(0, Action::Publish, "SquareTagged", &[], &secret));
+    assert!(g.allows_tagged(0, Action::Subscribe, "SquareTagged", &[], &secret));
+    assert!(!g.allows_tagged(0, Action::Publish, "SquareTagged", &[], &top));
+    assert!(!g.allows_tagged(0, Action::Publish, "Square", &[], &secret));
+    assert!(g.allows_tagged(0, Action::Publish, "SquareTagged", &[], &[]));
     assert!(p.grant("CN=participant2,O=rustorb,C=JP", now).is_err());
     assert!(
         p.grant("CN=participant1,O=rustorb,C=JP", 5_000_000_000)

@@ -8,6 +8,13 @@ is tagged `python-v<version>`; the Rust crates are not published yet. See
 
 ### Added
 
+- DDS Security: data tagging, DDS:Tagging:DDS_Discovery (DDS Security
+  1.2, 9.7, #73). `DataWriterQos::data_tags` and `DataReaderQos::data_tags`
+  are announced as `PID_DATA_TAGS` (`EndpointData::data_tags` in
+  rustorb-rtps). The `<data_tags>` of the permissions are checked when a
+  local endpoint is created and when a remote one is matched
+  (`Grant::allows_tagged` in rustorb-dds-security).
+
 - DDS Security: the builtin logging plugin, DDS:Logging:DDS_LogTopic (DDS
   Security 1.2, 9.6 and 10.6, #73). `SecurityConfig::logging`
   (`security_log::LogOptions`), or the properties
