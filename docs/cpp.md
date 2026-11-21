@@ -80,5 +80,5 @@ entity は PSM どおり参照で、写しは同じ entity を指す。最後の
 
 ## まだないもの
 
-- builtin topic、`find`、`ignore`、content-filtered topic、query、coherent access
+- builtin topic、`find`、`ignore`、query、coherent access
 - IDL の struct の継承、`map`、再帰する型（rustorb-idl がまだ対応していない）

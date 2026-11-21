@@ -89,6 +89,6 @@ done
 
 ## まだないもの
 
-- builtin topic、`find`、`ignore`、content-filtered topic、query、coherent access、DynamicData
+- builtin topic、`find`、`ignore`、query、coherent access、DynamicData
 - IDL の struct の継承、`map`、再帰する型（rustorb-idl がまだ対応していない）
 - Maven Central への公開。いまは `librustorb_dds_ffi` を自分で作る
