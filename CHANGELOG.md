@@ -38,6 +38,13 @@ and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   and static with `rustorb/dds.h`, for Linux x86_64 and aarch64 (glibc
   2.28), macOS arm64 and x86_64 and Windows x64, for the NuGet package
   and the gem (docs/c-abi.md).
+- Release of the .NET and Ruby bindings (#94): the release workflow builds
+  the NuGet package `Rustorb.Dds` (with `librustorb_dds_ffi` of each
+  platform in `runtimes/<rid>/native`) and the gem `rustorb-dds` (with
+  `librustorb_dds_ffi.a` of each platform in `vendor/`), runs a program
+  with each, attaches them to the GitHub Release and publishes them to
+  nuget.org and RubyGems (environments `nuget` and `rubygems`, see
+  docs/release.md). `tools/set-version.py` sets their versions too.
 
 ## [0.2.0] - 2026-11-16
 

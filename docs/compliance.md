@@ -198,7 +198,7 @@ OMG に .NET と Ruby の DDS PSM はないので、.NET は Java 5 PSM の構�
 
 - ✅ DomainParticipant、Topic、ContentFilteredTopic、Publisher、Subscriber、DataWriter、DataReader、各 QoS ポリシー、状態と listener、条件と WaitSet。
 - ❌ 組み込みトピック、`ignore`、QueryCondition、coherent access、`set_qos`、DynamicData、DDS-RPC。
-- 🟡 型は rustorb-idl `-bcsharp -Wbdds_only`、`-bruby -Wbdds_only` が書く。struct の継承、`map`、再帰型、bitset はまだない。NuGet と RubyGems には公開していない。
+- 🟡 型は rustorb-idl `-bcsharp -Wbdds_only`、`-bruby -Wbdds_only` が書く。struct の継承、`map`、再帰型、bitset はまだない。NuGet と RubyGems への公開は次のリリースから（#94）。
 
 ## IDL 4 と言語マッピング
 

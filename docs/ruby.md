@@ -80,4 +80,4 @@ dp.close
 - builtin topic、`ignore`、query、coherent access
 - IDL の struct の継承、mutable な union、`map`、再帰する型、bitset（rustorb-idl の Ruby 出力がまだ対応していない）
 - Windows（rustorb の gem にあわせて Linux と macOS）
-- RubyGems への公開（#94）。いまは `librustorb_dds_ffi` を自分で作る
+- RubyGems への公開は次のリリースから（release.yml の `gem`・`rubygems`、#94）。それまではチェックアウトから `rake compile`

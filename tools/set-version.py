@@ -25,6 +25,8 @@ PLACES = [
     ("python/rustorb_dds/__init__.py", rf'(?m)^__version__ = "({VERSION})"$', 1),
     ("java/pom.xml", rf"(?m)^  <version>({VERSION})</version>$", 1),
     ("cpp/CMakeLists.txt", rf"(?m)^project\(rustorb_dds_cpp VERSION ({VERSION}) LANGUAGES CXX\)$", 1),
+    ("dotnet/src/Rustorb.Dds/Rustorb.Dds.csproj", rf"(?m)^    <Version>({VERSION})</Version>$", 1),
+    ("ruby/lib/rustorb/dds/version.rb", rf'(?m)^  VERSION = "({VERSION})"$', 1),
 ]
 
 

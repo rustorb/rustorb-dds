@@ -89,4 +89,4 @@ done
 - DDS-RPC（Requester / Replier）、loan、DynamicData の公開 API
 - builtin topic、`find`、`ignore`、query、coherent access
 - IDL の struct の継承、`map`、再帰する型、bitset（rustorb-idl の C# 出力がまだ対応していない）
-- NuGet への公開（#91、#94）。いまは `librustorb_dds_ffi` を自分で作る
+- NuGet への公開は次のリリースから（release.yml の `nuget`・`nuget-org`、#94）。それまでは `librustorb_dds_ffi` を自分で作る

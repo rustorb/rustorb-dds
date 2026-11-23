@@ -1,18 +1,23 @@
 name: Release
 
-# Builds the Rust crates and the Python package rustorb-dds (python/) and
-# publishes them (docs/release.md).
+# Builds the Rust crates, the Python package rustorb-dds (python/), the
+# native archives of the C ABI, the NuGet package Rustorb.Dds (dotnet/) and
+# the gem rustorb-dds (ruby/) and publishes them (docs/release.md).
 #
 # - a tag v0.2.0 (the version of tools/set-version.py --check): packages
 #   the crates and builds them against each other as packaged, builds one
-#   abi3 wheel (CPython 3.9 or later) per platform and the sdist, attaches
-#   them to a draft GitHub Release, publishes the crates to crates.io (in
-#   the `crates-io` environment, with the CARGO_REGISTRY_TOKEN secret) and
-#   the Python package to PyPI (in the `pypi` environment, with a PyPI
-#   trusted publisher or the PYPI_API_TOKEN secret), and then publishes the
-#   GitHub Release. The environments' protection rules can require an
-#   approval. Run again after a failure, it skips what is already
-#   published.
+#   abi3 wheel (CPython 3.9 or later) per platform and the sdist, the
+#   native archives, the NuGet package and the gem, attaches them to a
+#   draft GitHub Release, publishes the crates to crates.io (in the
+#   `crates-io` environment, with the CARGO_REGISTRY_TOKEN secret), the
+#   Python package to PyPI (in the `pypi` environment, with a PyPI
+#   trusted publisher or the PYPI_API_TOKEN secret), the NuGet package to
+#   nuget.org (in the `nuget` environment, NUGET_API_KEY or trusted
+#   publishing with NUGET_USER) and the gem to RubyGems (in the `rubygems`
+#   environment, RUBYGEMS_API_KEY or trusted publishing), and then
+#   publishes the GitHub Release. The environments' protection rules can
+#   require an approval. Run again after a failure, it skips what is
+#   already published.
 # - Run workflow (workflow_dispatch), or a pull request that changes the
 #   packaging: only builds and checks, the artifacts stay on the run.
 
@@ -28,6 +33,9 @@ on:
       - "crates/*/Cargo.toml"
       - Cargo.toml
       - "tools/release-check/**"
+      - dotnet/src/Rustorb.Dds/Rustorb.Dds.csproj
+      - ruby/rustorb-dds.gemspec
+      - ruby/ext/rustorb_dds_ext/extconf.rb
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -241,9 +249,97 @@ jobs:
             dist/${{ env.ARCHIVE }}.zip
           if-no-files-found: error
 
+  # The NuGet package Rustorb.Dds, with librustorb_dds_ffi of each
+  # platform of the native archives in runtimes/<rid>/native.
+  nuget:
+    needs: [version, native]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native
+          merge-multiple: true
+      - name: Put the native libraries into runtimes/<rid>/native
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          r=dotnet/src/Rustorb.Dds/runtimes
+          take() { # platform, file in the archive, rid
+            a="rustorb-dds-native-$VERSION-$1"
+            mkdir -p "$r/$3/native" x
+            if [ -f "native/$a.zip" ]; then unzip -q -o "native/$a.zip" -d x; else tar xzf "native/$a.tar.gz" -C x; fi
+            cp "x/$a/$2" "$r/$3/native/"
+          }
+          take linux-x86_64 lib/librustorb_dds_ffi.so linux-x64
+          take linux-aarch64 lib/librustorb_dds_ffi.so linux-arm64
+          take macos-aarch64 lib/librustorb_dds_ffi.dylib osx-arm64
+          take macos-x86_64 lib/librustorb_dds_ffi.dylib osx-x64
+          take windows-x86_64 bin/rustorb_dds_ffi.dll win-x64
+          find "$r" -type f
+      - run: dotnet pack -c Release -o dist dotnet/src/Rustorb.Dds
+      - name: Build and run a program against the package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir check && cp tools/release-check/dotnet/* check/
+          cd check
+          dotnet restore -p:RustorbDdsVersion="$VERSION" -s "$GITHUB_WORKSPACE/dist" -s https://api.nuget.org/v3/index.json
+          dotnet run --no-restore -p:RustorbDdsVersion="$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: dist/*.nupkg
+          if-no-files-found: error
+
+  # The gem rustorb-dds, with librustorb_dds_ffi.a of each platform of the
+  # native archives in vendor/<platform>; its extension is built when it
+  # is installed (Linux and macOS).
+  gem:
+    needs: [version, native]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native
+          merge-multiple: true
+      - name: Put librustorb_dds_ffi.a and rustorb/dds.h into vendor/
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          for p in linux-x86_64 linux-aarch64 macos-aarch64 macos-x86_64; do
+            a="rustorb-dds-native-$VERSION-$p"
+            tar xzf "native/$a.tar.gz" -C native
+            mkdir -p "ruby/vendor/$p"
+            cp "native/$a/lib/librustorb_dds_ffi.a" "ruby/vendor/$p/"
+          done
+          mkdir -p ruby/vendor/include/rustorb
+          cp crates/rustorb-dds-ffi/include/rustorb/dds.h ruby/vendor/include/rustorb/
+          find ruby/vendor -type f
+      - run: cd ruby && gem build rustorb-dds.gemspec && mkdir -p ../dist && mv rustorb-dds-*.gem ../dist/
+      - name: Install the gem and use it
+        run: |
+          gem install --local dist/rustorb-dds-*.gem
+          cd "$RUNNER_TEMP"
+          ruby -e 'require "rustorb/dds"; dp = DDS::Domain::DomainParticipant.new(7, localhost: true); puts "rustorb-dds (Ruby): domain #{dp.domain_id}"; dp.close'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gem
+          path: dist/*.gem
+          if-no-files-found: error
+
   # Also runs without a tag, to check the notes and SHA256SUMS
   draft:
-    needs: [version, crates, wheels, sdist, native]
+    needs: [version, crates, wheels, sdist, native, nuget, gem]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -322,9 +418,86 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
+  # nuget.org: the NUGET_API_KEY secret, or trusted publishing with the
+  # NUGET_USER secret (docs/release.md).
+  nuget-org:
+    if: github.ref_type == 'tag'
+    needs: [version, draft]
+    runs-on: ubuntu-latest
+    environment: nuget
+    permissions:
+      id-token: write
+    env:
+      NUGET_API_KEY_SECRET: ${{ secrets.NUGET_API_KEY }}
+      NUGET_USER: ${{ secrets.NUGET_USER }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget
+          path: dist
+      - name: Check the nuget.org user
+        if: env.NUGET_API_KEY_SECRET == ''
+        run: |
+          if [ -z "$NUGET_USER" ]; then
+            echo "::error::set the NUGET_USER secret (or NUGET_API_KEY) (docs/release.md)"
+            exit 1
+          fi
+      - name: Log in to nuget.org (trusted publishing)
+        id: login
+        if: env.NUGET_API_KEY_SECRET == ''
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Push the package to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY || steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push dist/*.nupkg --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # RubyGems: the RUBYGEMS_API_KEY secret, or trusted publishing
+  # (docs/release.md).
+  rubygems:
+    if: github.ref_type == 'tag'
+    needs: [version, draft]
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      id-token: write
+    env:
+      RUBYGEMS_API_KEY_SECRET: ${{ secrets.RUBYGEMS_API_KEY }}
+    steps:
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/download-artifact@v4
+        with:
+          name: gem
+          path: dist
+      - name: Use the API key
+        if: env.RUBYGEMS_API_KEY_SECRET != ''
+        run: echo "GEM_HOST_API_KEY=$RUBYGEMS_API_KEY_SECRET" >> "$GITHUB_ENV"
+      - name: Log in to RubyGems (trusted publishing)
+        if: env.RUBYGEMS_API_KEY_SECRET == ''
+        uses: rubygems/configure-rubygems-credentials@v2.1.0
+      - name: Push the gem to RubyGems, unless it is there
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://rubygems.org/api/v2/rubygems/rustorb-dds/versions/$VERSION.json")
+          if [ "$status" = 200 ]; then
+            echo "rustorb-dds $VERSION is on RubyGems already"
+          else
+            gem push dist/rustorb-dds-*.gem
+          fi
+
   publish-release:
     if: github.ref_type == 'tag'
-    needs: [crates-io, pypi]
+    needs: [crates-io, pypi, nuget-org, rubygems]
     runs-on: ubuntu-latest
     permissions:
       contents: write
