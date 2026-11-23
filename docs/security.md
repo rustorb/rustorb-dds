@@ -115,9 +115,30 @@ let participant = DomainParticipant::with_config(config)?;
 - 受け取る側は、同じ sender_key_id の鍵を revision として足し、最後の 8 個を持つ。writer は、あとで match した reader に、今の鍵に加えて 7 個前までの payload の鍵も送る（history に残るサンプルは、書いたときの鍵で暗号化してあるため）。8 個以上前の鍵で書いたサンプルは、あとで match した reader には読めない。
 - 他の実装（Cyclone DDS 0.10.4、Fast DDS 2.11）は revision を作らないので、相互接続では revision 0 のままで、これまでと変わらない。
 
+### 事前共有鍵（PSK）
+
+#84 で足した（DDS Security 1.2 の 9.4.2.4、10.4.1.2.5.8、10.5.1.2〜10.5.1.4、10.5.2.1.3、10.7〜10.9）。認証の前のメッセージ（SPDP、handshake、鍵の交換など、7.5.7 の bootstrapping message）も含めて、RTPS メッセージ全体を、同じパスフレーズを持つ参加者どうしだけが読めるようにする。`ParticipantConfig::psk`（`PskConfig`）か、次の PROPERTY で設定する。
+
+- `dds.sec.crypto.rtps_psk_secret_passphrase`: `<passphrase_id>:<passphrase>` の URI（`data:,` か `data:`、または `file:`）。例 `data:,5612:Open Sesame`。id は 2^32 未満の 10 進数で、下位 8 bit が 0xFF のものは使えない。パスフレーズは 1〜512 文字の印字できる ASCII で、空白で始まったり終わったりしない。表 76 の名前 `dds.sec.crypto.psk.secret_passphrase` も読む。
+- `dds.sec.crypto.rtps_psk_secret_passphrase_extra`（10.9.1 の名前 `..._alt` も読む）: 受け取るときにも使うパスフレーズの URI（1 行に 1 つ）。パスフレーズを動かしたまま入れ替えるためのもの。
+- `dds.sec.crypto.rtps_psk_symmetric_cipher_algorithm`: `AUTO`（既定。AES256-GCM）、`AES256-GCM`、`AES128-GCM`。なければ `dds.sec.crypto.symmetric_cipher_algorithm` を使う（10.5.1.1）。
+- `dds.sec.access.rtps_psk_protection_kind`: `NONE`、`SIGN`、`ENCRYPT`（既定）。PSK のプラグインを使うときだけ見る（下）。
+
+使い方は 2 つある。
+
+- PSK のプラグイン（DDS:Auth:PSK、DDS:Access:PSK、DDS:Crypto:PSK）: `security`（証明書など 6 つ）を与えず、`psk` だけを与える。PROPERTY なら上の property だけを入れる。認証もアクセス制御もしない（相手はみな unauthenticated で、何でも許す）が、すべての RTPS メッセージをパスフレーズの鍵で守るので、パスフレーズを知らない参加者とは discovery から先に進まない。SPDP では identity token `DDS:Auth:PSK:1.2`、permissions token `DDS:Access:PSK:1.2` と、`is_rtps_psk_protected`（と ENCRYPT なら `is_rtps_psk_encrypted`）の bit を立てた security info を告知する（10.8.3）。
+- 組み込みのプラグイン（PKI-DH など）と一緒に: governance の domain rule の `<rtps_psk_protection_kind>`（`NONE`、`SIGN`、`ENCRYPT`、なければ NONE）が SIGN か ENCRYPT なら、`psk` が要る（なければ参加者を作れない）。participant の鍵（`rtps_protection_kind`）で守らないメッセージ、つまり bootstrapping message と、`rtps_protection_kind` が NONE のときのすべてのメッセージを、パスフレーズの鍵で守る（9.4.2.4 の `is_rtps_psk_protected`）。
+
+ふるまい:
+
+- 鍵は 10.5.2.1.3 のとおり、パスフレーズと、domain id と domain tag（rustorb-dds では空）の SHA-256、メッセージの RTPS header（protocol version、vendor id、GUID prefix）から HMAC-SHA256 で導く。仕様の例（passphrase_id 5632、domain 201）と同じ値になることを試験で確かめている。sender_key_id は domain の hash の 3 octet と passphrase_id の下位 8 bit、key revision は passphrase_id の上位 24 bit。
+- 送るメッセージは SRTPS_PREFIX に A（header を AAD にする）と P（PSK）の flag を立てて守る。ENCRYPT は AES-GCM、SIGN は AES-GMAC。受け取ったメッセージは、P の flag があれば key id と revision からパスフレーズを選び、送り手の header から導いた鍵で確かめる。変換の種類（GCM か GMAC か、鍵の長さ）が自分のものと違うもの、A の flag のないもの、どちらの鍵でも守られていないものは捨てる。
+- PSK を使う参加者は、shared memory でもサンプルを参照で渡さない（メッセージを守るため）。
+- 試験の相手が見つかっていない。Cyclone DDS 0.10.4 と Fast DDS 2.11 は 1.1 の実装で PSK がない。HeaderExtension は送らないので、受け取ったメッセージに HeaderExtension があると、守られていないものとして捨てる。
+
 ### ほかの言語から
 
-どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`rustorb.dds.sec.auth.ocsp*`、`dds.sec.log.builtin.DDS_LogTopic.*`）を入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
+どれも DomainParticipantQos の PROPERTY に、上の 6 つの `dds.sec.*`（と、要れば `dds.sec.auth.password`、`rustorb.dds.sec.auth.crl`、`rustorb.dds.sec.auth.ocsp*`、`dds.sec.log.builtin.DDS_LogTopic.*`、PSK の property）を入れる。PSK のプラグインだけなら、PSK の property だけを入れる。ログのトピックの型は今は Rust にだけある。C ABI、C++、Java のライブラリは feature `security` 付きで作る。
 
 - C ABI: `rdds_participant_qos` の `property`（`rdds_property` の配列）と `property_len`。
 - C++: `dds::core::policy::Property`（`set(name, value)`）を `DomainParticipantQos` に入れる。
@@ -138,14 +159,15 @@ C++ と Python の例 `hello_world` も `RUSTORB_DDS_SECURITY` を読む。
 
 ## 確かめたこと
 
-- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags、identity の失効と鍵の更新（あとで match した reader が古い revision のサンプルを読めること）、OCSP（この process の中の responder で、作るときの確認と、あとで revoked になった相手の失効）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL。`tests/ocsp.rs`: 応答の署名（委ねた responder を含む）、SHA-1 と SHA-256 の CertID、HTTP の問い合わせ、stapling）。
+- `tests/security.rs`（守られた topic の送受信、permissions による拒否、認証しない参加者の無視、secure SPDP での削除）、暗号化された秘密鍵と、CRL で失効した相手の拒否、ログのファイルとトピック（grant のある参加者だけが読める）、permissions の data tags、identity の失効と鍵の更新（あとで match した reader が古い revision のサンプルを読めること）、OCSP（この process の中の responder で、作るときの確認と、あとで revoked になった相手の失効）（#73）、C ABI・C++・Java・Python の PROPERTY からの設定の試験、`tests/psk.rs`（PSK のプラグインだけの参加者どうしの送受信と、別のパスフレーズや PSK のない参加者が discovery さえしないこと、PROPERTY からの SIGN と AES-128、`_extra` のパスフレーズでの入れ替え、governance の `rtps_psk_protection_kind` と PKI-DH の組み合わせ）（#84）と `rustorb-dds-security` の単体試験（`tests/revocation.rs`: 鍵の形式ごとの復号、誤ったパスワード、期限切れや別の CA の CRL。`tests/ocsp.rs`: 応答の署名（委ねた responder を含む）、SHA-1 と SHA-256 の CertID、HTTP の問い合わせ、stapling）。
 - 守られた topic の pcap に平文の標本がなく、メッセージが SRTPS で守られていること。
 - `interop/run.sh` の `-secure` の 16 ケース: Cyclone DDS 0.10.4、Fast DDS 2.11.2 と 2 方向で、best-effort（discovery、liveliness、metadata、data を暗号化）と、RTPS メッセージ全体も暗号化した reliable。Rust の例に加えて、Python（best-effort）と C++（reliable）の例が PROPERTY で設定したもの（#69）。RTPS protection SIGN も手で試して通った。#73 からは、rustorb 側の秘密鍵を暗号化し（`dds.sec.auth.password`）、別の証明書を失効させた CRL を与えている。相手ごとに合わせたことは `interop/README.md` にある。
 
 ## 未対応
 
 - secure SPDP の `identity_status_token`（読み飛ばすだけで、送らない）。
-- PKCS #11（`pkcs11:` の URI）、PSK（DDS:Auth:PSK、#84）、`https:` の OCSP responder。
+- PKCS #11（`pkcs11:` の URI）、`https:` の OCSP responder。
+- PSK の相互接続の試験（相手がない）、HeaderExtension のあるメッセージの PSK。
 - 他の言語の QoS の data tags。
 - ログの LoggerListener、レガシーの `DDS:Security:LogTopic` への publish、他の言語でのログのトピックの型。
 - 他の言語からの `revoke_participant`・`revise_keys`。

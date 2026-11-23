@@ -113,6 +113,14 @@ pub fn governance(xml: &[u8]) -> Result<Governance, Error> {
             discovery_protection_kind: protection(r, "discovery_protection_kind")?,
             liveliness_protection_kind: protection(r, "liveliness_protection_kind")?,
             rtps_protection_kind: protection(r, "rtps_protection_kind")?,
+            // DDS Security 1.2 (BasicProtectionKind); absent in 1.1.
+            rtps_psk_protection_kind: match child(r, "rtps_psk_protection_kind") {
+                Some(_) => crate::psk::basic_protection_kind(required_text(
+                    r,
+                    "rtps_psk_protection_kind",
+                )?)?,
+                None => ProtectionKind::None,
+            },
             topic_rules,
         });
     }

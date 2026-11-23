@@ -32,6 +32,7 @@ use rustorb_dds_security::crypto::{
 use rustorb_dds_security::message::{self as gm, GenericMessage, MessageIdentity};
 use rustorb_dds_security::ocsp::OcspOptions;
 use rustorb_dds_security::pki::{Cert, read_uri};
+use rustorb_dds_security::psk;
 use rustorb_dds_security::smime;
 use rustorb_dds_security::token::{BinaryProperty, DataHolder};
 use rustorb_dds_security::xml;
@@ -601,6 +602,11 @@ impl Security {
     }
 
     /// The GUID prefix of the participant.
+    /// The governance's `rtps_psk_protection_kind` (10.4.1.2.5.8).
+    pub(crate) fn rtps_psk_protection_kind(&self) -> ProtectionKind {
+        self.rule.rtps_psk_protection_kind
+    }
+
     pub(crate) fn prefix(&self) -> GuidPrefix {
         self.prefix
     }
@@ -1962,6 +1968,33 @@ impl Security {
         }
         Some(if changed { Cow::Owned(out) } else { plain })
     }
+}
+
+/// Adds the tokens and the security info of the PSK plugins
+/// (DDS:Auth:PSK and DDS:Access:PSK, 10.7.2.1, 10.8.2.2, 10.8.3) to the
+/// participant's SPDP data: no authentication, and RTPS messages
+/// protected with the pre-shared key as `kind` says.
+pub(crate) fn announce_psk(data: &mut ParticipantData, kind: ProtectionKind) {
+    const VALID: u32 = 1 << 31;
+    let mut m = (VALID, VALID);
+    if kind.is_protected() {
+        // is_rtps_psk_protected.
+        m.0 |= 1 << 4;
+    }
+    if kind.encrypts() {
+        // is_rtps_psk_encrypted.
+        m.1 |= 1 << 6;
+    }
+    let identity = psk::identity_token();
+    let perm = psk::permissions_token();
+    data.security = parameters(|e| {
+        let little = e == Endianness::Little;
+        vec![
+            Parameter::new(pid::IDENTITY_TOKEN, identity.to_cdr_endian(little)),
+            Parameter::new(pid::PERMISSIONS_TOKEN, perm.to_cdr_endian(little)),
+            Parameter::new(pid::PARTICIPANT_SECURITY_INFO, masks(m, e)),
+        ]
+    });
 }
 
 /// The datagram of a stateless message: to the peer's metatraffic

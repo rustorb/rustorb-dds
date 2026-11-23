@@ -3,7 +3,9 @@
 //! control DDS:Access:Permissions ([`access`], with the documents of
 //! [`xml`] signed as [`smime`] says) and cryptography
 //! DDS:Crypto:AES-GCM-GMAC ([`crypto`]), and the messages and tokens they
-//! exchange ([`message`], [`token`]).
+//! exchange ([`message`], [`token`]). [`psk`] protects RTPS messages with a
+//! pre-shared key, for the builtin plugins and for DDS:Auth:PSK,
+//! DDS:Access:PSK and DDS:Crypto:PSK.
 //!
 //! Written from the OMG specification (DDS Security 1.2, formal/25-03-06)
 //! with RustCrypto.
@@ -15,6 +17,7 @@ pub mod crypto;
 pub mod message;
 pub mod ocsp;
 pub mod pki;
+pub mod psk;
 pub mod smime;
 pub mod token;
 pub mod xml;

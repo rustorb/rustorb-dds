@@ -9,6 +9,19 @@ and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Added
 
+- Pre-shared key (PSK) protection of RTPS messages (#84, DDS Security
+  1.2): `ParticipantConfig::psk` (`PskConfig`) or the properties
+  `dds.sec.crypto.rtps_psk_secret_passphrase`, `..._extra`,
+  `dds.sec.crypto.rtps_psk_symmetric_cipher_algorithm` and
+  `dds.sec.access.rtps_psk_protection_kind`. Alone, they are the PSK
+  plugins (DDS:Auth:PSK, DDS:Access:PSK, DDS:Crypto:PSK): every RTPS
+  message, discovery included, is signed or encrypted with keys derived
+  from the passphrase (10.5.2.1.3). With the builtin plugins, the
+  governance's `rtps_psk_protection_kind` protects the messages the
+  participant key does not, the bootstrapping ones first. The SRTPS
+  messages with the AdditionalAuthenticatedData flag are decoded too.
+  See [docs/security.md](docs/security.md).
+
 - The .NET binding (#93): `dotnet/src/Rustorb.Dds` (the NuGet package
   `Rustorb.Dds`, .NET 8), the structure of the DDS Java 5 PSM in C#
   (`Omg.Dds.Domain`, `.Pub`, `.Sub`, `.Topic`, `.Core`, `.Core.Policy`,
