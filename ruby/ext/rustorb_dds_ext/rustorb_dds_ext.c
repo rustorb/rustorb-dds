@@ -24,6 +24,7 @@
 #include <ruby.h>
 #include <ruby/encoding.h>
 #include <ruby/thread.h>
+#include <ruby/vm.h>
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -99,7 +100,7 @@ typedef struct job {
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 static job *queue_head, *queue_tail;
-static int idle_dispatchers, dispatchers, interrupt_dispatchers, shutting_down;
+static int idle_dispatchers, dispatchers, shutting_down;
 
 static void* with_gvl_trampoline(void* p) {
   struct nogvl_call* c = p;
@@ -145,52 +146,68 @@ static void* with_gvl(gvl_fn fn, void* arg) {
   return j.result;
 }
 
-static void* wait_job(void* unused) {
+/* Waits for a job, or until the dispatcher's own interrupt flag (one per
+   dispatcher: a shared one could be taken by another dispatcher, and the
+   thread Ruby wants to kill at exit would never wake). */
+static void* wait_job(void* p) {
+  int* interrupted = p;
   job* j = NULL;
-  (void)unused;
   pthread_mutex_lock(&queue_lock);
   ++idle_dispatchers;
-  while (!queue_head && !interrupt_dispatchers && !shutting_down)
+  while (!queue_head && !*interrupted && !shutting_down)
     pthread_cond_wait(&queue_cond, &queue_lock);
   if (queue_head) {
     j = queue_head;
     queue_head = j->next;
     if (!queue_head) queue_tail = NULL;
   }
-  interrupt_dispatchers = 0;
+  *interrupted = 0;
   --idle_dispatchers;
   pthread_mutex_unlock(&queue_lock);
   return j;
 }
 
-static void wake_dispatchers(void* unused) {
-  (void)unused;
+static void wake_dispatcher(void* p) {
   pthread_mutex_lock(&queue_lock);
-  interrupt_dispatchers = 1;
+  *(int*)p = 1;
   pthread_cond_broadcast(&queue_cond);
   pthread_mutex_unlock(&queue_lock);
 }
 
-/* DDS::Native.dispatcher_loop: runs listener calls until the process ends. */
-static VALUE native_dispatcher_loop(VALUE self) {
-  (void)self;
-  pthread_mutex_lock(&queue_lock);
-  ++dispatchers;
-  pthread_mutex_unlock(&queue_lock);
+/* Fails the queued jobs (they return NULL). Called with queue_lock held. */
+static void fail_queued_jobs(void) {
+  job* j;
+  for (j = queue_head; j; j = j->next) {
+    j->result = NULL;
+    j->done = 1;
+    pthread_cond_signal(&j->cond);
+  }
+  queue_head = queue_tail = NULL;
+}
+
+/* The job a dispatcher runs, so that its end (when Ruby kills the thread at
+   exit, which an end proc cannot be ordered against) still answers it. */
+typedef struct {
+  job* current;
+  int interrupted;
+} dispatcher_state;
+
+static VALUE dispatcher_run(VALUE p) {
+  dispatcher_state* st = (dispatcher_state*)p;
   for (;;) {
-    job* j = rb_thread_call_without_gvl(wait_job, NULL, wake_dispatchers, NULL);
+    job* j = rb_thread_call_without_gvl(wait_job, &st->interrupted, wake_dispatcher, &st->interrupted);
     int spawn;
     if (!j) {
       rb_thread_check_ints();
       pthread_mutex_lock(&queue_lock);
       if (shutting_down) {
-        --dispatchers;
         pthread_mutex_unlock(&queue_lock);
         return Qnil;
       }
       pthread_mutex_unlock(&queue_lock);
       continue;
     }
+    st->current = j;
     pthread_mutex_lock(&queue_lock);
     spawn = idle_dispatchers == 0;
     pthread_mutex_unlock(&queue_lock);
@@ -198,10 +215,41 @@ static VALUE native_dispatcher_loop(VALUE self) {
     j->result = j->fn(j->arg);
     pthread_mutex_lock(&queue_lock);
     j->done = 1;
+    st->current = NULL;
     pthread_cond_signal(&j->cond);
     pthread_mutex_unlock(&queue_lock);
   }
   return Qnil;
+}
+
+/* However the dispatcher ends: it is no longer counted, its job is
+   answered, and when it was the last one, the queued jobs fail rather than
+   wait for a dispatcher that will not come. */
+static VALUE dispatcher_end(VALUE p) {
+  dispatcher_state* st = (dispatcher_state*)p;
+  pthread_mutex_lock(&queue_lock);
+  --dispatchers;
+  if (st->current && !st->current->done) {
+    st->current->result = NULL;
+    st->current->done = 1;
+    pthread_cond_signal(&st->current->cond);
+  }
+  st->current = NULL;
+  if (dispatchers == 0) fail_queued_jobs();
+  pthread_mutex_unlock(&queue_lock);
+  return Qnil;
+}
+
+/* DDS::Native.dispatcher_loop: runs listener calls until the process ends. */
+static VALUE native_dispatcher_loop(VALUE self) {
+  dispatcher_state st;
+  (void)self;
+  st.current = NULL;
+  st.interrupted = 0;
+  pthread_mutex_lock(&queue_lock);
+  ++dispatchers;
+  pthread_mutex_unlock(&queue_lock);
+  return rb_ensure(dispatcher_run, (VALUE)&st, dispatcher_end, (VALUE)&st);
 }
 
 static VALUE native_dispatchers(VALUE self) {
@@ -213,17 +261,14 @@ static VALUE native_dispatchers(VALUE self) {
   return INT2NUM(n);
 }
 
-static void at_exit_dispatchers(VALUE unused) {
-  job* j;
-  (void)unused;
+/* When the VM is gone (after its threads), no listener call can run any
+   more. Not an end proc: those run before or after minitest's autorun
+   (which runs the tests in an end proc) depending on the Ruby version. */
+static void at_exit_dispatchers(ruby_vm_t* vm) {
+  (void)vm;
   pthread_mutex_lock(&queue_lock);
   shutting_down = 1;
-  for (j = queue_head; j; j = j->next) {
-    j->result = NULL;
-    j->done = 1;
-    pthread_cond_signal(&j->cond);
-  }
-  queue_head = queue_tail = NULL;
+  fail_queued_jobs();
   pthread_cond_broadcast(&queue_cond);
   pthread_mutex_unlock(&queue_lock);
 }
@@ -2023,7 +2068,7 @@ void Init_rustorb_dds_ext(void) {
   rb_define_module_function(mNative, "dispatcher_loop", native_dispatcher_loop, 0);
   rb_define_module_function(mNative, "dispatchers", native_dispatchers, 0);
   rb_define_module_function(mNative, "release", native_release, 1);
-  rb_set_end_proc(at_exit_dispatchers, Qnil);
+  ruby_vm_at_exit(at_exit_dispatchers);
 
   rb_define_module_function(mNative, "type_primitive", native_type_primitive, 1);
   rb_define_module_function(mNative, "type_string", native_type_string, 2);

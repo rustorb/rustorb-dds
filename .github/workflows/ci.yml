@@ -156,6 +156,7 @@ jobs:
           - { os: ubuntu-24.04, ruby: "3.4" }
           - { os: macos-latest, ruby: "3.4" }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
