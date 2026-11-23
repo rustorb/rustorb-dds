@@ -143,6 +143,32 @@ jobs:
       - run: dotnet build -c Release dotnet/examples/HelloWorld
       - run: dotnet build -c Release dotnet/examples/Keyed
 
+  # The Ruby binding (ruby/): a C extension on the C ABI (the static
+  # librustorb_dds_ffi), tested with minitest with the types rustorb-idl
+  # -bruby -Wbdds_only wrote (checked in).
+  ruby:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ruby the gem supports.
+          - { os: ubuntu-24.04, ruby: "3.0" }
+          - { os: ubuntu-24.04, ruby: "3.4" }
+          - { os: macos-latest, ruby: "3.4" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      # Builds librustorb_dds_ffi and the extension and runs ruby/test.
+      - run: rake
+        working-directory: ruby
+      - run: gem build rustorb-dds.gemspec
+        working-directory: ruby
+
   # The Python binding (python/): built with maturin, tested with pytest.
   python:
     strategy:
@@ -184,6 +210,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
       - name: Install the peers
         run: |
           sudo apt-get update -qq
@@ -223,6 +252,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
       - name: Install cmake, g++ and tcpdump
         run: |
           sudo apt-get update -qq

@@ -21,6 +21,18 @@ and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   the examples `HelloWorld` and `Keyed`, the .NET cases of
   `interop/run.sh`, and the CI job `dotnet` (Linux, macOS, Windows).
   See [docs/dotnet.md](docs/dotnet.md).
+- The Ruby binding (#92): the gem `rustorb-dds` (`ruby/`, Ruby 3.0 or
+  newer), the structure of the DDS C++ PSM in Ruby (`DDS::Domain`,
+  `DDS::Pub`, `DDS::Sub`, `DDS::Topic`, `DDS::Core`, `DDS::Core::Policy`,
+  `DDS::Core::Status`) as a C extension that links `librustorb_dds_ffi`
+  statically, in the shape of rustorb's `rustorb` gem: participants,
+  topics and content filtered topics, writers and readers, keyed
+  instances, QoS, listeners, conditions and wait sets, DDS Security
+  through the Property QoS. Blocking calls release the GVL; listeners run
+  on Ruby threads. Types come from `rustorb-idl -bruby -Wbdds_only`
+  (rustorb/rustorb-idl#17). minitest tests, the examples `hello_world.rb`
+  and `keyed.rb`, the Ruby cases of `interop/run.sh`, and the CI job
+  `ruby` (Linux and macOS). See [docs/ruby.md](docs/ruby.md).
 - Prebuilt C ABI (#91): the release attaches
   `rustorb-dds-native-<version>-<platform>`, `librustorb_dds_ffi` shared
   and static with `rustorb/dds.h`, for Linux x86_64 and aarch64 (glibc
