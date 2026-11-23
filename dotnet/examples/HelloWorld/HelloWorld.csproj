@@ -1,0 +1,30 @@
+<!--
+  The HelloWorld example of rustorb-dds's .NET binding (Program.cs).
+
+  Build it with dotnet build dotnet/examples/HelloWorld, then run "HelloWorld sub" in
+  one terminal and "HelloWorld pub" in another (or dotnet run with those
+  arguments).
+
+  It uses librustorb_dds_ffi from RUSTORB_DDS_FFI_LIBRARY, or next to the
+  program (cargo build -p rustorb-dds-ffi, then copy it there). The type is
+  what rustorb-idl -bcsharp -Wbdds_only wrote for HelloWorld.idl, checked in with
+  the tests.
+
+  Licensed under MIT OR Apache-2.0, like the rest of rustorb-dds.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Rustorb.Dds/Rustorb.Dds.csproj" />
+    <Compile Include="../../tests/Rustorb.Dds.Tests/generated/HelloWorld.cs;../../tests/Rustorb.Dds.Tests/generated/HelloWorld_dds.cs" Link="generated/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

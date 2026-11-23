@@ -1,0 +1,48 @@
+<!--
+  The tests of the .NET binding of rustorb-dds.
+
+    dotnet test dotnet/tests/Rustorb.Dds.Tests
+
+  The build runs cargo for librustorb_dds_ffi (-p:CargoSkip=true to use one
+  built elsewhere, found through RUSTORB_DDS_FFI_LIBRARY). The tests use the
+  code rustorb-idl -bcsharp -Wbdds_only wrote for their IDL, checked in under
+  generated (docs/dotnet.md). That code uses the IDL sequences of
+  Omg.Types, from the Rustorb package.
+
+  Licensed under MIT OR Apache-2.0, like the rest of rustorb-dds.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../..'))</RootDir>
+    <CargoSkip Condition="'$(CargoSkip)' == ''">false</CargoSkip>
+    <NativeName Condition="$([MSBuild]::IsOSPlatform('Windows'))">rustorb_dds_ffi.dll</NativeName>
+    <NativeName Condition="$([MSBuild]::IsOSPlatform('OSX'))">librustorb_dds_ffi.dylib</NativeName>
+    <NativeName Condition="'$(NativeName)' == ''">librustorb_dds_ffi.so</NativeName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Rustorb.Dds/Rustorb.Dds.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Rustorb" Version="0.7.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- librustorb_dds_ffi, for the tests. -->
+  <Target Name="Cargo" BeforeTargets="Build" Condition="'$(CargoSkip)' != 'true'">
+    <Exec Command="cargo build --locked -p rustorb-dds-ffi --manifest-path &quot;$(RootDir)/Cargo.toml&quot;" />
+    <Copy SourceFiles="$(RootDir)/target/debug/$(NativeName)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

@@ -121,6 +121,28 @@ jobs:
         if: runner.os == 'Linux'
       - run: mvn -B -ntp -f java/pom.xml verify
 
+  # The .NET binding (dotnet/): P/Invoke on the C ABI, tested with xUnit
+  # with the types rustorb-idl -bcsharp -Wbdds_only wrote (checked in).
+  dotnet:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: python3 dotnet/tools/gen-pinvoke.py --check
+        if: runner.os == 'Linux'
+      - run: dotnet build -c Release dotnet/src/Rustorb.Dds
+      - run: dotnet test dotnet/tests/Rustorb.Dds.Tests
+      - run: dotnet build -c Release dotnet/examples/HelloWorld
+      - run: dotnet build -c Release dotnet/examples/Keyed
+
   # The Python binding (python/): built with maturin, tested with pytest.
   python:
     strategy:
@@ -159,6 +181,9 @@ jobs:
           distribution: temurin
           java-version: "22"
           cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - name: Install the peers
         run: |
           sudo apt-get update -qq
@@ -195,6 +220,9 @@ jobs:
           distribution: temurin
           java-version: "22"
           cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - name: Install cmake, g++ and tcpdump
         run: |
           sudo apt-get update -qq

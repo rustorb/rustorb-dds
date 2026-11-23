@@ -5,6 +5,23 @@ crates.io) and the Python package (`rustorb-dds` on PyPI) have one version
 and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 `python-v0.1.0`. See [docs/release.md](docs/release.md).
 
+## [Unreleased]
+
+### Added
+
+- The .NET binding (#93): `dotnet/src/Rustorb.Dds` (the NuGet package
+  `Rustorb.Dds`, .NET 8), the structure of the DDS Java 5 PSM in C#
+  (`Omg.Dds.Domain`, `.Pub`, `.Sub`, `.Topic`, `.Core`, `.Core.Policy`,
+  `.Core.Status`) on the C ABI through P/Invoke (`LibraryImport`,
+  generated from `dds.h` by `dotnet/tools/gen-pinvoke.py`): participants,
+  topics and content filtered topics, writers and readers, keyed
+  instances, QoS as immutable records, listeners, conditions and wait
+  sets, DDS Security through the Property QoS. Types come from
+  `rustorb-idl -bcsharp -Wbdds_only` (rustorb/rustorb-idl#18). xUnit tests,
+  the examples `HelloWorld` and `Keyed`, the .NET cases of
+  `interop/run.sh`, and the CI job `dotnet` (Linux, macOS, Windows).
+  See [docs/dotnet.md](docs/dotnet.md).
+
 ## [0.2.0] - 2026-11-16
 
 The first release of the Rust crates on crates.io: `rustorb-dds`,
