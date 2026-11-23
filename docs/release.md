@@ -9,6 +9,7 @@ from a tag `v<version>`. Every package has the same version.
 | --- | --- |
 | The crates `rustorb-dds-security`, `rustorb-xtypes`, `rustorb-rtps`, `rustorb-dds`, `rustorb-dds-corba` and `rustorb-dds-ffi` (in this order: each depends only on those before it) | crates.io |
 | The Python package `rustorb-dds` (`python/`, with its native module in `crates/rustorb-dds-python`): one abi3 wheel (CPython 3.9 and later) for each of Linux x86_64 and aarch64 (manylinux 2.28), macOS x86_64 and arm64, and Windows x64, and the sdist | PyPI |
+| `rustorb-dds-native-<version>-<platform>` (`.tar.gz`, `.zip` on Windows): `librustorb_dds_ffi` of the C ABI, shared and static, with `rustorb/dds.h`, for Linux x86_64 and aarch64 (glibc 2.28), macOS arm64 and x86_64, and Windows x64 ([docs/c-abi.md](c-abi.md)) | GitHub Release |
 | The wheels, the sdist, the `.crate` files, `SHA256SUMS`, and the notes from `CHANGELOG.md` | GitHub Release `v<version>` |
 
 `rustorb-dds-python` is never published to crates.io (`publish = false`).
@@ -63,7 +64,9 @@ approval; limiting their deployment tags to `v*` is a good idea.
      `CHANGELOG.md` has a dated entry for it;
    - packages the crates and builds each against the others as packaged
      (`cargo publish --workspace --dry-run`), builds the wheels (and runs
-     `python/tests` with each where it can) and the sdist;
+     `python/tests` with each where it can), the sdist, and the native
+     archives of the C ABI (and builds and runs a C program against each
+     where it can);
    - attaches them all to a draft GitHub Release `vx.y.z`, with
      `SHA256SUMS` and the version's section of `CHANGELOG.md`;
    - when all of that passed: publishes the crates to crates.io, in the

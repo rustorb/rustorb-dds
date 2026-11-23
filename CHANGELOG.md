@@ -21,6 +21,11 @@ and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   the examples `HelloWorld` and `Keyed`, the .NET cases of
   `interop/run.sh`, and the CI job `dotnet` (Linux, macOS, Windows).
   See [docs/dotnet.md](docs/dotnet.md).
+- Prebuilt C ABI (#91): the release attaches
+  `rustorb-dds-native-<version>-<platform>`, `librustorb_dds_ffi` shared
+  and static with `rustorb/dds.h`, for Linux x86_64 and aarch64 (glibc
+  2.28), macOS arm64 and x86_64 and Windows x64, for the NuGet package
+  and the gem (docs/c-abi.md).
 
 ## [0.2.0] - 2026-11-16
 
