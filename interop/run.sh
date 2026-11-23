@@ -32,6 +32,11 @@
 #              (default 1000)
 #   MVN        Maven, to build the Java examples (default mvn; the Java
 #              cases are skipped without it or java, 22 or newer)
+#   DOTNET     the .NET SDK, to build the .NET examples (default dotnet;
+#              the .NET cases are skipped without it)
+#   RUBY       Ruby, to build the gem's extension and run the Ruby
+#              examples (default ruby, 3.0 or newer, with its headers and
+#              rake; the Ruby cases are skipped without it)
 #   PYTHON     the Python with the rustorb_dds package installed, for
 #              the Python cases (default python3; they are skipped when
 #              it cannot import rustorb_dds)
@@ -135,6 +140,46 @@ if command -v "$MVN" >/dev/null && command -v java >/dev/null; then
 else
   HAVE_JAVA=0
   log "no $MVN or java: skipping the Java cases"
+fi
+DOTNET=${DOTNET:-dotnet}
+if command -v "$DOTNET" >/dev/null; then
+  log "building the .NET binding's examples"
+  if "$DOTNET" build "$ROOT/dotnet/examples/HelloWorld" -c Release >"$BUILD/dotnet.log" 2>&1 &&
+    "$DOTNET" build "$ROOT/dotnet/examples/Keyed" -c Release >>"$BUILD/dotnet.log" 2>&1; then
+    HAVE_DOTNET=1
+    case $(uname -s) in
+      Darwin) DOTNET_FFI=librustorb_dds_ffi.dylib ;;
+      MINGW* | MSYS* | CYGWIN*) DOTNET_FFI=rustorb_dds_ffi.dll ;;
+      *) DOTNET_FFI=librustorb_dds_ffi.so ;;
+    esac
+    DOTNET_HELLO=(env "RUSTORB_DDS_FFI_LIBRARY=$ROOT/target/release/$DOTNET_FFI"
+      "$DOTNET" "$ROOT/dotnet/examples/HelloWorld/bin/Release/net8.0/HelloWorld.dll")
+    DOTNET_KEYED=(env "RUSTORB_DDS_FFI_LIBRARY=$ROOT/target/release/$DOTNET_FFI"
+      "$DOTNET" "$ROOT/dotnet/examples/Keyed/bin/Release/net8.0/Keyed.dll")
+    echo "dotnet: $("$DOTNET" --version)" >> "$OUT/versions.txt"
+  else
+    cat "$BUILD/dotnet.log"
+    exit 1
+  fi
+else
+  HAVE_DOTNET=0
+  log "no $DOTNET: skipping the .NET cases"
+fi
+RUBY=${RUBY:-ruby}
+if command -v "$RUBY" >/dev/null && "$RUBY" -e 'exit(RUBY_VERSION >= "3.0" ? 0 : 1)' 2>/dev/null; then
+  log "building the Ruby binding's extension"
+  if (cd "$ROOT/ruby" && CARGO_SKIP=1 "$RUBY" -S rake compile) >"$BUILD/ruby.log" 2>&1; then
+    HAVE_RUBY=1
+    RUBY_HELLO=("$RUBY" "$ROOT/ruby/examples/hello_world.rb")
+    RUBY_KEYED=("$RUBY" "$ROOT/ruby/examples/keyed.rb")
+    echo "ruby: $("$RUBY" -v)" >> "$OUT/versions.txt"
+  else
+    cat "$BUILD/ruby.log"
+    exit 1
+  fi
+else
+  HAVE_RUBY=0
+  log "no $RUBY 3.0 or newer: skipping the Ruby cases"
 fi
 PYTHON=${PYTHON:-python3}
 PY="$ROOT/python/examples"
@@ -527,6 +572,48 @@ for peer in "${PEERS[@]}"; do
       timeout $((TIMEOUT + 5)) "${JAVA_KEYED[@]}" sub @D@ "$KEYED" "$TIMEOUT"
     run_case "java-to-$peer-keyed" \
       "${JAVA_KEYED[@]}" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+  fi
+  # The .NET binding: the same.
+  if [ "$HAVE_DOTNET" = 1 ]; then
+    run_case "$peer-to-dotnet" \
+      "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "${DOTNET_HELLO[@]}" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "dotnet-to-$peer" \
+      "${DOTNET_HELLO[@]}" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "$peer-to-dotnet-reliable" \
+      "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "${DOTNET_HELLO[@]}" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "dotnet-to-$peer-reliable" \
+      "${DOTNET_HELLO[@]}" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "$peer-to-dotnet-keyed" \
+      "$BUILD/$peer/keyed" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "${DOTNET_KEYED[@]}" sub @D@ "$KEYED" "$TIMEOUT"
+    run_case "dotnet-to-$peer-keyed" \
+      "${DOTNET_KEYED[@]}" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
+  fi
+  # The Ruby binding: the same.
+  if [ "$HAVE_RUBY" = 1 ]; then
+    run_case "$peer-to-ruby" \
+      "$P" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "${RUBY_HELLO[@]}" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "ruby-to-$peer" \
+      "${RUBY_HELLO[@]}" pub @D@ "$SEND" "$INTERVAL" -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$COUNT" "$TIMEOUT"
+    run_case "$peer-to-ruby-reliable" \
+      "$P" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "${RUBY_HELLO[@]}" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "ruby-to-$peer-reliable" \
+      "${RUBY_HELLO[@]}" pub @D@ "$RELIABLE" 20 reliable -- \
+      timeout $((TIMEOUT + 5)) "$P" sub @D@ "$RELIABLE" "$TIMEOUT" reliable
+    run_case "$peer-to-ruby-keyed" \
+      "$BUILD/$peer/keyed" pub @D@ "$KEYED" 20 -- \
+      timeout $((TIMEOUT + 5)) "${RUBY_KEYED[@]}" sub @D@ "$KEYED" "$TIMEOUT"
+    run_case "ruby-to-$peer-keyed" \
+      "${RUBY_KEYED[@]}" pub @D@ "$KEYED" 20 -- \
       timeout $((TIMEOUT + 5)) "$BUILD/$peer/keyed" sub @D@ "$KEYED" "$TIMEOUT"
   fi
   # Keyed instances: writes to three instances, a dispose, an unregister.

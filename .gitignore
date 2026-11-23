@@ -4,3 +4,10 @@ __pycache__/
 /python/rustorb_dds/_native*.so
 /python/rustorb_dds/_native*.pyd
 /java/target
+/dotnet/**/bin
+/dotnet/**/obj
+/ruby/tmp
+/ruby/lib/rustorb/dds/*.so
+/ruby/lib/rustorb/dds/*.bundle
+/ruby/vendor
+/ruby/*.gem

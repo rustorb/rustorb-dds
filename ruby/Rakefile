@@ -1,0 +1,59 @@
+# frozen_string_literal: true
+
+# rake compile: builds librustorb_dds_ffi (cargo; CARGO_SKIP=1 to use the one
+#   built, or RUSTORB_DDS_FFI_LIBRARY) and the rustorb_dds_ext extension
+#   into lib/rustorb/dds/.
+# rake gen: generates the types of the tests and examples (test/generated,
+#   examples/generated, checked in) with rustorb-idl -bruby -Wbdds_only
+#   (RUSTORB_IDL, default "rustorb-idl"; e.g. "python3 -m rustorb_idl").
+# rake test (the default): compile, then the tests.
+#
+# Licensed under MIT OR Apache-2.0, like the rest of rustorb-dds.
+
+require "rake/testtask"
+require "rbconfig"
+require "fileutils"
+
+ROOT = File.expand_path("..", __dir__)
+BUILD = File.join(__dir__, "tmp", "ext")
+DLEXT = RbConfig::CONFIG["DLEXT"]
+EXT = File.join(__dir__, "lib", "rustorb", "dds", "rustorb_dds_ext.#{DLEXT}")
+IDL = ENV.fetch("RUSTORB_IDL", "rustorb-idl")
+FIXTURES = File.join(ROOT, "crates", "rustorb-xtypes", "tests", "fixtures", "cyclonedds")
+
+task :cargo do
+  unless ENV["CARGO_SKIP"] || ENV["RUSTORB_DDS_FFI_LIBRARY"]
+    sh "cargo", "build", "--release", "--locked", "-p", "rustorb-dds-ffi", "--manifest-path",
+       File.join(ROOT, "Cargo.toml")
+  end
+end
+
+task compile: :cargo do
+  FileUtils.mkdir_p(BUILD)
+  Dir.chdir(BUILD) do
+    ruby File.join(__dir__, "ext", "rustorb_dds_ext", "extconf.rb")
+    sh "make"
+  end
+  FileUtils.cp(File.join(BUILD, "rustorb_dds_ext.#{DLEXT}"), EXT)
+end
+
+task :gen do
+  gen = File.join(__dir__, "test", "generated")
+  %W[#{FIXTURES}/Generated.idl #{FIXTURES}/HelloWorld.idl #{FIXTURES}/Keyed.idl
+     #{ROOT}/cpp/tests/idl/CppTypes.idl].each do |idl|
+    sh "#{IDL} -bruby -Wbdds_only -Wbextensibility=final -C #{gen} #{idl}"
+  end
+  examples = File.join(__dir__, "examples", "generated")
+  %W[#{FIXTURES}/HelloWorld.idl #{FIXTURES}/Keyed.idl].each do |idl|
+    sh "#{IDL} -bruby -Wbdds_only -C #{examples} #{idl}"
+  end
+end
+
+Rake::TestTask.new(:run_tests) do |t|
+  t.libs = ["lib", "test"]
+  t.test_files = FileList["test/test_*.rb"]
+  t.warning = true
+end
+
+task test: %i[compile run_tests]
+task default: :test

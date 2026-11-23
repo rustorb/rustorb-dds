@@ -9,18 +9,23 @@ from a tag `v<version>`. Every package has the same version.
 | --- | --- |
 | The crates `rustorb-dds-security`, `rustorb-xtypes`, `rustorb-rtps`, `rustorb-dds`, `rustorb-dds-corba` and `rustorb-dds-ffi` (in this order: each depends only on those before it) | crates.io |
 | The Python package `rustorb-dds` (`python/`, with its native module in `crates/rustorb-dds-python`): one abi3 wheel (CPython 3.9 and later) for each of Linux x86_64 and aarch64 (manylinux 2.28), macOS x86_64 and arm64, and Windows x64, and the sdist | PyPI |
-| The wheels, the sdist, the `.crate` files, `SHA256SUMS`, and the notes from `CHANGELOG.md` | GitHub Release `v<version>` |
+| `rustorb-dds-native-<version>-<platform>` (`.tar.gz`, `.zip` on Windows): `librustorb_dds_ffi` of the C ABI, shared and static, with `rustorb/dds.h`, for Linux x86_64 and aarch64 (glibc 2.28), macOS arm64 and x86_64, and Windows x64 ([docs/c-abi.md](c-abi.md)) | GitHub Release |
+| The NuGet package `Rustorb.Dds` (`dotnet/src/Rustorb.Dds`, .NET 8), with `librustorb_dds_ffi` of the native archives in `runtimes/<rid>/native` (`linux-x64`, `linux-arm64`, `osx-arm64`, `osx-x64`, `win-x64`) | nuget.org |
+| The gem `rustorb-dds` (`ruby/`), with `librustorb_dds_ffi.a` of the native archives in `vendor/<platform>` (Linux x86_64 and aarch64, macOS arm64 and x86_64); its extension is built when it is installed | RubyGems |
+| The wheels, the sdist, the `.crate` files, the `.nupkg`, the `.gem`, `SHA256SUMS`, and the notes from `CHANGELOG.md` | GitHub Release `v<version>` |
 
 `rustorb-dds-python` is never published to crates.io (`publish = false`).
 The C++ and Java bindings are not packaged yet: they build from the
-repository (`cpp/`, `java/`).
+repository (`cpp/`, `java/`). The gem does not support Windows yet (like
+rustorb's gem).
 
 ## The version
 
 The version is written in the Cargo workspace (and the `version` of the
 workspace's path dependencies), `python/pyproject.toml`,
-`python/rustorb_dds/__init__.py`, `java/pom.xml` and
-`cpp/CMakeLists.txt`. `tools/set-version.py` changes them all:
+`python/rustorb_dds/__init__.py`, `java/pom.xml`, `cpp/CMakeLists.txt`,
+`dotnet/src/Rustorb.Dds/Rustorb.Dds.csproj` and
+`ruby/lib/rustorb/dds/version.rb`. `tools/set-version.py` changes them all:
 
 ```sh
 tools/set-version.py 0.3.0      # rewrite the files
@@ -45,6 +50,18 @@ In the repository settings (Settings, Environments), create:
   `rustorb`, repository `rustorb-dds`, workflow `release.yml`, environment
   `pypi`. Instead, an API token in the `PYPI_API_TOKEN` secret of the
   environment also works.
+- the environment `nuget`, for the package `Rustorb.Dds`: either the
+  secret `NUGET_USER` (the nuget.org user or organization that owns the
+  package) and a nuget.org trusted publishing policy for repository
+  `rustorb/rustorb-dds`, workflow `release.yml`, environment `nuget`; or
+  the secret `NUGET_API_KEY` (an API key that can push `Rustorb.Dds`).
+  The first push of a new package needs an API key that can push new
+  packages, unless the policy's owner may create packages.
+- the environment `rubygems`, for the gem `rustorb-dds`: either a
+  RubyGems trusted publisher (a pending one before the first push) for
+  repository `rustorb/rustorb-dds`, workflow `release.yml`, environment
+  `rubygems`; or the secret `RUBYGEMS_API_KEY` (a RubyGems API key with
+  the push scope).
 
 Required reviewers on these environments make each upload wait for an
 approval; limiting their deployment tags to `v*` is a good idea.
@@ -63,23 +80,28 @@ approval; limiting their deployment tags to `v*` is a good idea.
      `CHANGELOG.md` has a dated entry for it;
    - packages the crates and builds each against the others as packaged
      (`cargo publish --workspace --dry-run`), builds the wheels (and runs
-     `python/tests` with each where it can) and the sdist;
+     `python/tests` with each where it can), the sdist, and the native
+     archives of the C ABI (and builds and runs a C program against each
+     where it can), the NuGet package and the gem (and runs a program
+     with each on Linux x86_64);
    - attaches them all to a draft GitHub Release `vx.y.z`, with
      `SHA256SUMS` and the version's section of `CHANGELOG.md`;
    - when all of that passed: publishes the crates to crates.io, in the
-     order above (job `crates-io`), and the Python package to PyPI (job
-     `pypi`);
-   - when both are done, publishes the GitHub Release.
+     order above (job `crates-io`), the Python package to PyPI (job
+     `pypi`), the NuGet package to nuget.org (job `nuget-org`) and the
+     gem to RubyGems (job `rubygems`);
+   - when all four are done, publishes the GitHub Release.
 
 If a publishing job fails, fix the cause and run the failed jobs again
-from the Actions page: crates already on crates.io and files already on
-PyPI are skipped. If the fix needs a change to the workflow or the source,
+from the Actions page: crates already on crates.io, files already on
+PyPI, and the NuGet package and the gem when that version is there, are
+skipped. If the fix needs a change to the workflow or the source,
 merge it, delete the release and the tag `vx.y.z`, and tag again (only
 while nothing is published yet; otherwise release the next patch
 version).
 
 Nothing published can be taken back: crates.io can only yank a version,
-and PyPI never takes the same version again.
+PyPI, nuget.org and RubyGems never take the same version again.
 
 Pull requests that change the packaging, and Run workflow, build and
 check everything without publishing.

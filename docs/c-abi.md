@@ -71,6 +71,28 @@ cc -std=c11 -Icrates/rustorb-dds-ffi/include main.c \
 
 guard・status・read の各条件は一つのハンドル型 `rdds_condition`。`rdds_waitset_wait` は真になった条件を、付けた順の番号で返す。言語側は番号から自分の条件オブジェクトを引く。
 
+## ビルド済みのライブラリ（#91）
+
+リリース（`release.yml` の `native`）は、プラットフォームごとに `rustorb-dds-native-<版>-<platform>` を GitHub Release に付ける。.NET の NuGet `Rustorb.Dds` は共有ライブラリを、Ruby の gem は静的ライブラリをここから取る。Java の使い手も共有ライブラリを `rustorb.dds.ffi.library` で指せる。
+
+| platform | 中身 | .NET の RID | RubyGems の platform |
+| --- | --- | --- | --- |
+| `linux-x86_64` | `lib/librustorb_dds_ffi.so`、`lib/librustorb_dds_ffi.a` | `linux-x64` | `x86_64-linux` |
+| `linux-aarch64` | 同上 | `linux-arm64` | `aarch64-linux` |
+| `macos-aarch64` | `lib/librustorb_dds_ffi.dylib`、`lib/librustorb_dds_ffi.a` | `osx-arm64` | `arm64-darwin` |
+| `macos-x86_64` | 同上 | `osx-x64` | `x86_64-darwin` |
+| `windows-x86_64` | `bin/rustorb_dds_ffi.dll`、`lib/rustorb_dds_ffi.dll.lib`（DLL の import library） | `win-x64` | （gem は Windows に対応しない） |
+
+どれも `include/rustorb/dds.h` とライセンスを含む。
+
+- 既定の feature（`security` 付き）で作る
+- 公開するシンボルは `rdds_` で始まる関数だけ（Rust の cdylib が `#[no_mangle]` の関数だけを公開する。リリースで `nm` で確かめる）
+- Linux は manylinux 2.28 のイメージで作るので、glibc 2.28 以降で動く（wheel と同じ）。SONAME は付けない
+- macOS の install name は `@rpath/librustorb_dds_ffi.dylib`
+- Windows の静的ライブラリは付けない（gem は Windows に対応しないため）
+- 静的ライブラリを使うときは、Linux は `-lpthread -ldl -lm`、macOS は `-framework CoreFoundation -framework Security -framework SystemConfiguration` も要る
+- ヘッダとライブラリの版がずれたときのために `rdds_abi_version()` がある。ヘッダの `RDDS_ABI_VERSION` と比べる（.NET と Java は読み込んだときに確かめる）。リリースは `tools/release-check/abi.c` で、作ったライブラリにリンクしてこれを確かめる
+
 ## まだないもの
 
 - 型の中身を調べる関数（受け取った `DynamicType` を言語側から見る）。C++/Java で DynamicData を扱うときに足す

@@ -18,6 +18,7 @@ rustorb-dds が OMG の DDS 関連規格のどこまでを実装しているか�
 | [DDS-RPC](#dds-rpc-10) | 1.0 | 🟡 Rust はほぼ全部、他言語は request/reply 形式 | `rustorb_dds::rpc`、[rpc.md](rpc.md) |
 | [ISO/IEC C++ PSM for DDS](#isoiec-c-psm-for-dds) | 1.0 | 🟡 部分集合 | `cpp/`、[cpp.md](cpp.md) |
 | [Java 5 PSM for DDS](#java-5-psm-for-dds) | 1.0（formal/2013-11-02） | 🟡 部分集合 | `java/`、[java.md](java.md) |
+| [.NET と Ruby のバインディング](#net-と-ruby-のバインディング) | —（OMG の PSM はない） | 🟡 部分集合 | `dotnet/`、`ruby/`、[dotnet.md](dotnet.md)、[ruby.md](ruby.md) |
 | [IDL4 と言語マッピング](#idl-4-と言語マッピング) | IDL 4.2 | 🟡 | rustorb-idl（別リポジトリ） |
 | DDS-XML、DDS-JSON、DDS-WEB、DDS-XRCE、DDS-TSN など | — | ❌ | — |
 
@@ -25,7 +26,7 @@ rustorb-dds が OMG の DDS 関連規格のどこまでを実装しているか�
 
 ## DDS 1.4（DCPS）
 
-DCPS の API は Rust の `rustorb-dds` にあり、C ABI（[c-abi.md](c-abi.md)）を通して C++、Java が、PyO3 を通して Python が使う。言語ごとの差は各言語の文書にある。
+DCPS の API は Rust の `rustorb-dds` にあり、C ABI（[c-abi.md](c-abi.md)）を通して C++、Java、.NET、Ruby が、PyO3 を通して Python が使う。言語ごとの差は各言語の文書にある。
 
 ### エンティティと操作
 
@@ -191,12 +192,20 @@ RxO（requested/offered）の比較は RELIABILITY、DURABILITY、DEADLINE、LIV
 - ❌ 組み込みトピック、`find`、`ignore`、QueryCondition、coherent access、`setQos`、DynamicData。
 - 🟡 型は rustorb-idl `-bjava -Wbdds_only` が書く。struct の継承、`map`、再帰型はまだない。Maven Central には公開していない。
 
+## .NET と Ruby のバインディング
+
+OMG に .NET と Ruby の DDS PSM はないので、.NET は Java 5 PSM の構造を C# に（[dotnet.md](dotnet.md)）、Ruby は C++ PSM の構造を Ruby に（[ruby.md](ruby.md)）移した。どちらも C ABI の上にある。
+
+- ✅ DomainParticipant、Topic、ContentFilteredTopic、Publisher、Subscriber、DataWriter、DataReader、各 QoS ポリシー、状態と listener、条件と WaitSet。
+- ❌ 組み込みトピック、`ignore`、QueryCondition、coherent access、`set_qos`、DynamicData、DDS-RPC。
+- 🟡 型は rustorb-idl `-bcsharp -Wbdds_only`、`-bruby -Wbdds_only` が書く。struct の継承、`map`、再帰型、bitset はまだない。NuGet と RubyGems への公開は次のリリースから（#94）。
+
 ## IDL 4 と言語マッピング
 
-IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) にあり、Rust（`-brust`）、Python（`-bpython`）、C++11（`-bc++11`）、Java（`-bjava`）の DDS 用の型を書く（`-Wbdds` / `-Wbdds_only`）。Rust には OMG のマッピングがないので、rustorb 独自である。
+IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) にあり、Rust（`-brust`）、Python（`-bpython`）、C++11（`-bc++11`）、Java（`-bjava`）、C#（`-bcsharp`）、Ruby（`-bruby`）の DDS 用の型を書く（`-Wbdds` / `-Wbdds_only`）。Rust には OMG のマッピングがないので、rustorb 独自である。
 
 - ✅ struct、union、enum、bitmask、typedef、sequence、array、string/wstring、module、XTypes の annotation（extensibility、`@key`、`@optional`、`@id` など）。`-Wbxtypes` で TypeObject も出す。
-- 🟡 再帰型と bitset の DDS 出力は rustorb-idl#14。C++ と Java では struct の継承と `map` がまだない。
+- 🟡 再帰型と bitset の DDS 出力は rustorb-idl#14。C++、Java、C#、Ruby では struct の継承と `map` がまだない。
 - 🟡 構文解析器 idl_parser の制限：`switch(@key T)`、`sequence<@external T>` の annotation、`//@key` のコメント形式。
 
 ## 相互接続の確認状況
@@ -211,7 +220,7 @@ IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) にあ
 | ROS 2 | Jazzy（rmw_fastrtps_cpp、rmw_cyclonedds_cpp） | `std_msgs/msg/String` の talker・listener、サービス `add_two_ints`、両方向 |
 | OpenRTM-aist | 2.0.2（FastRTPSTransport、Fast DDS 2.6） | `RTC::TimedLong` の OutPort・InPort、Rust・C++・Python、両方向 |
 
-言語ごとには、Rust、Python、C++、Java の例がそれぞれ Cyclone DDS、Fast DDS、OpenDDS と試験される（Java は CI だけ）。
+言語ごとには、Rust、Python、C++、Java、.NET、Ruby の例がそれぞれ Cyclone DDS、Fast DDS、OpenDDS と試験される（Java は CI だけ）。
 
 試験していない相互接続：DDS Security の OpenDDS、RTI Connext DDS（入手できない）、Cyclone DDS・Fast DDS の新しい版（0.11 以降、2.12 以降・3.x）、OpenRTM-aist-Python。
 

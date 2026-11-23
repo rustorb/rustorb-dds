@@ -37,12 +37,16 @@ python python/examples/hello_world.py pub
 | `rustorb-xtypes` | The type system (DDS-XTypes 1.3): TypeObject, assignability, DynamicData | MIT OR Apache-2.0 |
 | `rustorb-dds-security` | The builtin plugins of DDS Security 1.2 (PKI-DH, Permissions, AES-GCM-GMAC), on RustCrypto; `rustorb-dds` uses it with the feature `security` ([docs/security.md](docs/security.md)) | MIT OR Apache-2.0 |
 | `rustorb-dds-python` | The native module of the Python package `rustorb_dds` ([python/](python/)), with PyO3; not published to crates.io | MIT OR Apache-2.0 |
-| `rustorb-dds-ffi` | The C ABI ([`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)) the C++ and Java bindings are built on ([docs/c-abi.md](docs/c-abi.md)) | MIT OR Apache-2.0 |
+| `rustorb-dds-ffi` | The C ABI ([`include/rustorb/dds.h`](crates/rustorb-dds-ffi/include/rustorb/dds.h)) the C++, Java, .NET and Ruby bindings are built on ([docs/c-abi.md](docs/c-abi.md)) | MIT OR Apache-2.0 |
 | `rustorb-dds-corba` | CORBA TypeCodes and anys (`rustorb-core`) as DDS-XTypes types and DynamicData, and back ([docs/corba.md](docs/corba.md)); the only crate here that depends on the ORB | MIT OR Apache-2.0 |
 
 The C++ binding ([cpp/](cpp/), [docs/cpp.md](docs/cpp.md)) is header only: the ISO/IEC C++ PSM for DDS (`<dds/dds.hpp>`) on that C ABI, with types from `rustorb-idl -bc++11 -Wbdds_only` (MIT OR Apache-2.0).
 
 The Java binding ([java/](java/), [docs/java.md](docs/java.md)) is the DDS Java 5 PSM (`org.omg.dds`) on that C ABI through the FFM API (Java 22 or newer), with types from `rustorb-idl -bjava -Wbdds_only` (MIT OR Apache-2.0).
+
+The .NET binding ([dotnet/](dotnet/), [docs/dotnet.md](docs/dotnet.md)) is the package `Rustorb.Dds` (.NET 8): the structure of the Java 5 PSM in C# (`Omg.Dds.*`) on that C ABI through P/Invoke, with types from `rustorb-idl -bcsharp -Wbdds_only` (MIT OR Apache-2.0).
+
+The Ruby binding ([ruby/](ruby/), [docs/ruby.md](docs/ruby.md)) is the gem `rustorb-dds`: the structure of the C++ PSM in Ruby (`DDS::*`) as a C extension on that C ABI, with types from `rustorb-idl -bruby -Wbdds_only` (MIT OR Apache-2.0).
 
 OpenRTM-aist 2.0's data ports, connected with its Fast DDS transport, talk with rustorb-dds writers and readers of the same type and QoS ([docs/openrtm.md](docs/openrtm.md)).
 
