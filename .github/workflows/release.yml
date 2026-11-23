@@ -190,7 +190,11 @@ jobs:
           cp LICENSE-MIT LICENSE-APACHE "$d/"
           case "$RUNNER_OS" in
             Linux) cp "$OUT/librustorb_dds_ffi.so" "$OUT/librustorb_dds_ffi.a" "$d/lib/" ;;
-            macOS) cp "$OUT/librustorb_dds_ffi.dylib" "$OUT/librustorb_dds_ffi.a" "$d/lib/" ;;
+            macOS)
+              cp "$OUT/librustorb_dds_ffi.dylib" "$OUT/librustorb_dds_ffi.a" "$d/lib/"
+              # rustc leaves the build path as the install name.
+              install_name_tool -id @rpath/librustorb_dds_ffi.dylib "$d/lib/librustorb_dds_ffi.dylib"
+              codesign --force -s - "$d/lib/librustorb_dds_ffi.dylib" ;;
             Windows)
               mkdir -p "$d/bin"
               cp "$OUT/rustorb_dds_ffi.dll" "$d/bin/"
