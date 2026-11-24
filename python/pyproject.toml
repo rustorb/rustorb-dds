@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rustorb-dds"
-version = "0.2.0"
+version = "0.3.0"
 description = "DDS (Data Distribution Service) with its core in Rust: the Python binding"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }

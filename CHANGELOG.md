@@ -1,11 +1,16 @@
 # Changelog
 
 The releases of rustorb-dds. From 0.2.0 on, the Rust crates (on
-crates.io) and the Python package (`rustorb-dds` on PyPI) have one version
-and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
+crates.io) and the Python package (`rustorb-dds` on PyPI), and from 0.3.0
+on the NuGet package (`Rustorb.Dds`) and the gem (`rustorb-dds`), have one
+version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 `python-v0.1.0`. See [docs/release.md](docs/release.md).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-24
+
+The first release of the .NET binding (NuGet `Rustorb.Dds`) and the Ruby
+binding (gem `rustorb-dds`), and of prebuilt `librustorb_dds_ffi` archives
+(D7, #90).
 
 ### Added
 

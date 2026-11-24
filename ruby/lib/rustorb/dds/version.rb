@@ -2,7 +2,7 @@
 
 module DDS
   # The version of the gem rustorb-dds (that of rustorb-dds).
-  VERSION = "0.2.0"
+  VERSION = "0.3.0"
   # The version of rustorb/dds.h the extension is built for.
   ABI_VERSION = 1
 end

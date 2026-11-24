@@ -5,7 +5,7 @@
     <AssemblyName>Rustorb.Dds</AssemblyName>
     <RootNamespace>Rustorb.Dds</RootNamespace>
     <PackageId>Rustorb.Dds</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>rustorb contributors</Authors>
     <Description>DDS for .NET on rustorb-dds: a subset of the DDS API after the Java 5 PSM, over the C ABI of librustorb_dds_ffi. Types come from rustorb-idl -bcsharp -Wbdds_only.</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
