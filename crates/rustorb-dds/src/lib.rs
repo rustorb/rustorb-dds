@@ -118,6 +118,8 @@ pub use qos::{
 };
 #[cfg(feature = "security")]
 pub use rustorb_dds_security::ocsp::OcspOptions;
+#[cfg(feature = "security")]
+pub use rustorb_dds_security::{access::ProtectionKind, psk::PskConfig};
 pub use rustorb_rtps::qos::ReliabilityKind;
 pub use rustorb_rtps::sedp::DATA_REPRESENTATION_QOS_POLICY_ID;
 pub use rustorb_rtps::{Guid, GuidPrefix, SampleIdentity, SequenceNumber, Time};

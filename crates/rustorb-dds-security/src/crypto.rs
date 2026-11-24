@@ -32,6 +32,27 @@ pub mod submessage_id {
 }
 use submessage_id::*;
 
+/// The flags of the SRTPS_PREFIX besides the endianness (7.4.7.8.3).
+pub mod prefix_flag {
+    /// AdditionalAuthenticatedDataFlag (A): the RTPS header is
+    /// authenticated as additional data, and not put in the body as an
+    /// INFO_SRC.
+    pub const AAD: u8 = 0x02;
+    /// PreSharedKeyFlag (P): the message is protected with a pre-shared
+    /// key.
+    pub const PSK: u8 = 0x04;
+}
+
+/// The flags of the SRTPS_PREFIX that follows the header of `message`,
+/// if it has one: whether and how the whole message is protected.
+pub fn message_prefix_flags(message: &[u8]) -> Option<u8> {
+    if message.len() < RTPS_HEADER || &message[..4] != b"RTPS" {
+        return None;
+    }
+    let (s, _) = read_submessage(&message[RTPS_HEADER..]).ok()?;
+    (s.id == SRTPS_PREFIX).then_some(s.flags)
+}
+
 const INFO_SRC: u8 = 0x0c;
 const RTPS_HEADER: usize = 20;
 
@@ -647,24 +668,49 @@ impl Encoder {
         message: &[u8],
         receivers: &[&KeyMaterial],
     ) -> Result<Vec<u8>, Error> {
+        self.encode_message_with(message, receivers, 0)
+    }
+
+    /// encode_rtps_message (10.5.3.3.4.6) with the flags of the
+    /// SRTPS_PREFIX in `flags` ([`prefix_flag`]). With
+    /// [`prefix_flag::AAD`], the body is the message without its header,
+    /// and the header is authenticated as additional data; without it,
+    /// as [`Self::encode_message`]. [`prefix_flag::PSK`] only marks the
+    /// message: the key material of a pre-shared key is the encoder's
+    /// (see [`crate::psk`]).
+    pub fn encode_message_with(
+        &self,
+        message: &[u8],
+        receivers: &[&KeyMaterial],
+        flags: u8,
+    ) -> Result<Vec<u8>, Error> {
         if message.len() < RTPS_HEADER || &message[..4] != b"RTPS" {
             return Err(Error::new("not an RTPS message"));
         }
+        let aad_on = flags & prefix_flag::AAD != 0;
         let mut body = Vec::with_capacity(message.len() + 8);
-        put_submessage(
-            &mut body,
-            INFO_SRC,
-            0,
-            &info_source(&message[..RTPS_HEADER]),
-        );
+        if !aad_on {
+            put_submessage(
+                &mut body,
+                INFO_SRC,
+                0,
+                &info_source(&message[..RTPS_HEADER]),
+            );
+        }
         body.extend_from_slice(&message[RTPS_HEADER..]);
+        let aad: &[u8] = if aad_on { &message[..RTPS_HEADER] } else { &[] };
         let u = self.next(body.len());
         let mut out = Vec::with_capacity(body.len() + 128);
         out.extend_from_slice(&message[..RTPS_HEADER]);
         let mut h = Vec::with_capacity(20);
         u.header.write(&mut h);
-        put_submessage(&mut out, SRTPS_PREFIX, 0, &h);
-        let footer = self.seal(&u, &[], &mut body, receivers);
+        put_submessage(
+            &mut out,
+            SRTPS_PREFIX,
+            flags & (prefix_flag::AAD | prefix_flag::PSK),
+            &h,
+        );
+        let footer = self.seal(&u, aad, &mut body, receivers);
         if self.kind.encrypts() {
             let mut b = (body.len() as u32).to_be_bytes().to_vec();
             b.extend_from_slice(&body);
@@ -880,6 +926,7 @@ impl Decoder {
     fn open(
         &self,
         header: &CryptoHeader,
+        aad: &[u8],
         data: &mut [u8],
         footer: &CryptoFooter,
     ) -> Result<(), Error> {
@@ -887,9 +934,18 @@ impl Decoder {
             return Ok(());
         };
         let iv = header.iv();
+        let mac = |d: &[u8]| {
+            if aad.is_empty() {
+                keys.sender.mac(&iv, d)
+            } else {
+                let mut all = aad.to_vec();
+                all.extend_from_slice(d);
+                keys.sender.mac(&iv, &all)
+            }
+        };
         if self.kind.encrypts() {
-            keys.sender.open(&iv, &[], data, &footer.common_mac)?;
-        } else if keys.sender.mac(&iv, data) != footer.common_mac {
+            keys.sender.open(&iv, aad, data, &footer.common_mac)?;
+        } else if mac(data) != footer.common_mac {
             return Err(Error::new("the common MAC does not verify"));
         }
         if let Some(r) = &keys.receiver {
@@ -929,7 +985,7 @@ impl Decoder {
             (rest[..n].to_vec(), &rest[n..])
         };
         let (footer, _) = CryptoFooter::read(rest)?;
-        self.open(&header, &mut data, &footer)?;
+        self.open(&header, &[], &mut data, &footer)?;
         Ok(data)
     }
 
@@ -956,7 +1012,7 @@ impl Decoder {
             return Err(Error::new("no SEC_POSTFIX"));
         }
         let (footer, _) = CryptoFooter::read(postfix.body)?;
-        self.open(&header, &mut data, &footer)?;
+        self.open(&header, &[], &mut data, &footer)?;
         Ok(Decoded {
             plain: data,
             rest_offset: b.len() - rest.len(),
@@ -964,7 +1020,8 @@ impl Decoder {
     }
 
     /// decode_rtps_message: the plain message of what
-    /// [`Encoder::encode_message`] made.
+    /// [`Encoder::encode_message`] or [`Encoder::encode_message_with`]
+    /// made, with or without additional authenticated data.
     pub fn decode_message(&self, b: &[u8]) -> Result<Vec<u8>, Error> {
         if b.len() < RTPS_HEADER || &b[..4] != b"RTPS" {
             return Err(Error::new("not an RTPS message"));
@@ -973,6 +1030,7 @@ impl Decoder {
         if prefix.id != SRTPS_PREFIX {
             return Err(Error::new("not an SRTPS_PREFIX"));
         }
+        let aad_on = prefix.flags & prefix_flag::AAD != 0;
         let header = CryptoHeader::read(prefix.body)?;
         let (mut body, footer) = if self.kind.encrypts() {
             let (inner, rest) = read_submessage(rest)?;
@@ -998,7 +1056,14 @@ impl Decoder {
             return Err(Error::new("no SRTPS_POSTFIX"));
         }
         let (f, _) = CryptoFooter::read(footer.body)?;
-        self.open(&header, &mut body, &f)?;
+        let aad: &[u8] = if aad_on { &b[..RTPS_HEADER] } else { &[] };
+        self.open(&header, aad, &mut body, &f)?;
+        let mut out = Vec::with_capacity(body.len() + RTPS_HEADER);
+        if aad_on {
+            out.extend_from_slice(&b[..RTPS_HEADER]);
+            out.extend_from_slice(&body);
+            return Ok(out);
+        }
         // The INFO_SRC back into a header.
         let (src, rest) = read_submessage(&body)?;
         if src.id != INFO_SRC || src.body.len() != 20 {
@@ -1006,7 +1071,6 @@ impl Decoder {
                 "the secure body does not start with an INFO_SRC",
             ));
         }
-        let mut out = Vec::with_capacity(body.len());
         out.extend_from_slice(&b[..4]);
         out.extend_from_slice(&src.body[4..]);
         out.extend_from_slice(rest);
@@ -1101,6 +1165,33 @@ mod tests {
             let c = e.encode_message(&m, &[&k]).unwrap();
             assert_eq!(&c[..20], &m[..20]);
             assert_eq!(Decoder::new(k).decode_message(&c).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn messages_round_trip_with_aad() {
+        for kind in KINDS {
+            let k = KeyMaterial::generate(kind);
+            let e = Encoder::new(k.clone());
+            let mut m = b"RTPS\x02\x05\x01\x0f".to_vec();
+            m.extend_from_slice(&[7; 12]);
+            m.extend_from_slice(&[0x09, 0x01, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+            let c = e
+                .encode_message_with(&m, &[], prefix_flag::AAD | prefix_flag::PSK)
+                .unwrap();
+            assert_eq!(
+                message_prefix_flags(&c),
+                Some(1 | prefix_flag::AAD | prefix_flag::PSK)
+            );
+            // No INFO_SRC in the body: 4 octets fewer than without AAD.
+            let plain = e.encode_message(&m, &[]).unwrap();
+            assert_eq!(c.len() + 24, plain.len());
+            let d = Decoder::new(k);
+            assert_eq!(d.decode_message(&c).unwrap(), m);
+            // The header is authenticated.
+            let mut bad = c.clone();
+            bad[9] ^= 1;
+            assert!(d.decode_message(&bad).is_err());
         }
     }
 

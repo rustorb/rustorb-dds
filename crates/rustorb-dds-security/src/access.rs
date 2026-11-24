@@ -164,6 +164,9 @@ pub struct DomainRule {
     pub liveliness_protection_kind: ProtectionKind,
     /// rtps_protection_kind.
     pub rtps_protection_kind: ProtectionKind,
+    /// rtps_psk_protection_kind (10.4.1.2.5.8): NONE, SIGN or ENCRYPT;
+    /// NONE when absent (1.1 documents do not have it).
+    pub rtps_psk_protection_kind: ProtectionKind,
     /// topic_access_rules.
     pub topic_rules: Vec<TopicRule>,
 }
@@ -217,6 +220,10 @@ impl DomainRule {
         if self.liveliness_protection_kind.is_protected() {
             m |= 1 << 2;
         }
+        // is_rtps_psk_protected.
+        if self.rtps_psk_protection_kind.is_protected() {
+            m |= 1 << 4;
+        }
         if self.rtps_protection_kind.encrypts() {
             p |= 1 << 0;
         }
@@ -234,6 +241,10 @@ impl DomainRule {
         }
         if self.liveliness_protection_kind.origin_authenticated() {
             p |= 1 << 5;
+        }
+        // is_rtps_psk_encrypted.
+        if self.rtps_psk_protection_kind.encrypts() {
+            p |= 1 << 6;
         }
         (m, p)
     }

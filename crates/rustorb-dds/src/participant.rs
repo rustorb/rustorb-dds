@@ -54,6 +54,10 @@ use crate::status::{
 use crate::subscriber::Subscriber;
 use crate::topic::{ContentFilteredTopic, Topic};
 use crate::typed::{Dynamic, KeyOps, Typed};
+#[cfg(feature = "security")]
+use rustorb_dds_security::access::ProtectionKind;
+#[cfg(feature = "security")]
+use rustorb_dds_security::psk::{PskConfig, PskProtection};
 
 /// The vendor id sent in RTPS headers. rustorb has no vendor id from the
 /// OMG yet, so this is `VENDORID_UNKNOWN` (DDSI-RTPS 2.5, 8.3.3.1.3).
@@ -98,6 +102,16 @@ pub struct ParticipantConfig {
     /// security.
     #[cfg(feature = "security")]
     pub security: Option<SecurityConfig>,
+    /// Protection of the RTPS messages with a pre-shared key (feature
+    /// `security`, DDS Security 1.2, 10.5.2.1.3). With [`Self::security`],
+    /// the governance's `rtps_psk_protection_kind` says whether and how
+    /// it is used. Without it, the participant uses the PSK plugins
+    /// (DDS:Auth:PSK, DDS:Access:PSK and DDS:Crypto:PSK, 10.7 to 10.9):
+    /// no authentication nor access control, and every RTPS message
+    /// protected as [`PskConfig::protection_kind`] says (ENCRYPT by
+    /// default). `None`, the default, uses no pre-shared key.
+    #[cfg(feature = "security")]
+    pub psk: Option<PskConfig>,
 }
 
 impl ParticipantConfig {
@@ -124,6 +138,8 @@ impl ParticipantConfig {
             persistence_directory: None,
             #[cfg(feature = "security")]
             security: None,
+            #[cfg(feature = "security")]
+            psk: None,
         }
     }
 
@@ -149,7 +165,10 @@ impl ParticipantConfig {
     /// Takes the PROPERTY of a DomainParticipantQos (DDS Security 1.2,
     /// 7.2.5), as the bindings for other languages give it: the
     /// `dds.sec.*` properties turn on DDS Security with the builtin
-    /// plugins (`SecurityConfig::from_properties`);
+    /// plugins (`SecurityConfig::from_properties`); the
+    /// `dds.sec.crypto.rtps_psk_*` ones and
+    /// `dds.sec.access.rtps_psk_protection_kind` set [`Self::psk`] (alone,
+    /// they choose the PSK plugins);
     /// [`Self::PERSISTENCE_DIRECTORY`] sets
     /// [`Self::persistence_directory`]; the others are ignored.
     ///
@@ -175,8 +194,38 @@ impl ParticipantConfig {
         }
         #[cfg(feature = "security")]
         {
-            self.security =
-                Some(SecurityConfig::try_from_properties(sec).map_err(Error::Security)?);
+            let (psk, sec): (Vec<_>, Vec<_>) = sec
+                .into_iter()
+                .partition(|(n, _)| PskConfig::is_property(n));
+            // dds.sec.crypto.symmetric_cipher_algorithm is the default of
+            // the PSK algorithm too (10.5.1.1).
+            let psk_props = psk
+                .iter()
+                .copied()
+                .chain(sec.iter().copied().filter(|(n, _)| {
+                    *n == rustorb_dds_security::psk::DEFAULT_SYMMETRIC_CIPHER_ALGORITHM
+                }));
+            let psk_config = PskConfig::from_properties(psk_props)
+                .map_err(|e| Error::Security(format!("PSK: {e}")))?;
+            if psk_config.is_none() && !psk.is_empty() {
+                return Err(Error::Security(format!(
+                    "PSK: {} is missing",
+                    rustorb_dds_security::psk::SECRET_PASSPHRASE
+                )));
+            }
+            let sec: Vec<_> = sec
+                .into_iter()
+                .filter(|(n, _)| {
+                    *n != rustorb_dds_security::psk::DEFAULT_SYMMETRIC_CIPHER_ALGORITHM
+                })
+                .collect();
+            if !sec.is_empty() || psk_config.is_none() {
+                self.security =
+                    Some(SecurityConfig::try_from_properties(sec).map_err(Error::Security)?);
+            }
+            if psk_config.is_some() {
+                self.psk = psk_config;
+            }
             Ok(())
         }
         #[cfg(not(feature = "security"))]
@@ -1424,6 +1473,10 @@ pub(crate) struct Shared {
     /// DDS Security, when it is on.
     #[cfg(feature = "security")]
     pub(crate) security: Option<Arc<Security>>,
+    /// The protection of RTPS messages with a pre-shared key, when it is
+    /// on.
+    #[cfg(feature = "security")]
+    pub(crate) psk: Option<Arc<PskProtection>>,
     /// The state of the generator that picks the datagrams to drop.
     drop_state: AtomicU64,
 }
@@ -1446,6 +1499,23 @@ impl Shared {
                 None => return (false, None),
             },
             None => bytes,
+        };
+        // What the participant key ("authenticated participant exchanged
+        // key") did not protect, the pre-shared key does (9.4.2.4).
+        #[cfg(feature = "security")]
+        let psk_encoded;
+        #[cfg(feature = "security")]
+        let bytes: &[u8] = match &self.psk {
+            Some(psk) if rustorb_dds_security::crypto::message_prefix_flags(bytes).is_none() => {
+                match psk.encode(bytes) {
+                    Ok(b) => {
+                        psk_encoded = b;
+                        &psk_encoded
+                    }
+                    Err(_) => return (false, None),
+                }
+            }
+            _ => bytes,
         };
         let mut sent = false;
         let mut last_err = None;
@@ -2208,7 +2278,7 @@ impl Shared {
             return false;
         };
         #[cfg(feature = "security")]
-        if self.security.is_some() {
+        if self.security.is_some() || self.psk.is_some() {
             return false;
         }
         w.qos.durability == DurabilityKind::Volatile
@@ -2235,7 +2305,7 @@ impl Shared {
             return Ok(None);
         };
         #[cfg(feature = "security")]
-        if self.security.is_some() {
+        if self.security.is_some() || self.psk.is_some() {
             return Ok(None);
         }
         let mut g = self.lock()?;
@@ -2680,6 +2750,29 @@ impl DomainParticipant {
             }
             None => None,
         };
+        #[cfg(feature = "security")]
+        let psk_kind = match (&security, &config.psk) {
+            (Some(s), psk) => {
+                let k = s.rtps_psk_protection_kind();
+                if k.is_protected() && psk.is_none() {
+                    return Err(Error::Security(format!(
+                        "the governance asks for rtps_psk_protection_kind {k:?}, and {} is not given",
+                        rustorb_dds_security::psk::SECRET_PASSPHRASE
+                    )));
+                }
+                k
+            }
+            (None, Some(c)) => c.protection_kind.unwrap_or(ProtectionKind::Encrypt),
+            (None, None) => ProtectionKind::None,
+        };
+        #[cfg(feature = "security")]
+        let psk = match &config.psk {
+            Some(c) if psk_kind.is_protected() => Some(Arc::new(
+                PskProtection::new(c, psk_kind, domain_id, "")
+                    .map_err(|e| Error::Security(format!("PSK: {e}")))?,
+            )),
+            _ => None,
+        };
         let mut data = ParticipantData::new(prefix, VENDOR_ID);
         data.domain_id = Some(domain_id);
         data.available_builtin_endpoints.0 |=
@@ -2711,6 +2804,8 @@ impl DomainParticipant {
         #[cfg(feature = "security")]
         if let Some(s) = &security {
             s.announce(&mut data);
+        } else if config.psk.is_some() {
+            crate::security::announce_psk(&mut data, psk_kind);
         }
         let mut spdp_config = SpdpConfig::new(domain_id, transport.discovery_multicast_locators());
         spdp_config.announce_period = config.announce_period;
@@ -2795,6 +2890,8 @@ impl DomainParticipant {
             drop_one_in: config.drop_one_in.filter(|n| *n > 0),
             #[cfg(feature = "security")]
             security,
+            #[cfg(feature = "security")]
+            psk,
             drop_state: AtomicU64::new(
                 u64::from_le_bytes(prefix.0[4..12].try_into().expect("8 bytes")) | 1,
             ),
@@ -3286,6 +3383,23 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
         let inner = &mut *g;
         let mut acked = false;
         for d in datagrams {
+            // A message protected with the pre-shared key is decoded
+            // first; with PSK protection on, a message protected with
+            // neither the pre-shared key nor a participant key is dropped.
+            #[cfg(feature = "security")]
+            let d = match &shared.psk {
+                Some(psk) => match rustorb_dds_security::crypto::message_prefix_flags(&d.data) {
+                    Some(f) if f & rustorb_dds_security::crypto::prefix_flag::PSK != 0 => {
+                        match psk.decode(&d.data) {
+                            Ok(b) => Datagram { data: b, ..d },
+                            Err(_) => continue,
+                        }
+                    }
+                    Some(_) if inner.security.is_some() => d,
+                    _ => continue,
+                },
+                None => d,
+            };
             #[cfg(feature = "security")]
             let d = match &inner.security {
                 Some(sec) => match sec.decode(&d.data) {

@@ -14,7 +14,7 @@ rustorb-dds が OMG の DDS 関連規格のどこまでを実装しているか�
 | [DDS（DCPS）](#dds-14dcps) | 1.4 | 🟡 主要な部分 | `rustorb-dds` |
 | [DDSI-RTPS](#ddsi-rtps-25) | 2.5 | ✅ UDPv4 の範囲で | `rustorb-rtps` |
 | [DDS-XTypes](#dds-xtypes-13) | 1.3 | 🟡 主要な部分 | `rustorb-xtypes`、rustorb の `rustorb-cdr` |
-| [DDS Security](#dds-security-12) | 1.2 | 🟡 組み込みプラグイン 3 つと Logging、Tagging | `rustorb-dds-security`、[security.md](security.md) |
+| [DDS Security](#dds-security-12) | 1.2 | 🟡 組み込みプラグイン 3 つと Logging、Tagging、PSK | `rustorb-dds-security`、[security.md](security.md) |
 | [DDS-RPC](#dds-rpc-10) | 1.0 | 🟡 Rust はほぼ全部、他言語は request/reply 形式 | `rustorb_dds::rpc`、[rpc.md](rpc.md) |
 | [ISO/IEC C++ PSM for DDS](#isoiec-c-psm-for-dds) | 1.0 | 🟡 部分集合 | `cpp/`、[cpp.md](cpp.md) |
 | [Java 5 PSM for DDS](#java-5-psm-for-dds) | 1.0（formal/2013-11-02） | 🟡 部分集合 | `java/`、[java.md](java.md) |
@@ -157,7 +157,7 @@ RxO（requested/offered）の比較は RELIABILITY、DURABILITY、DEADLINE、LIV
 | identity の失効、key revision | 🟡 | Rust だけ |
 | PROPERTY QoS（`dds.sec.*`）による設定（7.2.5） | ✅ | 全言語 |
 | `identity_status_token` の配布 | ❌ | 読み飛ばす |
-| PSK（DDS:Auth:PSK） | ❌ | rustorb-dds#84 |
+| PSK：governance の `rtps_psk_protection_kind`、DDS:Auth:PSK、DDS:Access:PSK、DDS:Crypto:PSK（10.5.2.1.3、10.7〜10.9） | 🟡 | 鍵の導出は仕様の例と一致。相互接続の相手がなく、他の実装とは未試験。HeaderExtension のあるメッセージは扱わない |
 | PKCS #11（`pkcs11:` URI）、`https:` の OCSP responder | ❌ | |
 | プラグインの差し替え（SPI を外から実装すること） | ❌ | 組み込みプラグインだけ |
 
@@ -231,5 +231,5 @@ IDL の生成器は [rustorb-idl](https://github.com/rustorb/rustorb-idl) にあ
 - DCPS：OWNERSHIP、DESTINATION_ORDER、LIFESPAN、TIME_BASED_FILTER、PRESENTATION と coherent access、READER_DATA_LIFECYCLE、作成後の QoS の変更、組み込みトピックの reader、`ignore_*`、QueryCondition、MultiTopic。
 - RTPS：UDPv6、ユニキャストだけの discovery（初期ピア一覧）。
 - XTypes：XML・IDL の型の表現、XML データ表現、C++・Java の DynamicData。
-- Security：PSK（#84）、PKCS #11。
+- Security：PKCS #11。PSK は他の実装と試していない。
 - RPC：非同期の関数呼び出し形式、他言語の関数呼び出し形式。
