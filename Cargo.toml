@@ -12,7 +12,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -25,10 +25,10 @@ categories = ["network-programming"]
 [workspace.dependencies]
 # The crates of this workspace, published together with one version
 # (tools/set-version.py).
-rustorb-xtypes = { path = "crates/rustorb-xtypes", version = "0.2.0" }
-rustorb-rtps = { path = "crates/rustorb-rtps", version = "0.2.0", default-features = false }
-rustorb-dds-security = { path = "crates/rustorb-dds-security", version = "0.2.0" }
-rustorb-dds = { path = "crates/rustorb-dds", version = "0.2.0" }
+rustorb-xtypes = { path = "crates/rustorb-xtypes", version = "0.3.0" }
+rustorb-rtps = { path = "crates/rustorb-rtps", version = "0.3.0", default-features = false }
+rustorb-dds-security = { path = "crates/rustorb-dds-security", version = "0.3.0" }
+rustorb-dds = { path = "crates/rustorb-dds", version = "0.3.0" }
 # Socket options std lacks (SO_REUSEADDR before bind, IP_MULTICAST_IF).
 # MIT OR Apache-2.0.
 socket2 = { version = "0.6", features = ["all"] }

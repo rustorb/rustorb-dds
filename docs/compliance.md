@@ -1,6 +1,6 @@
 # OMG 規格への対応状況
 
-rustorb-dds が OMG の DDS 関連規格のどこまでを実装しているかを、規格ごとにまとめる。根拠はこのリポジトリのコード、`docs/` の各文書、[CHANGELOG.md](../CHANGELOG.md)、[interop/README.md](../interop/README.md) と、計画の issue（rustorb/rustorb#111、rustorb-dds#63）である。2026-11-21 時点、0.2.0 のあとの `main` について書く。
+rustorb-dds が OMG の DDS 関連規格のどこまでを実装しているかを、規格ごとにまとめる。根拠はこのリポジトリのコード、`docs/` の各文書、[CHANGELOG.md](../CHANGELOG.md)、[interop/README.md](../interop/README.md) と、計画の issue（rustorb/rustorb#111、rustorb-dds#63）である。2026-11-24 時点、0.3.0 について書く。
 
 記号は次のとおり。
 
