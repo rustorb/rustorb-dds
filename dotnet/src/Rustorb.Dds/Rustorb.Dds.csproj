@@ -20,6 +20,13 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
+  <!-- Omg.Types (ISequence<T>, Sequence<T>), which the code rustorb-idl
+       -bcsharp -Wbdds_only writes uses for sequences: rustorb's small package
+       without CORBA. -->
+  <ItemGroup>
+    <PackageReference Include="Rustorb.Types" Version="0.7.1" />
+  </ItemGroup>
+
   <!-- The release workflow puts librustorb_dds_ffi of each platform into
        runtimes/<rid>/native here before dotnet pack. -->
   <ItemGroup>
