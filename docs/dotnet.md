@@ -44,7 +44,7 @@ foreach (Sample<HelloWorld.Greeting> s in reader.Take())
 - `-bcsharp -Wbdds` は、CORBA のコード（rustorb の `Rustorb` パッケージを使う）に加えて `Foo_dds.cs` を書く。同じ型を CORBA と DDS の両方で使える
 - `<Name>Codec.DdsType()` が DDS-XTypes の型を組み立て（`Rustorb.Dds.Types`、C ABI の `rdds_*_builder`）、`<Name>Codec.Instance`（`ICodec<T>`）が値を型の順にストリーム（`Out`、`In`）へ書き、読む。ファイルごとの `ModuleInitializer` が struct と union の Codec を `TypeSupport` に登録するので、`CreateTopic<T>` は型だけで済む
 - 型は Rust・Python・C++・Java の生成コードと同じに記述するので、TypeObject は他の実装と一致する。`TypesTests` が Cyclone DDS の idlc の TypeInformation とハッシュを比べる
-- 列を使う型の生成コードは `Omg.Types.ISequence<T>` と `Sequence<T>` を使う。いまはこれを rustorb の `Rustorb` パッケージ（0.7.0）から取る（試験のプロジェクトもそうしている）。CORBA の要らない DDS の利用者のために、rustorb 側で `Omg.Types` だけの小さなパッケージに分ける予定で（2026-11-23 に決定）、出たらそちらに替える
+- 列を使う型の生成コードは `Omg.Types.ISequence<T>` と `Sequence<T>` を使う。これは rustorb の CORBA を含まない小さなパッケージ `Rustorb.Types`（0.7.1 から）にあり、`Rustorb.Dds` がこれに依存するので、利用者が別に参照を足す必要はない。`-Wbdds`（CORBA と一緒）では、rustorb の `Rustorb` が同じ型を `Rustorb.Types` から転送する
 
 `dotnet/tests/Rustorb.Dds.Tests/generated` は、Cyclone DDS の fixture（`crates/rustorb-xtypes/tests/fixtures/cyclonedds`）の `Generated.idl`、`HelloWorld.idl`、`Keyed.idl` と、`cpp/tests/idl/CppTypes.idl` に対する rustorb-idl の出力：
 

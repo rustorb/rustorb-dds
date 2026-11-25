@@ -6,6 +6,15 @@ on the NuGet package (`Rustorb.Dds`) and the gem (`rustorb-dds`), have one
 version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 `python-v0.1.0`. See [docs/release.md](docs/release.md).
 
+## [Unreleased]
+
+### Changed
+
+- The NuGet package `Rustorb.Dds` depends on rustorb's `Rustorb.Types`
+  (0.7.1), the `Omg.Types` (`ISequence<T>`, `Sequence<T>`) that the code
+  of `rustorb-idl -bcsharp -Wbdds_only` uses for sequences, without CORBA.
+  The tests no longer reference `Rustorb` (#98).
+
 ## [0.3.0] - 2026-11-24
 
 The first release of the .NET binding (NuGet `Rustorb.Dds`) and the Ruby
