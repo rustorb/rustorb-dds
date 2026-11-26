@@ -389,8 +389,8 @@ impl<T> DataReader<T> {
     }
 
     /// The key of an instance (`get_key_value`): the last value received
-    /// for it, whose key members identify it. `None` if the reader has
-    /// not received a value for it, or has forgotten the instance: one
+    /// for it, whose key members identify it. `None` on a keyless topic,
+    /// if the reader has not received a value for it, or has forgotten the instance: one
     /// with no samples left and no writers is forgotten at the read or
     /// take after the one that emptied it.
     pub fn get_key_value(&self, instance: InstanceHandle) -> Option<T> {
