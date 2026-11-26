@@ -1,6 +1,6 @@
 # 性能測定
 
-rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。測り方の道具は [bench/](../bench/README.md) にある。
+rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。discovery の速さも測った（段 2、#106）。測り方の道具は [bench/](../bench/README.md) にある。
 
 **ここの数値はコンテナで測った。** CPU 4 個を他と分け合い、周波数も割り込みも固定できないので、回ごとに揺れる。同じ実行の中での相対比較として読み、別の機械や別の実行の数値と並べないこと。公開用の数値を専用の機械で測るかどうかは、あとで決める（#100）。
 
@@ -10,7 +10,7 @@ rustorb-dds の往復レイテンシとスループットを、同じ機械の�
 - レイテンシ: ping が書き、pong が受けて書き返すまでの往復時間。32 B〜1 MiB（2 倍刻み）。各大きさで 1 秒の warm-up のあと 5 秒。reliable は KEEP_LAST 1。
 - スループット: pub が全力で書き、sub が 5 秒で受けた payload。reliable は writer が KEEP_ALL で未確認応答 100 標本まで（溢れると write が待つ）、best-effort は待たない。sub は 256 標本ずつ take し（Fast DDS 版は 1 標本ずつ）、best-effort の sub は take していない標本を 1000 まで保つ（入らない分は失われる）。
 - 転送: `udp`（rustorb-dds と Fast DDS は共有メモリを切る。Cyclone DDS の既定）、`shm`（rustorb-dds の共有メモリ、Fast DDS の既定の組み込み転送、Cyclone DDS の iceoryx）、`loan`（rustorb-dds の貸し出し: payload に触れない zero-copy）。実装をまたぐ組は `udp` だけ。
-- 2 つのプロセスを CPU の半分ずつに固定した。各組を 3 回測り、中央値を載せる。CPU 時間と最大 RSS は両方のプロセスの `wait4` から取った。
+- 2 つのプロセスを CPU の半分ずつに固定した。各組を 3 回測り、中央値を載せる。CPU 時間と最大 RSS は両方のプロセスの `wait4` から取った。**この段の最大 RSS は正しくない。** `wait4` の ru_maxrss は Python から fork した時点の Python の RSS（約 13 MiB）を引き継ぐので、それより小さいプロセスは約 13 MiB と出ている。いまの `bench/run.py` は動いている間に /proc の VmHWM を読む（#106 で直した）。大きな値（best-effort の受け手の GB など）はそのまま正しい。
 
 再現:
 
@@ -50,6 +50,95 @@ best-effort:
 - 貸し出しの best-effort の数値（1 MiB で 1.2 Tbit/s など）は、payload に触れずに数えているので転送の速さではない。
 
 測っている途中で、速い writer が受け手の共有メモリの ring を溢れさせると write が「the shared memory buffer is full」で失敗する不具合が見つかり、直した（ring に入らないメッセージは UDP で失われたのと同じ扱い。docs/shm.md のとおり）。
+
+## Discovery（#106）
+
+N 個のプロセスを同時に起動し、それぞれが参加者 1 つ、同じトピックの writer と reader を 1 つずつ作る。各プロセスが、共通の開始時刻から数えて自分の writer と reader が N 者すべて（自分も含む）とマッチするまでの時間を出す。最後にマッチしたプロセスの時間がその回の値。N は 1, 2, 5, 10, 20, 50、各 3 回、回ごとに別のドメイン、UDP だけ（共有メモリなし）、CPU は固定しない。「rustorb+cyclonedds」は rustorb-dds と Cyclone DDS のプロセスを交互に起動した組。tcpdump でその回の UDP パケットを数えた（標本は書かないので discovery の通信: SPDP、SEDP とその HEARTBEAT・ACKNACK、liveliness。プロセスが残る 5〜20 秒全体）。メモリはプロセスごとの VmHWM の最大。
+
+```sh
+bench/discovery.py --out bench/results/<名前>
+bench/discovery.py --report bench/results/<名前>
+```
+
+数値は [bench/results/2026-11-26-container-discovery](../bench/results/2026-11-26-container-discovery)（上と同じコンテナ）。
+
+わかったこと:
+
+- 測り始めたとき rustorb-dds は遅かった（試しの 1 回で、2 者 55 ms、10 者 1,059 ms。Cyclone DDS は 8 ms と 128 ms）。原因は 3 つで、この PR で直した。
+  - 最初の SPDP 告知（と新しい参加者への返事）が、参加者のスレッドが次に起きるまで（最大 50 ms）出なかった。
+  - 相手がまだこちらを知らないうちに送った SEDP の DATA は捨てられ、組み込み writer の HEARTBEAT 周期（1 s）まで直らなかった。周期を 100 ms にした（すべて確認応答されたら何も送らない）。
+  - reliable reader がマッチした writer に最初に送る ACKNACK で HEARTBEAT を求める（final flag を立てない。8.4.2.3.4 の preemptive ACKNACK）。マッチ前に送られて捨てられた DATA がすぐ再送される。
+- 直したあと、rustorb-dds は 50 者まで 3 つの中でいちばん早くすべてマッチした（10 者 23 ms、Cyclone DDS 42 ms、Fast DDS 203 ms。50 者 0.50 s、0.75 s、3.8 s）。
+- 通信量は rustorb-dds と Cyclone DDS が同じくらい（50 者でパケット約 44,000、octet は rustorb が 3/4）、Fast DDS は約 2 倍のパケットと 4〜5 倍の octet。
+- CPU 時間は 20 者以上で rustorb-dds が Cyclone DDS の約 1.6〜1.7 倍（50 者で 6.3 s と 3.8 s）。Fast DDS と同じくらい。
+- 1 プロセスの最大 RSS は rustorb-dds 5〜6 MiB、Cyclone DDS 7〜9 MiB、Fast DDS 15〜17 MiB。
+- rustorb-dds と Cyclone DDS を混ぜても、Cyclone DDS だけのときと同じくらいで、すべての回ですべてマッチした。
+
+#### Until all matched, the last participant (ms, median of runs)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 3 | 7 | 9 |  |
+| 2 | 6 | 9 | 81 | 8 |
+| 5 | 11 | 24 | 184 | 22 |
+| 10 | 23 | 42 | 203 | 43 |
+| 20 | 69 | 186 | 283 | 180 |
+| 50 | 501 | 747 | 3,792 | 687 |
+
+#### Until matched, the median participant (ms)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 3 | 7 | 9 |  |
+| 2 | 6 | 9 | 46 | 8 |
+| 5 | 10 | 20 | 23 | 13 |
+| 10 | 22 | 35 | 119 | 31 |
+| 20 | 62 | 90 | 157 | 82 |
+| 50 | 453 | 616 | 1,477 | 561 |
+
+#### CPU time of all the processes over the run (s)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 0.02 | 0.01 | 0.01 |  |
+| 2 | 0.03 | 0.02 | 0.03 | 0.03 |
+| 5 | 0.08 | 0.05 | 0.10 | 0.08 |
+| 10 | 0.18 | 0.14 | 0.26 | 0.19 |
+| 20 | 0.78 | 0.49 | 0.85 | 0.74 |
+| 50 | 6.32 | 3.78 | 6.09 | 5.81 |
+
+#### Largest resident set of one process (MiB)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 5 | 7 | 15 |  |
+| 2 | 5 | 7 | 15 | 7 |
+| 5 | 5 | 7 | 16 | 7 |
+| 10 | 5 | 7 | 16 | 7 |
+| 20 | 5 | 8 | 16 | 8 |
+| 50 | 6 | 9 | 17 | 9 |
+
+#### UDP packets of the run (all of its seconds)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 2 | 2 | 14 |  |
+| 2 | 35 | 17 | 83 | 35 |
+| 5 | 322 | 224 | 605 | 321 |
+| 10 | 1,460 | 1,091 | 2,883 | 1,480 |
+| 20 | 6,395 | 5,394 | 15,248 | 6,431 |
+| 50 | 44,133 | 43,751 | 89,864 | 50,096 |
+
+#### UDP octets of the run (KiB)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 1 | 6 |  |
+| 2 | 4 | 6 | 26 | 6 |
+| 5 | 37 | 47 | 178 | 46 |
+| 10 | 161 | 209 | 838 | 210 |
+| 20 | 724 | 918 | 4,720 | 896 |
+| 50 | 4,855 | 6,396 | 25,967 | 6,245 |
 
 ## 結果の表
 

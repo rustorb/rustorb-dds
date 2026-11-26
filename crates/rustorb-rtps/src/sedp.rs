@@ -581,12 +581,29 @@ fn read_type_information(value: &[u8], e: Endianness) -> Option<TypeInformation>
 }
 
 /// Settings of [`Sedp`]: the timing of its reliable endpoints.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SedpConfig {
     /// For the built-in writers.
     pub writer: WriterConfig,
     /// For the built-in readers.
     pub reader: ReaderConfig,
+}
+
+impl Default for SedpConfig {
+    /// The built-in writers send a HEARTBEAT every 100 ms while a reader
+    /// has not acknowledged everything, so an announcement lost while the
+    /// remote did not know this participant yet (it drops what comes from
+    /// an unknown participant) is repaired at once, not a second later.
+    /// Nothing is sent once all is acknowledged.
+    fn default() -> Self {
+        SedpConfig {
+            writer: WriterConfig {
+                heartbeat_period: std::time::Duration::from_millis(100),
+                ..WriterConfig::default()
+            },
+            reader: ReaderConfig::default(),
+        }
+    }
 }
 
 /// A change in the remote endpoints or in the matches.

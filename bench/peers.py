@@ -52,6 +52,25 @@ def tool_args(mode, domain, transport, reliability, warmup, duration, sizes):
     return a
 
 
+def peak_rss_kib(pid):
+    """The largest resident set of a running process so far (VmHWM), in
+    KiB, or None once it is gone.
+
+    `wait4`'s ru_maxrss cannot be used: a child forked from Python starts
+    with Python's resident set as its high-water mark, and keeps it across
+    exec, so a small program shows the size of the runner instead of its
+    own. The runners read this while the program runs, every 50 ms.
+    """
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
 def json_lines(out):
     rs = []
     for line in out.splitlines():

@@ -47,6 +47,16 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   value (so `get_key_value` gives `None` on a keyless topic, as it did for
   loaned samples). The reliable round trip of 16 KiB went from about 160
   to 105 µs, and of 256 KiB from about 600 to 550 µs, in the container.
+- Discovery is faster (#106). The participant's first SPDP announcement,
+  and its answer to a new participant, go out at once rather than at the
+  thread's next wake-up (up to 50 ms); the SEDP writers send a HEARTBEAT
+  every 100 ms (was 1 s) while something is not acknowledged; and a
+  reliable reader's first ACKNACK to a newly matched writer asks for a
+  HEARTBEAT (final flag clear), so what the writer sent before the reader
+  knew it is asked for at once. In the container, 10 participants started
+  together all matched in about 30 ms instead of about 1 s.
+  `SedpConfig::default()` has the 100 ms period; `Spdp::next_deadline`
+  is now when an announcement is due.
 - A read or take with `max_samples` costs in proportion to `max_samples`,
   not to the samples in the reader (#110).
 - The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
@@ -62,6 +72,11 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   loaned samples), the same program for Cyclone DDS and Fast DDS in
   `bench/`, `bench/run.py` and `bench/report.py`, and the first results
   in docs/benchmark.md (#101 to #105, #109).
+- Discovery measurements (#106): the `disc` mode of `rustorb-dds-perf`
+  and of the Cyclone DDS and Fast DDS programs, and `bench/discovery.py`,
+  which starts N participants at once (alone or mixed with another
+  implementation) and gives the time until all matched, CPU time, memory
+  and the UDP traffic; the results are in docs/benchmark.md.
 
 ### Fixed
 

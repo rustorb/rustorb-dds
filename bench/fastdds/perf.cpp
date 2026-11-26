@@ -3,10 +3,11 @@
 // protocol and JSON output, so that bench/run.py measures both the same
 // way and they can talk to each other (rustorb-dds#104).
 //
-//   perf ping|pong|pub|sub [--domain N] [--size N | --sizes A,B,...]
+//   perf ping|pong|pub|sub|disc [--domain N] [--size N | --sizes A,B,...]
 //        [--reliability reliable|best-effort] [--transport udp|shm]
 //        [--warmup S] [--duration S] [--count N] [--rate N] [--depth N]
 //        [--reply-timeout MS] [--timeout S] [--label TEXT] [--json]
+//        [--participants N] [--start T]
 //
 // --transport udp gives the participant the UDPv4 transport only; shm
 // keeps Fast DDS's builtin transports, which go through shared memory to
@@ -41,11 +42,11 @@
 using namespace eprosima::fastdds::dds;
 using Clock = std::chrono::steady_clock;
 
-enum Mode { PING, PONG, PUB, SUB };
+enum Mode { PING, PONG, PUB, SUB, DISC };
 // The samples a best-effort sub keeps not yet taken (as rustorb-dds-perf).
 static const int READER_MAX_SAMPLES = 1000;
 
-static const char* mode_name[] = {"ping", "pong", "pub", "sub"};
+static const char* mode_name[] = {"ping", "pong", "pub", "sub", "disc"};
 
 static struct Opts {
     Mode mode = PING;
@@ -58,6 +59,8 @@ static struct Opts {
     int depth = -1;
     std::string label;
     bool json = false;
+    int participants = 2;
+    double start = 0;  // seconds since the epoch, 0: this process's start
 } o;
 
 static double now_s()
@@ -86,6 +89,7 @@ static void parse(int argc, char** argv)
     else if (m == "pong") o.mode = PONG;
     else if (m == "pub") o.mode = PUB;
     else if (m == "sub") o.mode = SUB;
+    else if (m == "disc") o.mode = DISC;
     else usage("unknown mode");
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
@@ -111,6 +115,8 @@ static void parse(int argc, char** argv)
         else if (a == "--reply-timeout") o.reply_timeout = std::stod(v) / 1000.0;
         else if (a == "--timeout") o.timeout = std::stod(v);
         else if (a == "--label") o.label = v;
+        else if (a == "--participants") o.participants = std::atoi(v.c_str());
+        else if (a == "--start") o.start = std::atof(v.c_str());
         else usage("unknown option");
     }
     if (o.sizes.empty()) {
@@ -155,6 +161,7 @@ static void setup()
         case PONG: w = "RustorbPerf_pong"; r = "RustorbPerf_ping"; break;
         case PUB: w = "RustorbPerf_data"; break;
         case SUB: r = "RustorbPerf_data"; break;
+        case DISC: w = r = "RustorbPerf_disc"; break;
     }
     DomainParticipantQos pq = PARTICIPANT_QOS_DEFAULT;
     if (o.transport == "udp") {
@@ -198,12 +205,15 @@ static void setup()
         rq.history().kind = KEEP_LAST_HISTORY_QOS;
         rq.history().depth = depth;
     }
+    Topic* wt = nullptr;
     if (w) {
-        Topic* t = participant->create_topic(w, type.get_type_name(), TOPIC_QOS_DEFAULT);
-        writer = participant->create_publisher(PUBLISHER_QOS_DEFAULT)->create_datawriter(t, wq);
+        wt = participant->create_topic(w, type.get_type_name(), TOPIC_QOS_DEFAULT);
+        writer = participant->create_publisher(PUBLISHER_QOS_DEFAULT)->create_datawriter(wt, wq);
     }
     if (r) {
-        Topic* t = participant->create_topic(r, type.get_type_name(), TOPIC_QOS_DEFAULT);
+        Topic* t = wt && std::string(w) == r
+                ? wt
+                : participant->create_topic(r, type.get_type_name(), TOPIC_QOS_DEFAULT);
         reader = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT)->create_datareader(t, rq);
     }
     if ((w && !writer) || (r && !reader)) {
@@ -449,16 +459,61 @@ static void subscribe()
     }
 }
 
+static double wall_s()
+{
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// disc: the seconds from the common start until the participant is
+// created and until its writer and reader match those of all the
+// participants (its own included); stays to --duration for the others.
+static void discovery()
+{
+    double start = o.start > 0 ? o.start : wall_s();
+    setup();
+    double created = wall_s() - start, matched = -1;
+    int32_t all = o.participants;
+    while (matched < 0 && wall_s() < start + o.duration) {
+        if (writer_matched() >= all && reader_matched() >= all)
+            matched = wall_s() - start;
+        else
+            sleep_s(0.001);
+    }
+    // Then stays, for the others.
+    sleep_s(start + o.duration - wall_s());
+    if (o.json) {
+        std::printf("{\"tool\":\"rustorb-dds-perf\",\"impl\":\"fastdds\",\"version\":\"%d.%d.%d\",\"mode\":\"disc\","
+                    "\"transport\":\"%s\",\"participants\":%d,\"create_s\":%.6f,\"writer_matched\":%d,"
+                    "\"reader_matched\":%d",
+                    FASTRTPS_VERSION_MAJOR, FASTRTPS_VERSION_MINOR, FASTRTPS_VERSION_MICRO, o.transport.c_str(), o.participants, created, writer_matched(),
+                    reader_matched());
+        if (matched >= 0)
+            std::printf(",\"match_s\":%.6f", matched);
+        if (!o.label.empty())
+            std::printf(",\"label\":\"%s\"", o.label.c_str());
+        std::printf("}\n");
+    } else if (matched >= 0) {
+        std::printf("disc: participant at %.3f s, all matched at %.3f s\n", created, matched);
+    } else {
+        std::printf("disc: matched %d writers and %d readers of %d\n", writer_matched(), reader_matched(), all);
+    }
+}
+
 int main(int argc, char** argv)
 {
     parse(argc, argv);
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
-    setup();
+    if (o.mode == DISC) {
+        discovery();
+    } else {
+        setup();
+    }
     switch (o.mode) {
         case PING: ping(); break;
         case PONG: pong(); break;
         case PUB: publish(); break;
         case SUB: subscribe(); break;
+        case DISC: break;
     }
     participant->delete_contained_entities();
     DomainParticipantFactory::get_instance()->delete_participant(participant);

@@ -5,7 +5,7 @@ Each case runs two processes, a measuring one (ping, sub) and its other
 side (pong, pub), of one DDS implementation or of two (interop), with
 the same sizes, QoS, warm-up and duration. Every result is one line of
 JSON in <out>/results.jsonl, with the CPU time and the largest resident
-set of both processes (from wait4), and <out>/machine.json says where
+set of both processes (CPU from wait4, memory from /proc VmHWM), and <out>/machine.json says where
 and with what it ran. bench/report.py makes tables of them.
 
     bench/run.py                          # every peer found, every case
@@ -77,6 +77,7 @@ class Proc:
         self.usage = None
         self.status = None
         self.out = ""
+        self.peak_kib = None
 
     def wait(self, timeout):
         deadline = time.monotonic() + timeout
@@ -89,6 +90,9 @@ class Proc:
                     chunks.append(data)
             except (BlockingIOError, TypeError):
                 pass
+            peak = peers.peak_rss_kib(self.p.pid)
+            if peak is not None:
+                self.peak_kib = peak
             pid, status, usage = os.wait4(self.p.pid, os.WNOHANG)
             if pid:
                 break
@@ -117,11 +121,11 @@ class Proc:
     def resources(self, prefix):
         if self.usage is None:
             return {}
-        # ru_maxrss is in KiB on Linux.
+        # VmHWM read while it ran (see peers.peak_rss_kib), not ru_maxrss.
         return {
             f"{prefix}_cpu_user_s": round(self.usage.ru_utime, 3),
             f"{prefix}_cpu_sys_s": round(self.usage.ru_stime, 3),
-            f"{prefix}_max_rss_kib": self.usage.ru_maxrss,
+            f"{prefix}_max_rss_kib": self.peak_kib,
         }
 
 
