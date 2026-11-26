@@ -624,13 +624,15 @@ impl ReaderState {
         if let Some(p) = payload.as_mut() {
             drop_missing_padding(&mut p.bytes);
         }
+        // The payload of a lifecycle change (a key) stays to find its
+        // instance; a value's octets move into the change uncopied.
         let change = if lifecycle {
             instance::Change::Lifecycle {
                 disposed: status & STATUS_DISPOSED != 0,
                 unregistered: status & STATUS_UNREGISTERED != 0,
             }
         } else {
-            match &payload {
+            match payload.take() {
                 #[cfg(feature = "shm")]
                 Some(p)
                     if p.kind == PayloadKind::Data && rustorb_rtps::shm::is_reference(&p.bytes) =>
@@ -642,7 +644,7 @@ impl ReaderState {
                     ))
                 }
                 Some(p) if p.kind == PayloadKind::Data => {
-                    instance::Change::Write(instance::Payload::Owned(p.bytes.clone()))
+                    instance::Change::Write(instance::Payload::Owned(p.bytes))
                 }
                 _ => return None,
             }

@@ -458,11 +458,10 @@ impl ReaderHistory {
                 }
                 inst.state = InstanceState::Alive;
                 inst.writers.insert(c.writer);
-                // A sample in shared memory is not kept past its take:
-                // its octets are copied for a keyed topic, and not kept
-                // for a keyless one, which needs no key.
-                inst.last_value =
-                    (!v.is_loaned() || c.instance != InstanceHandle::KEYLESS).then(|| v.to_vec());
+                // Kept for a keyed topic only: a keyless one needs no
+                // key, and copying each sample cost a copy of every
+                // large sample (#112).
+                inst.last_value = (c.instance != InstanceHandle::KEYLESS).then(|| v.to_vec());
                 payload = Some(v);
             }
             Change::Lifecycle {
