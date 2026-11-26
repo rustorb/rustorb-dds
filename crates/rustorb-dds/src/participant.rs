@@ -3557,12 +3557,14 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>, discovery: bool) {
             shared.acknowledged.notify_all();
         }
     }
+    // The readers' waiters and listeners first: sending (an ACKNACK, say)
+    // takes a while, and the data does not wait for it (#111).
+    shared.flush();
     for (bytes, to) in out {
         // Discovery and reliable traffic are repeated, so a datagram
         // that cannot be sent now is sent again later.
         let _ = shared.send(&bytes, &to);
     }
-    shared.flush();
 }
 
 fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {

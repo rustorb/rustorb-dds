@@ -19,8 +19,10 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 - User traffic is handled on the thread that received it (UDP or shared
   memory) rather than handed to the participant's thread, when it comes
   alone and nothing received before it is still waiting; a burst still
-  goes to the participant's thread. The round trip of a small sample
-  went from about 123 µs to 93 µs in the container (#111).
+  goes to the participant's thread. The readers' waiters and listeners
+  are told of new data before what is due is sent (an ACKNACK, say).
+  The round trip of a small reliable sample went from about 123 µs to
+  85 µs in the container (#111).
   `UdpTransport::open_with` takes a `UserHandler`; `injector` gives a
   `Sink`, which `ShmTransport::open` takes; `Incoming::handled` says how
   many user datagrams were handled.
