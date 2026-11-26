@@ -52,6 +52,8 @@ repeats, and how much the repeats differed.
   and their percentiles are medians of those.
 - Throughput is what the subscriber received over `--duration` seconds,
   best-effort or reliable (KEEP_ALL, 100 samples), for 32 B to 1 MiB.
+  The sub takes 256 samples at a time; a best-effort sub keeps at most
+  1000 not yet taken, in all three programs.
 
 The numbers of a shared machine (a container, a CI runner) vary between
 runs: compare the cases of one run with each other, not with another

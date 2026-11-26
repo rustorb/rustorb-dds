@@ -23,7 +23,9 @@ target/release/rustorb-dds-perf pub --size 4096
   a reliable writer is KEEP_ALL with at most `--depth` (100) samples, so
   it is held back by the acknowledgments. `sub` counts what it receives
   in `--duration` seconds after a warm-up, and the samples lost (gaps in
-  the sequence numbers).
+  the sequence numbers). It takes at most 256 samples at a time; a
+  best-effort sub keeps at most 1000 not yet taken (KEEP_ALL with
+  `max_samples`), so one slower than its pub loses the rest.
 - `--transport udp` turns the shared memory off, `shm` (the default)
   uses it to the rustorb-dds participants of the host, `loan` writes
   loaned samples of `RustorbPerf::FixedN` (N a power of two, 32 to

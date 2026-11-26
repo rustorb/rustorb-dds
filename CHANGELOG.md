@@ -16,6 +16,13 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   the sockets cannot hold, instead of the queue growing without end
   (#110). `UdpTransport::injector` and `ShmTransport::open` take a
   `SyncSender`.
+- A read or take with `max_samples` costs in proportion to `max_samples`,
+  not to the samples in the reader (#110).
+- The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
+  Cyclone DDS program does), and the best-effort sub of all three
+  programs keeps at most 1000 samples not yet taken (KEEP_ALL with
+  `max_samples`): one slower than its pub loses samples instead of
+  keeping them all (#110).
 
 ### Added
 

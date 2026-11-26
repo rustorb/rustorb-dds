@@ -46,6 +46,7 @@ bench/report.py bench/results/<名前> --svg docs/benchmark
 best-effort:
 
 - 全力で送ると、rustorb-dds の受け手の最大 RSS が 1.9 GB（rustorb → rustorb、UDP）、2.7 GB（Fast DDS → rustorb）まで増えた。受け取ったが処理していないものが際限なく溜まっている。1 回は 90 秒の間に 1 標本も受け取れなかった（Fast DDS → rustorb、256 KiB）。→ #110
+  - 2026-11-26 調べた結果: 溜まっていたのは KEEP_ALL で上限のない reader の history（QoS どおり）で、rustorb-dds の sub が送り手より遅いため。測定ツールの sub はそれを一度に全部 take していた。今は rustorb-dds の sub も Cyclone DDS 版と同じく 256 標本ずつ take し、3 実装とも best-effort の sub は take していない標本を 1000 までにしている（入らない分は lost）。受信 queue にも上限を設けた。この表の数値はその前のもの。
 - 取りこぼし数は送り手の速さで決まるので、実装どうしの比較には向かない（表は下に載せる）。
 
 測っている途中で、速い writer が受け手の共有メモリの ring を溢れさせると write が「the shared memory buffer is full」で失敗する不具合が見つかり、直した（ring に入らないメッセージは UDP で失われたのと同じ扱い。docs/shm.md のとおり）。

@@ -25,6 +25,8 @@
 
 #define MAX_SIZES 64
 #define MAX_TAKE 256
+/* The samples a best-effort sub keeps not yet taken (as rustorb-dds-perf). */
+#define READER_MAX_SAMPLES 1000
 
 enum mode { PING, PONG, PUB, SUB };
 
@@ -182,9 +184,12 @@ static void setup(void)
   } else {
     dds_qset_history(wq, DDS_HISTORY_KEEP_LAST, depth);
   }
-  if (throughput)
+  if (throughput) {
     dds_qset_history(rq, DDS_HISTORY_KEEP_ALL, 0);
-  else
+    /* A best-effort sub slower than its pub drops what does not fit. */
+    if (!o.reliable)
+      dds_qset_resource_limits(rq, READER_MAX_SAMPLES, DDS_LENGTH_UNLIMITED, DDS_LENGTH_UNLIMITED);
+  } else
     dds_qset_history(rq, DDS_HISTORY_KEEP_LAST, depth);
   if (w) {
     wtopic = dds_create_topic(participant, &RustorbPerf_Sample_desc, w, NULL, NULL);
