@@ -7,6 +7,7 @@ and how to read them are in [docs/benchmark.md](../docs/benchmark.md).
 | Peer | Program | Where it comes from |
 |---|---|---|
 | `rustorb` | `rustorb-dds-perf` ([crates/rustorb-dds-perf](../crates/rustorb-dds-perf)) | this repository |
+| `rustorb-listener` | `rustorb-dds-perf --listener`: latency only, answered in the listener as `ddsperf` does | this repository |
 | `cyclonedds` | [`cyclonedds/perf.c`](cyclonedds/perf.c), type code from `idlc` | Ubuntu 24.04 `cyclonedds-dev` (0.10.4) |
 | `fastdds` | [`fastdds/perf.cpp`](fastdds/perf.cpp), type code from `fastddsgen` | Ubuntu 24.04 `libfastrtps-dev`, `fastddsgen` (2.11.2) |
 | `cyclonedds-ddsperf` | Cyclone DDS's own `ddsperf`, topic `KS` | Ubuntu 24.04 `cyclonedds-tools` |

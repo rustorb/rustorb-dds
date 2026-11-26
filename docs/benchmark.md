@@ -32,6 +32,7 @@ bench/report.py bench/results/<名前> --svg docs/benchmark
 - 貸し出し（zero-copy）は大きさによらず 93〜110 µs で、1 MiB でも UDP（3.2 ms）の 1/30。
 - 16 KiB を超えると rustorb-dds の往復が Cyclone より大きく伸びる（16 KiB: rustorb 143 µs、Cyclone 85 µs。256 KiB: 0.80 ms と 0.46 ms）。→ #112
 - Cyclone の ddsperf は 18 µs。listener の中で返事を書くので、待っているスレッドを起こす手順がない。上の 3 つのプログラムとは手順が違う。
+- `rustorb-dds-perf --listener`（bench の `rustorb-listener`）は ddsperf と同じく listener の中で返事を書く。別の測定（`bench/run.py --peers rustorb,rustorb-listener,cyclonedds,cyclonedds-ddsperf`、32 B、reliable）で、WaitSet の 85 µs が listener では 51 µs になった（SHM も 50 µs）。同じ測定で Cyclone DDS は 66 µs、ddsperf は 17 µs。→ #111
 - Fast DDS は best-effort で 256 KiB 以上（rustorb との組でも）の往復が全部失われ、reliable の 512 KiB 以上で中央値が 10 ms を超えた。Fast DDS 2.11 の UDP での大きな標本の扱いと思われる（相手は black box なので確かめていない）。
 
 スループット（reliable）:

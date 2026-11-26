@@ -31,6 +31,10 @@ target/release/rustorb-dds-perf pub --size 4096
   loaned samples of `RustorbPerf::FixedN` (N a power of two, 32 to
   1 MiB) whose payload is not touched.
 - `--json` prints one line of JSON for each result.
+- `--listener` (ping, pong) receives in the reader's listener and
+  answers from it, on the thread that delivered the sample, as Cyclone
+  DDS's `ddsperf` does; without it the program waits on a WaitSet and
+  takes, as the Cyclone DDS and Fast DDS programs do.
 
 The type is `RustorbPerf::Sample` of `bench/idl/Perf.idl`; the programs
 in `bench/cyclonedds` and `bench/fastdds` take the same options and

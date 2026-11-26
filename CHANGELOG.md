@@ -34,6 +34,10 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   #113). `WriterConfig` has `acknowledgment_batch` (1 by default, as
   before) and `acknowledgment_delay`; `ReliableWriter` has
   `request_acknowledgment`.
+- `rustorb-dds-perf --listener` (ping, pong) answers in the reader's
+  listener, as Cyclone DDS's `ddsperf` does, and `bench/run.py` has it as
+  the latency-only peer `rustorb-listener`. The round trip of 32 octets
+  went from 85 µs (WaitSet) to 51 µs in the container (#111).
 - Large samples (#112): the HEARTBEAT sent after a change goes in the same
   message as long as the transport carries it, instead of a second
   datagram for a change of about 16 KiB; on Linux, a UDP datagram is

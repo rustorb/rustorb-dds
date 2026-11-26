@@ -15,11 +15,14 @@ mod stats;
 mod types;
 
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rustorb_dds::{
-    DataReader, DataReaderQos, DataWriter, DataWriterQos, DomainParticipant, Error, History,
-    ParticipantConfig, Reliability, ResourceLimits, StatusCondition, StatusMask, WaitSet,
+    DataReader, DataReaderListener, DataReaderQos, DataWriter, DataWriterQos, DomainParticipant,
+    Error, History, ParticipantConfig, Reliability, ResourceLimits, StatusCondition, StatusMask,
+    WaitSet,
 };
 use stats::Summary;
 use types::{Fixed, FixedVisitor, Sample, Stamped};
@@ -53,6 +56,8 @@ options:
   --timeout S         seconds to wait for the other side (60)
   --label TEXT        put into the JSON as \"label\"
   --json              one line of JSON for each result on stdout
+  --listener          ping, pong: receive in the reader's listener and
+                      answer from it, as ddsperf does (else a WaitSet)
   --security FILE     DDS Security, the dds.sec.* properties in FILE, one
                       name=value per line (feature `security`)
 ";
@@ -110,6 +115,7 @@ struct Opts {
     timeout: Duration,
     label: Option<String>,
     json: bool,
+    listener: bool,
     security: Option<std::path::PathBuf>,
 }
 
@@ -140,6 +146,7 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
         timeout: Duration::from_secs(60),
         label: None,
         json: false,
+        listener: false,
         security: None,
     };
     let mut it = args[1..].iter();
@@ -184,10 +191,14 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
             "--timeout" => o.timeout = secs(value()?)?,
             "--label" => o.label = Some(value()?.to_string()),
             "--json" => o.json = true,
+            "--listener" => o.listener = true,
             "--security" => o.security = Some(value()?.into()),
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown option {other:?}\n\n{USAGE}").into()),
         }
+    }
+    if o.listener && matches!(mode, Mode::Pub | Mode::Sub) {
+        return Err("--listener is for ping and pong".into());
     }
     if o.sizes.is_empty() {
         o.sizes = match mode {
@@ -229,6 +240,31 @@ trait Endpoint {
     fn condition(&self) -> Option<StatusCondition>;
     /// How many remote endpoints match the writer and the reader.
     fn matched(&self) -> (u32, u32);
+    /// Writes as [`Endpoint::send`] does, from any thread.
+    fn sender(&self) -> SendFn;
+    /// Hands what comes to `f`, in the reader's listener.
+    fn listen(&self, f: RecvFn);
+}
+
+/// Writes a sample: number, stamp and payload octets.
+type SendFn = Arc<dyn Fn(u64, u64, usize) -> rustorb_dds::Result<()> + Send + Sync>;
+/// Takes what a listener received.
+type RecvFn = Arc<dyn Fn(&[Got]) + Send + Sync>;
+
+/// A reader listener that takes what is available and hands it on.
+struct Taker<T> {
+    f: RecvFn,
+    take: fn(&DataReader<T>, &mut Vec<Got>),
+}
+
+impl<T: Send + Sync> DataReaderListener<T> for Taker<T> {
+    fn on_data_available(&self, r: &DataReader<T>) {
+        let mut got = Vec::new();
+        (self.take)(r, &mut got);
+        if !got.is_empty() {
+            (self.f)(&got);
+        }
+    }
 }
 
 /// The most samples taken at once (as `MAX_TAKE` of
@@ -240,11 +276,19 @@ const MAX_TAKE: usize = 256;
 const READER_MAX_SAMPLES: usize = 1000;
 
 struct Endpoints<W, R> {
-    writer: Option<DataWriter<W>>,
+    writer: Option<Arc<DataWriter<W>>>,
     reader: Option<DataReader<R>>,
 }
 
 impl<W, R> Endpoints<W, R> {
+    /// The writer, not kept alive: a listener that holds it would keep
+    /// it past the participant.
+    fn weak_writer(&self) -> std::sync::Weak<DataWriter<W>> {
+        Arc::downgrade(self.ep_writer())
+    }
+    fn ep_writer(&self) -> &Arc<DataWriter<W>> {
+        self.writer.as_ref().expect("a writer")
+    }
     fn wait_reader(&self, timeout: Duration) -> bool {
         self.reader
             .as_ref()
@@ -269,6 +313,33 @@ impl<W, R> Endpoints<W, R> {
     }
 }
 
+/// Takes at most MAX_TAKE samples: a reader that fell behind is not
+/// decoded all at once, and the caller counts the seconds between takes.
+fn take_plain(r: &DataReader<Sample>, out: &mut Vec<Got>) {
+    let batch = r.max_samples(MAX_TAKE).take();
+    out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
+        seq: d.seq(),
+        stamp: d.stamp(),
+        len: d.payload_len(),
+    }));
+}
+
+fn take_loaned<T: Fixed>(r: &DataReader<T>, out: &mut Vec<Got>) {
+    let batch = r.take_loaned_max(MAX_TAKE);
+    out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
+        seq: d.seq(),
+        stamp: d.stamp(),
+        len: d.payload_len(),
+    }));
+}
+
+fn send_loaned<T: Fixed>(w: &DataWriter<T>, seq: u64, stamp: u64) -> rustorb_dds::Result<()> {
+    let mut s = w.loan_sample()?;
+    // The data is left as it is: what the slot had, or zeros.
+    s.set(seq, stamp);
+    w.write_loaned(s)
+}
+
 /// `RustorbPerf::Sample`, serialized.
 struct Plain {
     ep: Endpoints<Sample, Sample>,
@@ -289,15 +360,7 @@ impl Endpoint for Plain {
     }
     fn recv(&mut self, out: &mut Vec<Got>) {
         if let Some(r) = &self.ep.reader {
-            // MAX_TAKE at a time: a reader that fell behind is not
-            // decoded all at once, and the caller counts the seconds
-            // between takes.
-            let batch = r.max_samples(MAX_TAKE).take();
-            out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
-                seq: d.seq(),
-                stamp: d.stamp(),
-                len: d.payload_len(),
-            }));
+            take_plain(r, out);
         }
     }
     fn wait(&self, timeout: Duration) -> bool {
@@ -308,6 +371,29 @@ impl Endpoint for Plain {
     }
     fn matched(&self) -> (u32, u32) {
         self.ep.matched_counts()
+    }
+    fn sender(&self) -> SendFn {
+        let w = self.ep.weak_writer();
+        let sample = Mutex::new(Sample::default());
+        Arc::new(move |seq, stamp, len| {
+            let w = w.upgrade().ok_or(Error::AlreadyDeleted)?;
+            let mut s = sample.lock().unwrap_or_else(|e| e.into_inner());
+            s.seq = seq;
+            s.stamp = stamp;
+            s.payload.resize(len, 0x5a);
+            w.write(&s)
+        })
+    }
+    fn listen(&self, f: RecvFn) {
+        if let Some(r) = &self.ep.reader {
+            r.set_listener(
+                Taker {
+                    f,
+                    take: take_plain,
+                },
+                StatusMask::DATA_AVAILABLE,
+            );
+        }
     }
 }
 
@@ -318,20 +404,11 @@ struct Loaned<T: Fixed> {
 
 impl<T: Fixed> Endpoint for Loaned<T> {
     fn send(&mut self, seq: u64, stamp: u64, _len: usize) -> rustorb_dds::Result<()> {
-        let w = self.ep.writer.as_ref().expect("a writer");
-        let mut s = w.loan_sample()?;
-        // The data is left as it is: what the slot had, or zeros.
-        s.set(seq, stamp);
-        w.write_loaned(s)
+        send_loaned(self.ep.writer.as_ref().expect("a writer"), seq, stamp)
     }
     fn recv(&mut self, out: &mut Vec<Got>) {
         if let Some(r) = &self.ep.reader {
-            let batch = r.take_loaned_max(MAX_TAKE);
-            out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
-                seq: d.seq(),
-                stamp: d.stamp(),
-                len: d.payload_len(),
-            }));
+            take_loaned(r, out);
         }
     }
     fn wait(&self, timeout: Duration) -> bool {
@@ -342,6 +419,24 @@ impl<T: Fixed> Endpoint for Loaned<T> {
     }
     fn matched(&self) -> (u32, u32) {
         self.ep.matched_counts()
+    }
+    fn sender(&self) -> SendFn {
+        let w = self.ep.weak_writer();
+        Arc::new(move |seq, stamp, _len| {
+            let w = w.upgrade().ok_or(Error::AlreadyDeleted)?;
+            send_loaned(&w, seq, stamp)
+        })
+    }
+    fn listen(&self, f: RecvFn) {
+        if let Some(r) = &self.ep.reader {
+            r.set_listener(
+                Taker {
+                    f,
+                    take: take_loaned::<T>,
+                },
+                StatusMask::DATA_AVAILABLE,
+            );
+        }
     }
 }
 
@@ -364,11 +459,11 @@ impl Spec<'_> {
             Some(name) => {
                 self.participant.register_type::<W>()?;
                 let t = self.participant.create_topic::<W>(name)?;
-                Some(
+                Some(Arc::new(
                     self.participant
                         .create_publisher()?
                         .create_datawriter_with_qos(&t, self.writer_qos.clone())?,
-                )
+                ))
             }
             None => None,
         };
@@ -660,36 +755,200 @@ fn ping(o: &Opts, eps: &mut [Box<dyn Endpoint>]) -> Result<(), BoxError> {
                 }
             }
         }
-        let s = Summary::of(&mut rtts);
-        let us = |ns: u64| ns as f64 / 1000.0;
-        if o.json {
-            let mut f = o.common(size);
-            f.extend([
-                ("count", J::U(s.count as u64)),
-                ("lost", J::U(lost)),
-                ("seconds", J::F(o.duration.as_secs_f64())),
-                ("rtt_min_us", J::F(us(s.min))),
-                ("rtt_mean_us", J::F(us(s.mean))),
-                ("rtt_p50_us", J::F(us(s.p50))),
-                ("rtt_p90_us", J::F(us(s.p90))),
-                ("rtt_p99_us", J::F(us(s.p99))),
-                ("rtt_p999_us", J::F(us(s.p999))),
-                ("rtt_max_us", J::F(us(s.max))),
-            ]);
-            println!("{}", json(&f));
-        } else {
-            println!(
-                "{:>8} {:>8} {:>6} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1}",
-                size,
-                s.count,
-                lost,
-                us(s.p50),
-                us(s.p90),
-                us(s.p99),
-                us(s.p999),
-                us(s.max)
-            );
+        report(o, size, &mut rtts, lost);
+    }
+    Ok(())
+}
+
+/// Prints the round trips of one size.
+fn report(o: &Opts, size: usize, rtts: &mut [u64], lost: u64) {
+    let s = Summary::of(rtts);
+    let us = |ns: u64| ns as f64 / 1000.0;
+    if o.json {
+        let mut f = o.common(size);
+        f.extend([
+            ("count", J::U(s.count as u64)),
+            ("lost", J::U(lost)),
+            ("seconds", J::F(o.duration.as_secs_f64())),
+            ("rtt_min_us", J::F(us(s.min))),
+            ("rtt_mean_us", J::F(us(s.mean))),
+            ("rtt_p50_us", J::F(us(s.p50))),
+            ("rtt_p90_us", J::F(us(s.p90))),
+            ("rtt_p99_us", J::F(us(s.p99))),
+            ("rtt_p999_us", J::F(us(s.p999))),
+            ("rtt_max_us", J::F(us(s.max))),
+        ]);
+        println!("{}", json(&f));
+    } else {
+        println!(
+            "{:>8} {:>8} {:>6} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1}",
+            size,
+            s.count,
+            lost,
+            us(s.p50),
+            us(s.p90),
+            us(s.p99),
+            us(s.p999),
+            us(s.max)
+        );
+    }
+}
+
+/// The round trips of `ping --listener`: the listener sends the next
+/// ping as soon as the pong of the last one comes.
+struct Round {
+    /// The endpoint of the size being measured.
+    ep: usize,
+    seq: u64,
+    sent: Instant,
+    warm_end: Instant,
+    end: Instant,
+    count: Option<u64>,
+    rtts: Vec<u64>,
+    done: bool,
+}
+
+fn ping_listener(o: &Opts, eps: &mut [Box<dyn Endpoint>]) -> Result<(), BoxError> {
+    wait_for_match(eps, o)?;
+    let start = Instant::now();
+    let stamp = move |t: Instant| t.duration_since(start).as_nanos() as u64;
+    let now = Instant::now();
+    let round = Arc::new((
+        Mutex::new(Round {
+            ep: usize::MAX,
+            seq: 0,
+            sent: now,
+            warm_end: now,
+            end: now,
+            count: o.count,
+            rtts: Vec::new(),
+            done: true,
+        }),
+        Condvar::new(),
+    ));
+    let senders: Vec<SendFn> = eps.iter().map(|e| e.sender()).collect();
+    for (i, e) in eps.iter().enumerate() {
+        let round = round.clone();
+        let send = senders[i].clone();
+        e.listen(Arc::new(move |got: &[Got]| {
+            let (lock, cv) = &*round;
+            let mut r = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if r.done || r.ep != i || !got.iter().any(|g| g.seq == r.seq) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= r.warm_end {
+                let rtt = now.duration_since(r.sent).as_nanos() as u64;
+                r.rtts.push(rtt);
+            }
+            if now >= r.end || r.count.is_some_and(|c| r.rtts.len() as u64 >= c) {
+                r.done = true;
+                cv.notify_all();
+                return;
+            }
+            r.seq += 1;
+            r.sent = Instant::now();
+            let (seq, sent, len) = (r.seq, r.sent, got[0].len);
+            drop(r);
+            // A failed write shows as a lost round trip.
+            let _ = send(seq, stamp(sent), len);
+        }));
+    }
+    if !o.json {
+        println!(
+            "{:>8} {:>8} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9}  (round trip, us)",
+            "size", "count", "lost", "p50", "p90", "p99", "p99.9", "max"
+        );
+    }
+    let (lock, cv) = &*round;
+    let mut seq = 0u64;
+    for (i, &size) in o.sizes.iter().enumerate() {
+        let ep = if eps.len() == 1 { 0 } else { i };
+        let warm_end = Instant::now() + o.warmup;
+        let end = warm_end + o.duration;
+        let mut lost = 0u64;
+        // The first ping of the size, and one after each lost round trip.
+        let mut r = lock.lock().unwrap_or_else(|e| e.into_inner());
+        r.ep = ep;
+        r.warm_end = warm_end;
+        r.end = end;
+        r.rtts.clear();
+        r.done = false;
+        loop {
+            seq = seq.max(r.seq) + 1;
+            r.seq = seq;
+            r.sent = Instant::now();
+            let sent = r.sent;
+            drop(r);
+            if let Err(e) = senders[ep](seq, stamp(sent), size)
+                && !matches!(e, Error::Timeout)
+            {
+                return Err(e.into());
+            }
+            r = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // Wait while the listener keeps the round trips going.
+            loop {
+                if r.done {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= end {
+                    r.done = true;
+                    break;
+                }
+                let deadline = (r.sent + o.reply_timeout).min(end);
+                if now >= deadline {
+                    break;
+                }
+                r = cv
+                    .wait_timeout(r, deadline - now)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            if r.done {
+                break;
+            }
+            if Instant::now() >= warm_end {
+                lost += 1;
+            }
         }
+        let mut rtts = std::mem::take(&mut r.rtts);
+        seq = r.seq;
+        drop(r);
+        report(o, size, &mut rtts, lost);
+    }
+    Ok(())
+}
+
+fn pong_listener(o: &Opts, eps: &mut [Box<dyn Endpoint>]) -> Result<(), BoxError> {
+    let echoed = Arc::new(AtomicU64::new(0));
+    for e in eps.iter() {
+        let send = e.sender();
+        let echoed = echoed.clone();
+        e.listen(Arc::new(move |got: &[Got]| {
+            for g in got {
+                if send(g.seq, g.stamp, g.len).is_ok() {
+                    echoed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+    let deadline = Instant::now() + o.timeout;
+    let mut matched = false;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        if matched {
+            if all_gone(eps) {
+                break;
+            }
+        } else if eps.iter().any(|e| e.matched() != (0, 0)) {
+            matched = true;
+        } else if Instant::now() >= deadline {
+            return Err(format!("pong: no ping in {:?}", o.timeout).into());
+        }
+    }
+    if !o.json {
+        println!("pong: sent back {} samples", echoed.load(Ordering::Relaxed));
     }
     Ok(())
 }
@@ -869,6 +1128,8 @@ fn run(args: &[String]) -> Result<(), BoxError> {
     let p = participant(&o)?;
     let mut eps = endpoints(&o, &p)?;
     match o.mode {
+        Mode::Ping if o.listener => ping_listener(&o, &mut eps),
+        Mode::Pong if o.listener => pong_listener(&o, &mut eps),
         Mode::Ping => ping(&o, &mut eps),
         Mode::Pong => pong(&o, &mut eps),
         Mode::Pub => publish(&o, &mut eps),
@@ -908,6 +1169,8 @@ mod tests {
         assert!(parse(&args("pub --sizes 1,2")).is_err());
         assert!(parse(&args("ping --transport loan --size 100")).is_err());
         assert!(parse(&args("ping --transport loan --size 4096")).is_ok());
+        assert!(parse(&args("pong --listener")).unwrap().listener);
+        assert!(parse(&args("sub --listener")).is_err());
         assert!(parse(&args("bogus")).is_err());
     }
 

@@ -133,6 +133,10 @@ def cases(args, available):
     for kind in args.kinds.split(","):
         sizes = args.sizes or (LATENCY_SIZES if kind == "latency" else THROUGHPUT_SIZES)
         for a, b in pairs(args, available):
+            if kind != "latency" and (
+                getattr(a, "latency_only", False) or getattr(b, "latency_only", False)
+            ):
+                continue
             transports = [t for t in a.transports if t in b.transports]
             if a is not b:
                 # Between implementations only UDP is common.
