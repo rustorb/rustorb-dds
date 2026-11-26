@@ -1529,6 +1529,10 @@ impl Shared {
                 };
                 match r {
                     Ok(()) => sent = true,
+                    // The peer's ring is full: the message is lost on the
+                    // way, as a datagram can be (docs/shm.md), and not an
+                    // error of the write.
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => sent = true,
                     Err(e) => last_err = Some(e),
                 }
             }

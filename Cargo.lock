@@ -810,6 +810,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustorb-dds-perf"
+version = "0.3.0"
+dependencies = [
+ "rustorb-dds",
+ "rustorb-typesupport",
+ "rustorb-xtypes",
+]
+
+[[package]]
 name = "rustorb-dds-python"
 version = "0.3.0"
 dependencies = [
