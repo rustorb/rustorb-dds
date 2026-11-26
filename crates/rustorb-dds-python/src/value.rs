@@ -13,7 +13,7 @@
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyString, PyTuple};
 use rustorb_dds::{DynamicData, DynamicDataFactory, DynamicType, MEMBER_ID_INVALID};
 use rustorb_xtypes::type_object::*;
 use rustorb_xtypes::types::{Primitive, Type};
@@ -130,25 +130,22 @@ pub(crate) fn to_py<'py>(py: Python<'py>, d: &DynamicData) -> PyResult<Bound<'py
                 Type::Array(a) => (&a.element.ty, a.dimensions.clone()),
                 _ => unreachable!("a collection"),
             };
-            let n = d.get_item_count();
             if octets(element) {
                 let byte = matches!(
                     resolve(element),
                     Type::Primitive(rustorb_xtypes::types::Primitive::Byte)
                 );
-                let bytes = (0..n)
-                    .map(|i| {
-                        if byte {
-                            d.get_byte_value(i)
-                        } else {
-                            d.get_uint8_value(i)
-                        }
-                    })
-                    .collect::<Result<Vec<u8>, _>>()
-                    .map_err(err)?;
+                // All at once: DynamicData keeps octets as bytes
+                // (rustorb-dds#120).
+                let bytes = if byte {
+                    d.get_byte_values(ME)
+                } else {
+                    d.get_uint8_values(ME)
+                }
+                .map_err(err)?;
                 PyBytes::new(py, &bytes).into_any()
             } else {
-                let items = (0..n)
+                let items = (0..d.get_item_count())
                     .map(|i| to_py(py, d.get_value(i).map_err(err)?))
                     .collect::<PyResult<Vec<_>>>()?;
                 nest(py, items, &dims)?
@@ -308,6 +305,41 @@ fn fill(d: &mut DynamicData, v: &Bound<'_, PyAny>) -> PyResult<()> {
             }
         }
         TK_SEQUENCE | TK_ARRAY => {
+            // bytes (or a bytearray) for octets: all at once
+            // (rustorb-dds#120).
+            let element = match ty.as_type() {
+                Type::Sequence(s) => Some(&s.element.ty),
+                Type::Array(a) if a.dimensions.len() == 1 => Some(&a.element.ty),
+                _ => None,
+            };
+            if let Some(element) = element.filter(|e| octets(e)) {
+                let bytes = if let Ok(b) = v.cast::<PyBytes>() {
+                    Some(b.as_bytes().to_vec())
+                } else if let Ok(b) = v.cast::<PyByteArray>() {
+                    Some(b.to_vec())
+                } else {
+                    None
+                };
+                if let Some(bytes) = bytes {
+                    if d.get_kind() == TK_ARRAY && bytes.len() != d.get_item_count() as usize {
+                        return Err(PyValueError::new_err(format!(
+                            "an array of {} elements, not {}",
+                            d.get_item_count(),
+                            bytes.len()
+                        )));
+                    }
+                    let byte = matches!(
+                        resolve(element),
+                        Type::Primitive(rustorb_xtypes::types::Primitive::Byte)
+                    );
+                    return if byte {
+                        d.set_byte_values(ME, &bytes)
+                    } else {
+                        d.set_uint8_values(ME, &bytes)
+                    }
+                    .map_err(err);
+                }
+            }
             let mut items = Vec::new();
             // The dimensions of an array after the first are nested lists.
             let depth = match ty.as_type() {
