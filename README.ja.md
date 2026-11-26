@@ -2,7 +2,7 @@
 
 Rust 製の DDS（Data Distribution Service）実装です。[rustorb](https://github.com/rustorb/rustorb) プロジェクトの一部です（[English](README.md)）。
 
-**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL・TRANSIENT・PERSISTENT の durability（[docs/durability.md](docs/durability.md)）、パーティション、LIVELINESS と DEADLINE、通信状態の WaitSet・Condition・listener、Content Filtered Topic、DDS-RPC の要求と応答にも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable、transient-local、liveliness でも通ります。ROS 2 のデモの talker・listener とも `std_msgs/msg/String` を両方向にやり取りでき、サービス `add_two_ints` も両方向に呼べます（[interop](interop/)）。OMG の各規格への対応状況は [docs/compliance.md](docs/compliance.md) にあります。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
+**現状: 初期段階です。** 参加者どうしが SPDP と SEDP で互いを見つけ、reliable または best-effort の writer と reader で UDPv4 の上でサンプルをやり取りできます。キー付きのインスタンス、データグラムに収まらない大きなサンプル（DATA_FRAG）、TRANSIENT_LOCAL・TRANSIENT・PERSISTENT の durability（[docs/durability.md](docs/durability.md)）、パーティション、LIVELINESS と DEADLINE、通信状態の WaitSet・Condition・listener、Content Filtered Topic、DDS-RPC の要求と応答にも対応しています。Cyclone DDS、Fast DDS と hello world が両方向で通ります。reliable、transient-local、liveliness でも通ります。ROS 2 のデモの talker・listener とも `std_msgs/msg/String` を両方向にやり取りでき、サービス `add_two_ints` も両方向に呼べます（[interop](interop/)）。OMG の各規格への対応状況は [docs/compliance.md](docs/compliance.md) にあります。Cyclone DDS、Fast DDS とのレイテンシとスループットの比較は [docs/benchmark.md](docs/benchmark.md)（[bench](bench/)）にあります。計画は [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111) にあります。
 
 hello world は、2 つの端末で次を実行すると試せます。
 

@@ -11,3 +11,4 @@ __pycache__/
 /ruby/lib/rustorb/dds/*.bundle
 /ruby/vendor
 /ruby/*.gem
+bench/results/*/log.txt

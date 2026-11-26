@@ -286,7 +286,12 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     info = machine(available)
     info["args"] = {k: v for k, v in vars(args).items() if k not in ("out", "list")}
-    (out / "machine.json").write_text(json.dumps(info, indent=2) + "\n")
+    old = out / "machine.json"
+    if old.exists():
+        # Another run into the same directory: keep what the first did.
+        before = json.loads(old.read_text())
+        info["earlier_runs"] = before.pop("earlier_runs", []) + [before]
+    old.write_text(json.dumps(info, indent=2) + "\n")
     cpus = cpu_sets(not args.no_pin)
     failed = []
     roudi = None

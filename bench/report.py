@@ -30,7 +30,15 @@ def load(run):
 
 
 def group_name(r):
-    pair = r["impl"] if r["impl"] == r["peer"] else f"{r['impl']}→{r['peer']}"
+    """The column: the implementation, or for two of them who sends to
+    whom: "ping↔pong" for latency, "pub→sub" for throughput (the
+    measuring side is ping or sub, `impl`; the other is `peer`)."""
+    if r["impl"] == r["peer"]:
+        pair = r["impl"]
+    elif r["kind"] == "latency":
+        pair = f"{r['impl']}↔{r['peer']}"
+    else:
+        pair = f"{r['peer']}→{r['impl']}"
     return f"{pair} {r['transport']}"
 
 
@@ -43,8 +51,16 @@ def medians(rows, kind, reliability, field):
         v = r.get(field)
         if v is None:
             continue
+        if kind == "latency" and field.startswith("rtt_") and not r.get("count"):
+            # Every round trip lost: no time to show.
+            v = math.nan
         acc[group_name(r)][r["size"]].append(v)
-    return {g: {s: statistics.median(v) for s, v in by.items()} for g, by in acc.items()}
+    def med(v):
+        ok = [x for x in v if not math.isnan(x)]
+        # More runs with nothing than with something: nothing.
+        return statistics.median(ok) if len(ok) * 2 > len(v) else math.nan
+
+    return {g: {s: med(v) for s, v in by.items()} for g, by in acc.items()}
 
 
 def spread(rows, kind, reliability, field):
@@ -54,11 +70,16 @@ def spread(rows, kind, reliability, field):
     for r in rows:
         if r["kind"] == kind and r["reliability"] == reliability and r.get(field) is not None:
             acc[(group_name(r), r["size"])].append(r[field])
-    worst = 0.0
+    spreads = []
     for v in acc.values():
         if len(v) > 1 and statistics.median(v) > 0:
-            worst = max(worst, (max(v) - min(v)) / statistics.median(v) * 100)
-    return worst
+            spreads.append((max(v) - min(v)) / statistics.median(v) * 100)
+    if not spreads:
+        return "one run of each"
+    return (
+        f"the runs of a cell differed by {statistics.median(spreads):.0f} % "
+        f"(median over the cells), {max(spreads):.0f} % at most"
+    )
 
 
 def order(groups):
@@ -68,7 +89,9 @@ def order(groups):
     def key(g):
         pair, t = g.rsplit(" ", 1)
         first = pair.split("→")[0]
-        return (("→" in pair), rank.get(first, 9), pair, tr.get(t, 9))
+        first = first.split("↔")[0]
+        mixed = "→" in pair or "↔" in pair
+        return (mixed, rank.get(first, 9), pair, tr.get(t, 9))
 
     return sorted(groups, key=key)
 
@@ -76,6 +99,8 @@ def order(groups):
 def fmt(v, digits=1):
     if v is None:
         return "–"
+    if isinstance(v, float) and math.isnan(v):
+        return "lost"
     if v >= 1000:
         return f"{v:,.0f}"
     return f"{v:.{digits}f}"
@@ -132,13 +157,18 @@ def resources(rows, kind):
     return "\n".join(out)
 
 
-PALETTE = ["#2a6fdb", "#e0663a", "#2e9e5b", "#9b59b6", "#c99a06", "#17a2b8", "#d63384", "#6c757d"]
+PALETTE = [
+    "#2a6fdb", "#e0663a", "#2e9e5b", "#9b59b6", "#c99a06",
+    "#17a2b8", "#d63384", "#6c757d", "#8c564b", "#111111",
+]
 
 
 def svg_chart(data, title, ylabel, path):
     """A log-log line chart: x the size, y the value, a line a group."""
+    # One implementation each: the pairs would crowd it (see the tables).
+    data = {g: v for g, v in data.items() if "→" not in g and "↔" not in g}
     groups = order(data)
-    pts = [(s, v) for g in groups for s, v in data[g].items() if v and v > 0]
+    pts = [(s, v) for g in groups for s, v in data[g].items() if v and v > 0 and not math.isnan(v)]
     if not pts:
         return
     W, H, L, R, T, B = 760, 420, 70, 220, 40, 50
@@ -178,8 +208,8 @@ def svg_chart(data, title, ylabel, path):
     )
     for i, g in enumerate(groups):
         c = PALETTE[i % len(PALETTE)]
-        dash = ' stroke-dasharray="5 3"' if "→" in g else ""
-        line = [(X(s), Y(v)) for s, v in sorted(data[g].items()) if v and v > 0]
+        dash = ' stroke-dasharray="5 3"' if ("→" in g or "↔" in g) else ""
+        line = [(X(s), Y(v)) for s, v in sorted(data[g].items()) if v and v > 0 and not math.isnan(v)]
         if not line:
             continue
         d = " ".join(f"{x:.1f},{y:.1f}" for x, y in line)
@@ -222,12 +252,12 @@ def main():
             if d:
                 print(f"\n### Latency, {rel}: round trip, {what} (µs)\n")
                 print(table(d))
-                print(f"\nRuns differed by up to {spread(rows, 'latency', rel, field):.0f} %.")
+                print(f"\nIn this table {spread(rows, 'latency', rel, field)}.")
         d = medians(rows, "throughput", rel, "mbit_per_s")
         if d:
             print(f"\n### Throughput, {rel} (Mbit/s of payload received)\n")
             print(table(d))
-            print(f"\nRuns differed by up to {spread(rows, 'throughput', rel, 'mbit_per_s'):.0f} %.")
+            print(f"\nIn this table {spread(rows, 'throughput', rel, 'mbit_per_s')}.")
             lost = medians(rows, "throughput", rel, "lost")
             if any(v for g in lost.values() for v in g.values()):
                 print(f"\nSamples lost, {rel}:\n")
