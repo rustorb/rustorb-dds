@@ -13,6 +13,7 @@ traffic (SPDP, SEDP and their HEARTBEATs and ACKNACKs, liveliness).
     bench/discovery.py                                  # everything, 3 times
     bench/discovery.py --peers rustorb --counts 2,10    # some of it
     bench/discovery.py --mixed rustorb,cyclonedds       # half and half
+    bench/discovery.py --security none,encrypt          # with DDS Security
 
 Every run is one line of JSON in <out>/discovery.jsonl, and a table of
 medians is printed (`--report <out>` prints it again).
@@ -86,18 +87,22 @@ class Capture:
         return packets, octets
 
 
-def run_once(group, n, domain, tmp):
-    """One run of n processes: `group` gives the peer of each, in turn."""
+def run_once(group, n, domain, tmp, security=None):
+    """One run of n processes: `group` gives the peer of each, in turn;
+    `security` the DDS Security setting (peers.SECURITY) or None."""
     seconds = stay(n)
+    sec = peers.security_files(security, peers.BUILD / "security") if security else None
     cap = Capture(Path(tmp) / f"d{domain}.pcap")
     start = time.time()
     procs = []
     for i in range(n):
         p = group[i % len(group)]
         out = open(Path(tmp) / f"out{i}", "w+")
-        procs.append((p, out, subprocess.Popen(argv_of(p, n, domain, start, seconds),
-                                               stdout=out, stderr=subprocess.STDOUT,
-                                               env={**os.environ, **p.env("udp")})))
+        cmd = peers.Cmd(argv_of(p, n, domain, start, seconds), p.env("udp"))
+        if sec:
+            cmd = p.secure(cmd, sec)
+        procs.append((p, out, subprocess.Popen(cmd.argv, stdout=out, stderr=subprocess.STDOUT,
+                                               env={**os.environ, **cmd.env})))
     cpu = 0.0
     peak = {}
     status = {}
@@ -131,6 +136,7 @@ def run_once(group, n, domain, tmp):
     r = {
         "participants": n,
         "peers": [p.name for p in group],
+        "security": security,
         "all_matched": all(m is not None for m in matched),
         "match_s_max": max((m for m in matched if m is not None), default=None),
         "match_s_median": statistics.median(m for m in matched if m is not None)
@@ -147,7 +153,8 @@ def run_once(group, n, domain, tmp):
 
 
 def label(r):
-    return "+".join(r["peers"]) if len(r["peers"]) > 1 else r["peers"][0]
+    name = "+".join(r["peers"]) if len(r["peers"]) > 1 else r["peers"][0]
+    return name + (f" {r['security']}" if r.get("security") else "")
 
 
 def report(rows):
@@ -198,6 +205,9 @@ def main():
     ap.add_argument("--domain", type=int, default=60)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--report", type=Path, help="print the tables of an earlier run")
+    ap.add_argument("--security", default="",
+                    help="DDS Security settings, comma-separated: none,auth,sign,encrypt "
+                         "(each group with each; mixed groups too)")
     ap.add_argument("--strict", action="store_true",
                     help="exit with 1 if some run did not all match (for CI)")
     args = ap.parse_args()
@@ -207,6 +217,9 @@ def main():
         return 0
     groups = [[n] for n in args.peers.split(",") if n]
     groups += [g.split(",") for g in args.mixed.split(";") if g]
+    securities = [None if k == "none" else k for k in args.security.split(",") if k] or [None]
+    if any(securities):
+        peers.Rustorb.with_security = True
     made = {}
     for g in groups:
         for n in g:
@@ -228,14 +241,16 @@ def main():
     k = 0
     with tempfile.TemporaryDirectory() as tmp, open(out / "discovery.jsonl", "a") as f:
         for rep in range(1, args.repeat + 1):
-            for g in groups:
+            for g, security in [(g, k) for g in groups for k in securities]:
+                if security and not all(p.security for p in g):
+                    continue
                 for n in counts:
                     if len(g) > 1 and n < 2:
                         continue
                     # A domain for each run: nothing left of the one before.
                     domain = args.domain + k % 40
                     k += 1
-                    r = run_once(g, n, domain, tmp)
+                    r = run_once(g, n, domain, tmp, security)
                     r["repeat"] = rep
                     r["domain"] = domain
                     rows.append(r)

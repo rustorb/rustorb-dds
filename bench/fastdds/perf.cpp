@@ -163,7 +163,10 @@ static void setup()
         case SUB: r = "RustorbPerf_data"; break;
         case DISC: w = r = "RustorbPerf_disc"; break;
     }
-    DomainParticipantQos pq = PARTICIPANT_QOS_DEFAULT;
+    // The factory's default, which an XML profile (DDS Security, say,
+    // from FASTRTPS_DEFAULT_PROFILES_FILE) may have set.
+    DomainParticipantFactory::get_instance()->load_profiles();
+    DomainParticipantQos pq = DomainParticipantFactory::get_instance()->get_default_participant_qos();
     if (o.transport == "udp") {
         pq.transport().use_builtin_transports = false;
         pq.transport().user_transports.push_back(

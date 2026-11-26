@@ -75,6 +75,15 @@ sample is written, so this is the discovery traffic (SPDP, SEDP, their
 HEARTBEATs and ACKNACKs, liveliness) over the run's 5 to 20 seconds.
 The results are one JSON line per run in `<out>/discovery.jsonl`.
 
+DDS Security (#107): `--security none,auth,sign,encrypt` on either script
+runs each case (UDP only) or group with each setting, for the peers that
+have it (rustorb, cyclonedds, fastdds; rustorb-dds-perf is then built
+with the feature `security`). `auth` authenticates and checks the
+permissions but protects nothing; `sign` and `encrypt` protect
+discovery, liveliness, metadata and data with AES-GMAC or AES-GCM. The
+files come from `interop/security/gen.sh` (into `target/bench/security`),
+and every participant has the same identity.
+
 The numbers of a shared machine (a container, a CI runner) vary between
 runs: compare the cases of one run with each other, not with another
 run. The CI job `bench` runs every case for one second to check that

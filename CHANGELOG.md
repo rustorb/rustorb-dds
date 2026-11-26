@@ -57,6 +57,13 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   together all matched in about 30 ms instead of about 1 s.
   `SedpConfig::default()` has the 100 ms period; `Spdp::next_deadline`
   is now when an announcement is due.
+- DDS Security: a handshake request that comes before the requester's
+  SPDP announcement is kept (the last one of each participant, for at
+  most 256 participants) and answered once the participant is
+  discovered, rather than dropped and left for the requester to send
+  again 500 ms later. With 10 participants started together, all
+  authenticated and matched in about 90 ms instead of about 520 ms in the
+  container (#107).
 - A read or take with `max_samples` costs in proportion to `max_samples`,
   not to the samples in the reader (#110).
 - The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
@@ -77,6 +84,13 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   which starts N participants at once (alone or mixed with another
   implementation) and gives the time until all matched, CPU time, memory
   and the UDP traffic; the results are in docs/benchmark.md.
+- DDS Security measurements (#107): `bench/run.py --security` and
+  `bench/discovery.py --security` with `none`, `auth` (authentication
+  and access control, nothing protected), `sign` and `encrypt`, for
+  rustorb-dds, Cyclone DDS and Fast DDS; `interop/security/gen.sh` takes
+  the protection kind of discovery, liveliness, metadata and data as a
+  third argument and writes `peer.properties`. The Fast DDS program
+  starts from the default participant QoS of its XML profiles.
 
 ### Fixed
 

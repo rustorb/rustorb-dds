@@ -79,7 +79,15 @@ class Proc:
         self.out = ""
         self.peak_kib = None
 
-    def wait(self, timeout):
+    def sample(self):
+        """Reads the largest resident set so far, while it runs."""
+        peak = peers.peak_rss_kib(self.p.pid)
+        if peak is not None:
+            self.peak_kib = peak
+
+    def wait(self, timeout, also=()):
+        """Waits for the end, reading its memory and that of `also` (the
+        other side, still running) meanwhile."""
         deadline = time.monotonic() + timeout
         chunks = []
         os.set_blocking(self.p.stdout.fileno(), False)
@@ -90,9 +98,8 @@ class Proc:
                     chunks.append(data)
             except (BlockingIOError, TypeError):
                 pass
-            peak = peers.peak_rss_kib(self.p.pid)
-            if peak is not None:
-                self.peak_kib = peak
+            for p in (self, *also):
+                p.sample()
             pid, status, usage = os.wait4(self.p.pid, os.WNOHANG)
             if pid:
                 break
@@ -163,6 +170,21 @@ def cases(args, available):
                             out.append(
                                 (f"throughput-{pair}-{t}-{r}-{s}", kind, a, b, t, r, [s])
                             )
+    if args.security:
+        # Each case with each setting of DDS Security, for the peers
+        # that have it: "none" is the same program without it.
+        secure = []
+        for c in out:
+            if c[4] != "udp":
+                continue
+            for k in args.security.split(","):
+                if k == "none":
+                    secure.append((c[0] + "-sec-none",) + c[1:] + ("none",))
+                elif c[2].security and c[3].security:
+                    secure.append((c[0] + f"-sec-{k}",) + c[1:] + (k,))
+        out = secure
+    else:
+        out = [c + (None,) for c in out]
     if args.only:
         rx = re.compile(args.only)
         out = [c for c in out if rx.search(c[0])]
@@ -183,7 +205,7 @@ def pairs(args, available):
 
 
 def run_case(case, args, log, cpus):
-    name, kind, a, b, transport, reliability, sizes = case
+    name, kind, a, b, transport, reliability, sizes, security = case
     common = dict(
         domain=args.domain,
         transport=transport,
@@ -200,12 +222,16 @@ def run_case(case, args, log, cpus):
         measure = a.sub(**common)
         other = b.pub(**common)
         limit = args.warmup + args.duration + 90
+    if security and security != "none":
+        sec = peers.security_files(security, peers.BUILD / "security")
+        measure = a.secure(measure, sec)
+        other = b.secure(other, sec)
     log.write(f"\n=== {name}\n")
     # The other side first: a pong (or pub) waits for its ping (or sub).
     o = Proc(other.argv, other.env, cpus[1], log)
     time.sleep(0.2)
     m = Proc(measure.argv, measure.env, cpus[0], log)
-    m_status = m.wait(limit)
+    m_status = m.wait(limit, also=[o])
     o_status = o.wait(30)
     results = []
     if m_status in a.ok_status:
@@ -218,6 +244,8 @@ def run_case(case, args, log, cpus):
                 transport=transport,
                 reliability=reliability,
             )
+            if security:
+                r["security"] = security
             r.update(m.resources("measure"))
             r.update(o.resources("other"))
             results.append(r)
@@ -265,6 +293,9 @@ def main():
     ap.add_argument("--domain", type=int, default=42)
     ap.add_argument("--interop", action="store_true", help="also rustorb with each other peer")
     ap.add_argument("--only", help="regex of the case names to run")
+    ap.add_argument("--security", default="",
+                    help="DDS Security settings, comma-separated: none,auth,sign,encrypt "
+                         "(UDP only; each case with each)")
     ap.add_argument("--no-pin", action="store_true", help="do not pin the sides to CPUs")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--list", action="store_true")
@@ -287,6 +318,8 @@ def main():
     if not todo:
         print("[bench] nothing to run", file=sys.stderr)
         return 1
+    if args.security:
+        peers.Rustorb.with_security = True
     for p in available:
         p.build()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")

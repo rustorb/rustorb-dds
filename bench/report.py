@@ -39,7 +39,11 @@ def group_name(r):
         pair = f"{r['impl']}↔{r['peer']}"
     else:
         pair = f"{r['peer']}→{r['impl']}"
-    return f"{pair} {r['transport']}"
+    t = r["transport"]
+    if r.get("security"):
+        # bench/run.py --security: the setting after the transport.
+        t += "+" + r["security"]
+    return f"{pair} {t}"
 
 
 def medians(rows, kind, reliability, field):
@@ -91,7 +95,9 @@ def order(groups):
         first = pair.split("→")[0]
         first = first.split("↔")[0]
         mixed = "→" in pair or "↔" in pair
-        return (mixed, rank.get(first, 9), pair, tr.get(t, 9))
+        t, _, sec = t.partition("+")
+        security = {"": 0, "none": 0, "auth": 1, "sign": 2, "encrypt": 3}
+        return (mixed, rank.get(first, 9), pair, tr.get(t, 9), security.get(sec, 9))
 
     return sorted(groups, key=key)
 

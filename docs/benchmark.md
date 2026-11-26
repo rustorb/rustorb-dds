@@ -1,6 +1,6 @@
 # 性能測定
 
-rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。discovery の速さも測った（段 2、#106）。測り方の道具は [bench/](../bench/README.md) にある。
+rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。discovery の速さ（段 2、#106）と DDS Security の上乗せ（#107）も測った。測り方の道具は [bench/](../bench/README.md) にある。
 
 **ここの数値はコンテナで測った。** CPU 4 個を他と分け合い、周波数も割り込みも固定できないので、回ごとに揺れる。同じ実行の中での相対比較として読み、別の機械や別の実行の数値と並べないこと。公開用の数値を専用の機械で測るかどうかは、あとで決める（#100）。
 
@@ -139,6 +139,89 @@ bench/discovery.py --report bench/results/<名前>
 | 10 | 161 | 209 | 838 | 210 |
 | 20 | 724 | 918 | 4,720 | 896 |
 | 50 | 4,855 | 6,396 | 25,967 | 6,245 |
+
+## DDS Security（#107）
+
+[docs/security.md](security.md) の組み込みプラグインで、Security なし（none）、認証とアクセス制御だけ（auth: governance の保護をすべて NONE）、署名（sign: discovery、liveliness、metadata、data を SIGN、つまり AES-GMAC）、暗号化（encrypt: 同じく ENCRYPT、AES-GCM）を比べた。RTPS メッセージ全体の保護（rtps_protection_kind）はどれも NONE。証明書と governance・permissions は `interop/security/gen.sh` で作り、どの参加者も同じ identity（EC P-256）にした。Cyclone DDS と Fast DDS もそれぞれ自分の Security を有効にして測った（実装をまたぐ組は測っていない）。UDP、reliable、各 3 回の中央値。
+
+```sh
+bench/run.py --peers rustorb,cyclonedds,fastdds --security none,auth,sign,encrypt \
+  --reliability reliable --sizes 32,4096,65536 --out bench/results/<名前>
+bench/discovery.py --peers rustorb,cyclonedds,fastdds --mixed '' \
+  --security none,auth,sign,encrypt --counts 2,5,10,20 --out bench/results/<名前>
+```
+
+数値は [bench/results/2026-11-26-container-security](../bench/results/2026-11-26-container-security)（上と同じコンテナ。rustorb-dds は PR #118 の途中、handshake の直しの後）。この回の throughput の「other」側の RSS は取れていない（`run.py` の不具合。直した）。
+
+わかったこと:
+
+- 小さな標本（32 B）の往復は、署名・暗号化で rustorb-dds が 77 → 95〜101 µs、Cyclone DDS が 71 → 108〜111 µs、Fast DDS が 95 → 336〜347 µs。
+- 64 KiB では rustorb-dds の署名・暗号化が 645〜763 µs で、Cyclone DDS（417〜441 µs）の約 1.6 倍。スループットも 64 KiB で rustorb 2.4〜2.7 Gbit/s、Cyclone 3.7〜4.0 Gbit/s。→ #119
+- 認証だけ（保護なし）でも、rustorb-dds は 4 KiB 以上で少し遅くなる（64 KiB のスループット 9.2 → 8.2 Gbit/s）。Cyclone DDS と Fast DDS は Security なしと変わらない。→ #119
+- discovery（handshake を含めて、すべてマッチするまで）: 測り始めたとき、rustorb-dds は 10 者で約 0.5 s かかっていた。相手の SPDP より先に届いた handshake の要求を捨てていて、送り手が 500 ms 後に送り直すまで待っていたため。いまは、その要求を相手を見つけるまで取っておいて、見つけたらすぐ答える（参加者 256 まで、相手ごとに最後の 1 つ）。直したあとは 10 者で 84〜95 ms、20 者で 283〜384 ms。Cyclone DDS は 2 者でも約 330 ms、10 者 530〜710 ms、20 者 1.5 s。Fast DDS は 10 者で約 1.1 s、20 者の署名・暗号化では 3 回とも 20 s のうちにすべてはマッチしなかった。
+- handshake の通信量は rustorb-dds と Cyclone DDS が同じくらい（20 者の暗号化で 5.6 MiB と 6.4 MiB）、Fast DDS は約 110 MiB（すべてはマッチしないまま送り直し続けた）。
+- 1 プロセスの最大 RSS は、Security で rustorb-dds が 6 → 8 MiB、Cyclone DDS が 8 → 13 MiB、Fast DDS が 16 → 22〜29 MiB。
+
+### 往復とスループット
+
+#### Latency, reliable: round trip, median (µs)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 76.5 | 82.0 | 95.1 | 101.1 | 70.7 | 73.7 | 107.8 | 110.9 | 94.8 | 97.2 | 347.3 | 336.1 |
+| 4 KiB | 78.1 | 91.1 | 119.0 | 138.8 | 75.9 | 74.6 | 112.9 | 118.7 | 96.3 | 106.1 | 352.3 | 334.2 |
+| 64 KiB | 184.6 | 203.6 | 645.0 | 762.9 | 151.4 | 149.8 | 416.5 | 441.4 | 130.6 | 140.9 | 656.8 | 702.8 |
+
+In this table the runs of a cell differed by 8 % (median over the cells), 28 % at most.
+
+#### Latency, reliable: round trip, 99th percentile (µs)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 191.0 | 179.8 | 215.9 | 222.3 | 156.8 | 157.5 | 223.6 | 253.8 | 204.3 | 202.5 | 966.0 | 1,208 |
+| 4 KiB | 180.8 | 222.3 | 250.4 | 303.4 | 175.5 | 173.2 | 226.8 | 235.6 | 200.7 | 198.1 | 1,127 | 1,370 |
+| 64 KiB | 417.0 | 493.8 | 1,654 | 2,179 | 357.0 | 296.6 | 1,086 | 1,225 | 274.1 | 291.1 | 2,493 | 2,653 |
+
+In this table the runs of a cell differed by 18 % (median over the cells), 68 % at most.
+
+#### Throughput, reliable (Mbit/s of payload received)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 21.4 | 20.9 | 16.2 | 16.1 | 34.0 | 35.2 | 11.8 | 11.6 | 4.6 | 4.7 | 3.8 | 3.8 |
+| 4 KiB | 2,643 | 2,375 | 1,329 | 1,254 | 2,754 | 2,796 | 1,341 | 1,382 | 353.6 | 376.5 | 252.0 | 256.6 |
+| 64 KiB | 9,153 | 8,161 | 2,723 | 2,378 | 11,879 | 11,685 | 3,973 | 3,710 | 3,332 | 3,198 | 1,689 | 1,867 |
+
+In this table the runs of a cell differed by 8 % (median over the cells), 42 % at most.
+
+### Discovery
+
+#### Until all matched, the last participant (ms, median of runs)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 5 | 13 | 12 | 14 | 9 | 332 | 332 | 335 | 14 | 29 | 31 | 28 |
+| 5 | 11 | 29 | 33 | 27 | 23 | 448 | 601 | 646 | 187 | 290 | 291 | 295 |
+| 10 | 23 | 84 | 95 | 93 | 40 | 532 | 691 | 709 | 125 | 1,053 | 1,116 | 1,088 |
+| 20 | 90 | 283 | 367 | 384 | 197 | 1,478 | 1,558 | 1,472 | 241 | 1,299 | 3,989 (3 of 3 not all matched) | 2,365 (3 of 3 not all matched) |
+
+#### CPU time of all the processes over the run (s)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 0.03 | 0.04 | 0.04 | 0.05 | 0.01 | 0.05 | 0.05 | 0.05 | 0.03 | 0.06 | 0.06 | 0.06 |
+| 5 | 0.08 | 0.13 | 0.17 | 0.15 | 0.05 | 0.20 | 0.23 | 0.23 | 0.09 | 0.24 | 0.29 | 0.29 |
+| 10 | 0.17 | 0.41 | 0.50 | 0.49 | 0.13 | 0.64 | 0.77 | 0.75 | 0.26 | 0.80 | 1.40 | 1.38 |
+| 20 | 0.81 | 1.76 | 2.32 | 2.38 | 0.53 | 2.15 | 2.92 | 2.92 | 0.89 | 3.67 | 9.92 (3 of 3 not all matched) | 9.25 (3 of 3 not all matched) |
+
+#### UDP octets of the run (KiB)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 4 | 18 | 31 | 31 | 6 | 20 | 30 | 31 | 26 | 58 | 69 | 69 |
+| 5 | 37 | 160 | 298 | 299 | 50 | 201 | 325 | 328 | 180 | 762 | 1,013 | 1,019 |
+| 10 | 165 | 707 | 1,321 | 1,342 | 201 | 912 | 1,464 | 1,479 | 824 | 6,126 | 8,717 | 9,192 |
+| 20 | 733 | 3,012 | 5,622 | 5,745 | 915 | 3,955 | 6,406 | 6,507 | 4,717 | 59,474 | 116,087 (3 of 3 not all matched) | 111,849 (3 of 3 not all matched) |
 
 ## 結果の表
 
