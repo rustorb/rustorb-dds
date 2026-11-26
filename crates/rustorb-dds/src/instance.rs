@@ -335,6 +335,9 @@ pub(crate) struct ReaderHistory {
     /// DDSI-RTPS 2.5, 8.4.11).
     last_sn: HashMap<Guid, SequenceNumber>,
     arrivals: u64,
+    /// Whether the topic has a key: only then is the last value of an
+    /// instance kept.
+    keyed: bool,
 }
 
 impl ReaderHistory {
@@ -354,7 +357,14 @@ impl ReaderHistory {
             instances: BTreeMap::new(),
             last_sn: HashMap::new(),
             arrivals: 0,
+            keyed: true,
         }
+    }
+
+    /// Says whether the topic has a key (by default it has).
+    pub(crate) fn keyed(mut self, keyed: bool) -> Self {
+        self.keyed = keyed;
+        self
     }
 
     /// The last value received for each instance, to recognise a key
@@ -459,9 +469,9 @@ impl ReaderHistory {
                 inst.state = InstanceState::Alive;
                 inst.writers.insert(c.writer);
                 // Kept for a keyed topic only: a keyless one needs no
-                // key, and copying each sample cost a copy of every
-                // large sample (#112).
-                inst.last_value = (c.instance != InstanceHandle::KEYLESS).then(|| v.to_vec());
+                // key, and keeping it cost a copy of every sample (#112).
+                // (The handle does not tell: a key can hash to zeros.)
+                inst.last_value = self.keyed.then(|| v.to_vec());
                 payload = Some(v);
             }
             Change::Lifecycle {
@@ -893,6 +903,17 @@ mod tests {
         assert_eq!(r.last_value(&h(1)), Some(&[12][..]));
         assert!(r.select(StateFilter::ANY, None, true).is_empty());
         assert!(r.last_value(&h(1)).is_none());
+    }
+
+    #[test]
+    fn last_value_kept_for_a_keyed_topic_only() {
+        // A key may hash to zeros, the handle of a keyless topic.
+        let mut r = ReaderHistory::new(History::KeepAll);
+        r.accept(write(w(1), 1, 0, 5));
+        assert_eq!(r.last_value(&h(0)), Some(&[5][..]));
+        let mut r = ReaderHistory::new(History::KeepAll).keyed(false);
+        r.accept(write(w(1), 1, 0, 5));
+        assert!(r.last_value(&h(0)).is_none());
     }
 
     #[test]

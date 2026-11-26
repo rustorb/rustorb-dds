@@ -406,7 +406,8 @@ impl ReaderState {
             liveliness: HashMap::new(),
             liveliness_changed: LivelinessChangedStatus::default(),
             deadlines: Deadlines::new(qos.deadline),
-            samples: ReaderHistory::with_limits(qos.history, qos.resource_limits),
+            samples: ReaderHistory::with_limits(qos.history, qos.resource_limits)
+                .keyed(keys.keyed()),
             keys,
             matched_status: MatchedStatus::default(),
             changes: StatusMask::NONE,
