@@ -1256,6 +1256,19 @@ impl ReliableReader {
         out
     }
 
+    /// The ACKNACKs (and NACK_FRAGs) of [`Self::poll`] for every writer
+    /// something came from, at once, without waiting for its HEARTBEAT:
+    /// for a reader about to go away, so that a writer that waits for
+    /// acknowledgments does not wait for one that will not come.
+    pub fn acknowledge_now(&mut self, now: Instant) -> Vec<Outgoing> {
+        for p in self.writers.values_mut() {
+            if p.next_expected > SequenceNumber(1) || !p.pending.is_empty() {
+                p.ack_at = Some(now);
+            }
+        }
+        self.poll(now)
+    }
+
     /// When [`Self::poll`] next has something to do, if no message comes
     /// in before.
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -1357,6 +1370,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_reader_acknowledges_at_once_when_asked() {
+        // The writer sent 1..=2 without a HEARTBEAT that asks for an
+        // answer; the reader, going away, acknowledges them anyway.
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_change(None, payload(1));
+        w.add_change(None, payload(2));
+        let sent = w.poll(t);
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        r.poll(t);
+        let data: Vec<_> = subs(&sent)
+            .into_iter()
+            .filter(|s| matches!(s, Submessage::Data(_)))
+            .collect();
+        for s in &data {
+            if let Submessage::Data(d) = s {
+                r.handle_data(wguid(), d, None);
+            }
+        }
+        assert!(r.poll(t).is_empty());
+        let out = r.acknowledge_now(t);
+        assert!(matches!(
+            &subs(&out)[..],
+            [Submessage::AckNack(a)] if a.final_flag && a.reader_sn_state.base() == SequenceNumber(3)
+        ));
+        acknacks(&mut w, &out, t);
+        assert!(w.is_all_acked());
+        // A writer nothing came from is not answered.
+        let mut idle = ReliableReader::new(rguid(3), VendorId::UNKNOWN, ReaderConfig::default());
+        idle.add_writer(wguid(), loc(1), vec![], t);
+        idle.poll(t);
+        assert!(idle.acknowledge_now(t).is_empty());
     }
 
     #[test]

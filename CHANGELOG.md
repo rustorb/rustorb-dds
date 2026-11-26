@@ -65,6 +65,12 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   bindings, which pass samples as `DynamicData`, round-trip 64 KiB of
   octets in about 0.2 ms instead of 6 to 8 ms; Python converts `bytes`
   in one step too (#120).
+- Deleting a participant makes its reliable readers acknowledge what
+  came at once, rather than only in answer to the writers' next
+  HEARTBEAT: an OpenDDS writer waiting for acknowledgments was left
+  waiting for a reader that took its samples and left right away
+  (`opendds-v2-to-rustorb-v1-mutable` failed once in CI).
+  `ReliableReader::acknowledge_now` does it.
 - A reliable writer sends a HEARTBEAT to a newly matched reliable reader
   at once, even with nothing written, rather than only when the reader's
   first ACKNACK asks for one. An OpenDDS reader whose first ACKNACK was
