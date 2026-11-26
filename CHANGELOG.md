@@ -28,8 +28,7 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   many user datagrams were handled.
 - A writer of the participant asks its reliable readers to acknowledge
   every 16 samples, and 1 ms after the last one, rather than with each
-  sample: the HEARTBEAT sent with the others has the final flag set
-  (DDSI-RTPS 2.5, 8.4.2.2.3). A blocked write and
+  sample: the HEARTBEAT sent with the others has the final flag set. A blocked write and
   `wait_for_acknowledgments` ask at once. Reliable throughput of 256-octet
   samples went from about 156 to 241 Mbit/s in the container (#111,
   #113). `WriterConfig` has `acknowledgment_batch` (1 by default, as
