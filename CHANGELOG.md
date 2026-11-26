@@ -8,6 +8,15 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ## [Unreleased]
 
+### Changed
+
+- The datagrams received and not yet handled are at most
+  `rustorb_rtps::udp::INCOMING_CAPACITY` (1024): when the participant's
+  thread falls behind, the receive threads wait and the kernel drops what
+  the sockets cannot hold, instead of the queue growing without end
+  (#110). `UdpTransport::injector` and `ShmTransport::open` take a
+  `SyncSender`.
+
 ### Added
 
 - Performance measurements (#100): `rustorb-dds-perf` (round-trip latency

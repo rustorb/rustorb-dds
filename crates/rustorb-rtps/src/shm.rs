@@ -337,7 +337,7 @@ impl ShmTransport {
     pub fn open(
         config: &ShmConfig,
         prefix: GuidPrefix,
-        tx: mpsc::Sender<Datagram>,
+        tx: mpsc::SyncSender<Datagram>,
     ) -> io::Result<ShmTransport> {
         let segment_id = fnv(&prefix.0) ^ u64::from(std::process::id());
         let path = segment_path(&config.directory, segment_id);
@@ -483,7 +483,7 @@ fn receive_loop(
     segment: &Segment,
     socket: &UdpSocket,
     stop: &AtomicBool,
-    tx: &mpsc::Sender<Datagram>,
+    tx: &mpsc::SyncSender<Datagram>,
 ) {
     let mut buf = [0u8; 64];
     let source = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -911,8 +911,8 @@ mod tests {
 
     #[test]
     fn messages_go_through_in_order() {
-        let (tx_a, _rx_a) = mpsc::channel();
-        let (tx_b, rx_b) = mpsc::channel();
+        let (tx_a, _rx_a) = mpsc::sync_channel(64);
+        let (tx_b, rx_b) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(1), tx_a).unwrap();
         let b = ShmTransport::open(&config(), prefix(2), tx_b).unwrap();
         let to = b.user_locator();
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn other_hosts_and_gone_peers_use_udp() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(3), tx).unwrap();
         let udp = Locator::udpv4("127.0.0.1:7411".parse().unwrap());
         let mut elsewhere = a.user_locator();
@@ -964,7 +964,7 @@ mod tests {
         assert_eq!(a.select(&[gone, udp]), vec![&udp]);
         assert!(a.send(b"x", &gone).is_err());
         // Too large for the ring: not sent this way.
-        let (tx_b, _rx_b) = mpsc::channel();
+        let (tx_b, _rx_b) = mpsc::sync_channel(64);
         let b = ShmTransport::open(&config(), prefix(4), tx_b).unwrap();
         assert!(a.send(&[0u8; 2048], &b.user_locator()).is_err());
     }
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn dropping_removes_the_files() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(5), tx).unwrap();
         let seg = a.path.clone();
         assert!(seg.exists());

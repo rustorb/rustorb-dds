@@ -198,6 +198,14 @@ impl Incoming {
     }
 }
 
+/// The most datagrams received and not yet taken from [`Incoming`].
+/// When it is full, the receive threads wait, the sockets' buffers fill
+/// and the kernel drops what does not fit, as when a receiver is slower
+/// than its senders: best-effort loses it, reliable repairs it. Without
+/// a bound, a fast sender made the receiver's memory grow without end
+/// (rustorb-dds#110). 1024 datagrams are at most 64 MiB.
+pub const INCOMING_CAPACITY: usize = 1024;
+
 /// How often the receive threads look at the stop flag.
 const POLL: Duration = Duration::from_millis(100);
 /// The largest UDP payload.
@@ -218,7 +226,7 @@ pub struct UdpTransport {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     /// For other transports to deliver to the same [`Incoming`].
-    tx: mpsc::Sender<Datagram>,
+    tx: mpsc::SyncSender<Datagram>,
 }
 
 impl UdpTransport {
@@ -259,7 +267,7 @@ impl UdpTransport {
 
         let user_uc = Arc::new(user_uc);
         let stop = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(INCOMING_CAPACITY);
         let mut threads = Vec::new();
         let mut spawn = |socket: Arc<UdpSocket>, channel: Channel| -> io::Result<()> {
             socket.set_read_timeout(Some(POLL))?;
@@ -297,7 +305,7 @@ impl UdpTransport {
 
     /// A sender of datagrams to this transport's [`Incoming`], for
     /// another transport (shared memory) to deliver there too.
-    pub fn injector(&self) -> mpsc::Sender<Datagram> {
+    pub fn injector(&self) -> mpsc::SyncSender<Datagram> {
         self.tx.clone()
     }
 
@@ -406,7 +414,7 @@ fn receive_loop(
     socket: &UdpSocket,
     channel: Channel,
     stop: &AtomicBool,
-    tx: &mpsc::Sender<Datagram>,
+    tx: &mpsc::SyncSender<Datagram>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     while !stop.load(Ordering::Relaxed) {
