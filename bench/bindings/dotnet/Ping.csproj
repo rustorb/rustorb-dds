@@ -1,0 +1,20 @@
+<!--
+  ping of bench/bindings.py in C# (rustorb-dds#107), on the .NET binding of
+  this repository (dotnet/). Perf.cs and Perf_dds.cs are what rustorb-idl
+  -bcsharp -Wbdds_only writes for bench/idl/Perf.idl.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../dotnet/src/Rustorb.Dds/Rustorb.Dds.csproj" />
+    <Compile Include="../generated/csharp/Perf.cs;../generated/csharp/Perf_dds.cs" Link="generated/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

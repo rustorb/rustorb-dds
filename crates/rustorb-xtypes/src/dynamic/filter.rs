@@ -554,7 +554,7 @@ fn field_value<'a>(data: &'a DynamicData, steps: &[Step]) -> Option<&'a DynamicD
                 Some((j, v)) if j == i => v,
                 _ => return None,
             },
-            (Step::Element(i), Value::Collection(items)) => items.get(*i)?,
+            (Step::Element(i), Value::Collection(_) | Value::Octets(_)) => d.elements()?.get(*i)?,
             _ => return None,
         };
     }

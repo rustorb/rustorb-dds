@@ -6,6 +6,7 @@
 //! rustorb-dds-perf pong [options]   # sends back what a ping sends
 //! rustorb-dds-perf pub  [options]   # writes as fast as it can (or --rate)
 //! rustorb-dds-perf sub  [options]   # counts what it receives
+//! rustorb-dds-perf disc [options]   # time until N participants all match
 //! ```
 //!
 //! See `--help` and README.md. With `--json` each result is one line of
@@ -28,12 +29,15 @@ use stats::Summary;
 use types::{Fixed, FixedVisitor, Sample, Stamped};
 
 const USAGE: &str = "\
-usage: rustorb-dds-perf <ping|pong|pub|sub> [options]
+usage: rustorb-dds-perf <ping|pong|pub|sub|disc> [options]
 
   ping   measures round trips with a pong, size after size
   pong   sends back every sample a ping sends, until the ping leaves
   pub    writes samples of one size as fast as it can, or at --rate
   sub    counts the samples and octets it receives for --duration
+  disc   one of --participants processes: creates a participant with a
+         writer and a reader of one topic, and says when they match those
+         of all the others; it stays --duration seconds from --start
 
 options:
   --domain N          DDS domain (0)
@@ -58,6 +62,9 @@ options:
   --json              one line of JSON for each result on stdout
   --listener          ping, pong: receive in the reader's listener and
                       answer from it, as ddsperf does (else a WaitSet)
+  --participants N    disc: how many take part, this one included (2)
+  --start T           disc: the common start, seconds since the Unix epoch
+                      (when this process started)
   --security FILE     DDS Security, the dds.sec.* properties in FILE, one
                       name=value per line (feature `security`)
 ";
@@ -68,6 +75,7 @@ enum Mode {
     Pong,
     Pub,
     Sub,
+    Disc,
 }
 
 impl Mode {
@@ -77,6 +85,7 @@ impl Mode {
             Mode::Pong => "pong",
             Mode::Pub => "pub",
             Mode::Sub => "sub",
+            Mode::Disc => "disc",
         }
     }
 }
@@ -116,6 +125,8 @@ struct Opts {
     label: Option<String>,
     json: bool,
     listener: bool,
+    participants: u32,
+    start: Option<std::time::SystemTime>,
     security: Option<std::path::PathBuf>,
 }
 
@@ -127,6 +138,7 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
         Some("pong") => Mode::Pong,
         Some("pub") => Mode::Pub,
         Some("sub") => Mode::Sub,
+        Some("disc") => Mode::Disc,
         Some("-h" | "--help") | None => return Err(USAGE.into()),
         Some(other) => return Err(format!("unknown mode {other:?}\n\n{USAGE}").into()),
     };
@@ -147,6 +159,8 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
         label: None,
         json: false,
         listener: false,
+        participants: 2,
+        start: None,
         security: None,
     };
     let mut it = args[1..].iter();
@@ -192,6 +206,10 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
             "--label" => o.label = Some(value()?.to_string()),
             "--json" => o.json = true,
             "--listener" => o.listener = true,
+            "--participants" => o.participants = value()?.parse()?,
+            "--start" => {
+                o.start = Some(std::time::UNIX_EPOCH + Duration::from_secs_f64(value()?.parse()?))
+            }
             "--security" => o.security = Some(value()?.into()),
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown option {other:?}\n\n{USAGE}").into()),
@@ -203,7 +221,7 @@ fn parse(args: &[String]) -> Result<Opts, BoxError> {
     if o.sizes.is_empty() {
         o.sizes = match mode {
             Mode::Ping | Mode::Pong => (5..=20).map(|e| 1usize << e).collect(),
-            Mode::Pub | Mode::Sub => vec![1024],
+            Mode::Pub | Mode::Sub | Mode::Disc => vec![1024],
         };
     }
     if matches!(mode, Mode::Pub | Mode::Sub) && o.sizes.len() != 1 {
@@ -504,6 +522,7 @@ fn endpoints(
         Mode::Pong => (Some("RustorbPerf_pong"), Some("RustorbPerf_ping")),
         Mode::Pub => (Some("RustorbPerf_data"), None),
         Mode::Sub => (None, Some("RustorbPerf_data")),
+        Mode::Disc => (Some("RustorbPerf_disc"), Some("RustorbPerf_disc")),
     };
     let reliability = if o.reliable {
         Reliability::reliable()
@@ -679,6 +698,7 @@ fn wait_for_match(eps: &[Box<dyn Endpoint>], o: &Opts) -> Result<(), BoxError> {
         Mode::Ping | Mode::Pong => (true, true),
         Mode::Pub => (true, false),
         Mode::Sub => (false, true),
+        Mode::Disc => (true, true),
     };
     loop {
         let ok = eps.iter().all(|e| {
@@ -953,6 +973,68 @@ fn pong_listener(o: &Opts, eps: &mut [Box<dyn Endpoint>]) -> Result<(), BoxError
     Ok(())
 }
 
+/// `disc`: the seconds from the common start until the participant is
+/// created and until its writer and reader match those of all the other
+/// participants (a writer and a reader each, its own included), then stays to `--duration`
+/// for the others.
+fn discovery(o: &Opts) -> Result<(), BoxError> {
+    let since = |t: std::time::SystemTime| {
+        let start = o.start.unwrap_or(t);
+        t.duration_since(start).unwrap_or_default().as_secs_f64()
+    };
+    let begun = std::time::SystemTime::now();
+    let start = o.start.unwrap_or(begun);
+    let p = participant(o)?;
+    let created = since(std::time::SystemTime::now());
+    let eps = endpoints(o, &p)?;
+    // Its own writer and reader match each other too.
+    let all = o.participants;
+    let others = all.saturating_sub(1);
+    let end = start + o.duration;
+    let mut matched = None;
+    while matched.is_none() && std::time::SystemTime::now() < end {
+        let (w, r) = eps[0].matched();
+        if w >= all && r >= all {
+            matched = Some(since(std::time::SystemTime::now()));
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    // Then stays, for the others.
+    if let Ok(left) = end.duration_since(std::time::SystemTime::now()) {
+        std::thread::sleep(left);
+    }
+    let (w, r) = eps[0].matched();
+    if o.json {
+        let mut f = vec![
+            ("tool", J::S("rustorb-dds-perf")),
+            ("impl", J::S("rustorb-dds")),
+            ("version", J::S(env!("CARGO_PKG_VERSION"))),
+            ("mode", J::S("disc")),
+            ("transport", J::S(o.transport.name())),
+            ("participants", J::U(u64::from(o.participants))),
+            ("create_s", J::F(created)),
+            ("writer_matched", J::U(u64::from(w))),
+            ("reader_matched", J::U(u64::from(r))),
+        ];
+        if let Some(m) = matched {
+            f.push(("match_s", J::F(m)));
+        }
+        if let Some(l) = &o.label {
+            f.push(("label", J::S(l)));
+        }
+        println!("{}", json(&f));
+    } else {
+        match matched {
+            Some(m) => println!(
+                "disc: participant at {created:.3} s, all {others} others matched at {m:.3} s"
+            ),
+            None => println!("disc: matched {w} writers and {r} readers of {others}"),
+        }
+    }
+    Ok(())
+}
+
 /// Whether, having matched, every endpoint has lost its matches.
 fn all_gone(eps: &[Box<dyn Endpoint>]) -> bool {
     eps.iter().all(|e| e.matched() == (0, 0))
@@ -1125,6 +1207,9 @@ fn subscribe(o: &Opts, eps: &mut [Box<dyn Endpoint>]) -> Result<(), BoxError> {
 
 fn run(args: &[String]) -> Result<(), BoxError> {
     let o = parse(args)?;
+    if o.mode == Mode::Disc {
+        return discovery(&o);
+    }
     let p = participant(&o)?;
     let mut eps = endpoints(&o, &p)?;
     match o.mode {
@@ -1134,6 +1219,7 @@ fn run(args: &[String]) -> Result<(), BoxError> {
         Mode::Pong => pong(&o, &mut eps),
         Mode::Pub => publish(&o, &mut eps),
         Mode::Sub => subscribe(&o, &mut eps),
+        Mode::Disc => unreachable!("handled above"),
     }
 }
 

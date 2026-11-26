@@ -1,6 +1,6 @@
 # 性能測定
 
-rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。測り方の道具は [bench/](../bench/README.md) にある。
+rustorb-dds の往復レイテンシとスループットを、同じ機械の上で Cyclone DDS と Fast DDS と比べた（rustorb-dds#100 の段 1）。discovery の速さ（段 2、#106）と DDS Security の上乗せ（#107）も測った。測り方の道具は [bench/](../bench/README.md) にある。
 
 **ここの数値はコンテナで測った。** CPU 4 個を他と分け合い、周波数も割り込みも固定できないので、回ごとに揺れる。同じ実行の中での相対比較として読み、別の機械や別の実行の数値と並べないこと。公開用の数値を専用の機械で測るかどうかは、あとで決める（#100）。
 
@@ -10,7 +10,7 @@ rustorb-dds の往復レイテンシとスループットを、同じ機械の�
 - レイテンシ: ping が書き、pong が受けて書き返すまでの往復時間。32 B〜1 MiB（2 倍刻み）。各大きさで 1 秒の warm-up のあと 5 秒。reliable は KEEP_LAST 1。
 - スループット: pub が全力で書き、sub が 5 秒で受けた payload。reliable は writer が KEEP_ALL で未確認応答 100 標本まで（溢れると write が待つ）、best-effort は待たない。sub は 256 標本ずつ take し（Fast DDS 版は 1 標本ずつ）、best-effort の sub は take していない標本を 1000 まで保つ（入らない分は失われる）。
 - 転送: `udp`（rustorb-dds と Fast DDS は共有メモリを切る。Cyclone DDS の既定）、`shm`（rustorb-dds の共有メモリ、Fast DDS の既定の組み込み転送、Cyclone DDS の iceoryx）、`loan`（rustorb-dds の貸し出し: payload に触れない zero-copy）。実装をまたぐ組は `udp` だけ。
-- 2 つのプロセスを CPU の半分ずつに固定した。各組を 3 回測り、中央値を載せる。CPU 時間と最大 RSS は両方のプロセスの `wait4` から取った。
+- 2 つのプロセスを CPU の半分ずつに固定した。各組を 3 回測り、中央値を載せる。CPU 時間と最大 RSS は両方のプロセスの `wait4` から取った。**この段の最大 RSS は正しくない。** `wait4` の ru_maxrss は Python から fork した時点の Python の RSS（約 13 MiB）を引き継ぐので、それより小さいプロセスは約 13 MiB と出ている。いまの `bench/run.py` は動いている間に /proc の VmHWM を読む（#106 で直した）。大きな値（best-effort の受け手の GB など）はそのまま正しい。
 
 再現:
 
@@ -50,6 +50,211 @@ best-effort:
 - 貸し出しの best-effort の数値（1 MiB で 1.2 Tbit/s など）は、payload に触れずに数えているので転送の速さではない。
 
 測っている途中で、速い writer が受け手の共有メモリの ring を溢れさせると write が「the shared memory buffer is full」で失敗する不具合が見つかり、直した（ring に入らないメッセージは UDP で失われたのと同じ扱い。docs/shm.md のとおり）。
+
+## Discovery（#106）
+
+N 個のプロセスを同時に起動し、それぞれが参加者 1 つ、同じトピックの writer と reader を 1 つずつ作る。各プロセスが、共通の開始時刻から数えて自分の writer と reader が N 者すべて（自分も含む）とマッチするまでの時間を出す。最後にマッチしたプロセスの時間がその回の値。N は 1, 2, 5, 10, 20, 50、各 3 回、回ごとに別のドメイン、UDP だけ（共有メモリなし）、CPU は固定しない。「rustorb+cyclonedds」は rustorb-dds と Cyclone DDS のプロセスを交互に起動した組。tcpdump でその回の UDP パケットを数えた（標本は書かないので discovery の通信: SPDP、SEDP とその HEARTBEAT・ACKNACK、liveliness。プロセスが残る 5〜20 秒全体）。メモリはプロセスごとの VmHWM の最大。
+
+```sh
+bench/discovery.py --out bench/results/<名前>
+bench/discovery.py --report bench/results/<名前>
+```
+
+数値は [bench/results/2026-11-26-container-discovery](../bench/results/2026-11-26-container-discovery)（上と同じコンテナ）。
+
+わかったこと:
+
+- 測り始めたとき rustorb-dds は遅かった（試しの 1 回で、2 者 55 ms、10 者 1,059 ms。Cyclone DDS は 8 ms と 128 ms）。原因は 3 つで、この PR で直した。
+  - 最初の SPDP 告知（と新しい参加者への返事）が、参加者のスレッドが次に起きるまで（最大 50 ms）出なかった。
+  - 相手がまだこちらを知らないうちに送った SEDP の DATA は捨てられ、組み込み writer の HEARTBEAT 周期（1 s）まで直らなかった。周期を 100 ms にした（すべて確認応答されたら何も送らない）。
+  - reliable reader がマッチした writer に最初に送る ACKNACK で HEARTBEAT を求める（final flag を立てない。8.4.2.3.4 の preemptive ACKNACK）。マッチ前に送られて捨てられた DATA がすぐ再送される。
+- 直したあと、rustorb-dds は 50 者まで 3 つの中でいちばん早くすべてマッチした（10 者 23 ms、Cyclone DDS 42 ms、Fast DDS 203 ms。50 者 0.50 s、0.75 s、3.8 s）。
+- 通信量は rustorb-dds と Cyclone DDS が同じくらい（50 者でパケット約 44,000、octet は rustorb が 3/4）、Fast DDS は約 2 倍のパケットと 4〜5 倍の octet。
+- CPU 時間は 20 者以上で rustorb-dds が Cyclone DDS の約 1.6〜1.7 倍（50 者で 6.3 s と 3.8 s）。Fast DDS と同じくらい。
+- 1 プロセスの最大 RSS は rustorb-dds 5〜6 MiB、Cyclone DDS 7〜9 MiB、Fast DDS 15〜17 MiB。
+- rustorb-dds と Cyclone DDS を混ぜても、Cyclone DDS だけのときと同じくらいで、すべての回ですべてマッチした。
+
+#### Until all matched, the last participant (ms, median of runs)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 3 | 7 | 9 |  |
+| 2 | 6 | 9 | 81 | 8 |
+| 5 | 11 | 24 | 184 | 22 |
+| 10 | 23 | 42 | 203 | 43 |
+| 20 | 69 | 186 | 283 | 180 |
+| 50 | 501 | 747 | 3,792 | 687 |
+
+#### Until matched, the median participant (ms)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 3 | 7 | 9 |  |
+| 2 | 6 | 9 | 46 | 8 |
+| 5 | 10 | 20 | 23 | 13 |
+| 10 | 22 | 35 | 119 | 31 |
+| 20 | 62 | 90 | 157 | 82 |
+| 50 | 453 | 616 | 1,477 | 561 |
+
+#### CPU time of all the processes over the run (s)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 0.02 | 0.01 | 0.01 |  |
+| 2 | 0.03 | 0.02 | 0.03 | 0.03 |
+| 5 | 0.08 | 0.05 | 0.10 | 0.08 |
+| 10 | 0.18 | 0.14 | 0.26 | 0.19 |
+| 20 | 0.78 | 0.49 | 0.85 | 0.74 |
+| 50 | 6.32 | 3.78 | 6.09 | 5.81 |
+
+#### Largest resident set of one process (MiB)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 5 | 7 | 15 |  |
+| 2 | 5 | 7 | 15 | 7 |
+| 5 | 5 | 7 | 16 | 7 |
+| 10 | 5 | 7 | 16 | 7 |
+| 20 | 5 | 8 | 16 | 8 |
+| 50 | 6 | 9 | 17 | 9 |
+
+#### UDP packets of the run (all of its seconds)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 2 | 2 | 14 |  |
+| 2 | 35 | 17 | 83 | 35 |
+| 5 | 322 | 224 | 605 | 321 |
+| 10 | 1,460 | 1,091 | 2,883 | 1,480 |
+| 20 | 6,395 | 5,394 | 15,248 | 6,431 |
+| 50 | 44,133 | 43,751 | 89,864 | 50,096 |
+
+#### UDP octets of the run (KiB)
+
+| participants | rustorb | cyclonedds | fastdds | rustorb+cyclonedds |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 1 | 6 |  |
+| 2 | 4 | 6 | 26 | 6 |
+| 5 | 37 | 47 | 178 | 46 |
+| 10 | 161 | 209 | 838 | 210 |
+| 20 | 724 | 918 | 4,720 | 896 |
+| 50 | 4,855 | 6,396 | 25,967 | 6,245 |
+
+## DDS Security（#107）
+
+[docs/security.md](security.md) の組み込みプラグインで、Security なし（none）、認証とアクセス制御だけ（auth: governance の保護をすべて NONE）、署名（sign: discovery、liveliness、metadata、data を SIGN、つまり AES-GMAC）、暗号化（encrypt: 同じく ENCRYPT、AES-GCM）を比べた。RTPS メッセージ全体の保護（rtps_protection_kind）はどれも NONE。証明書と governance・permissions は `interop/security/gen.sh` で作り、どの参加者も同じ identity（EC P-256）にした。Cyclone DDS と Fast DDS もそれぞれ自分の Security を有効にして測った（実装をまたぐ組は測っていない）。UDP、reliable、各 3 回の中央値。
+
+```sh
+bench/run.py --peers rustorb,cyclonedds,fastdds --security none,auth,sign,encrypt \
+  --reliability reliable --sizes 32,4096,65536 --out bench/results/<名前>
+bench/discovery.py --peers rustorb,cyclonedds,fastdds --mixed '' \
+  --security none,auth,sign,encrypt --counts 2,5,10,20 --out bench/results/<名前>
+```
+
+数値は [bench/results/2026-11-26-container-security](../bench/results/2026-11-26-container-security)（上と同じコンテナ。rustorb-dds は PR #118 の途中、handshake の直しの後）。この回の throughput の「other」側の RSS は取れていない（`run.py` の不具合。直した）。
+
+わかったこと:
+
+- 小さな標本（32 B）の往復は、署名・暗号化で rustorb-dds が 77 → 95〜101 µs、Cyclone DDS が 71 → 108〜111 µs、Fast DDS が 95 → 336〜347 µs。
+- 64 KiB では rustorb-dds の署名・暗号化が 645〜763 µs で、Cyclone DDS（417〜441 µs）の約 1.6 倍。スループットも 64 KiB で rustorb 2.4〜2.7 Gbit/s、Cyclone 3.7〜4.0 Gbit/s。→ #119
+- 認証だけ（保護なし）でも、rustorb-dds は 4 KiB 以上で少し遅くなる（64 KiB のスループット 9.2 → 8.2 Gbit/s）。Cyclone DDS と Fast DDS は Security なしと変わらない。→ #119
+- discovery（handshake を含めて、すべてマッチするまで）: 測り始めたとき、rustorb-dds は 10 者で約 0.5 s かかっていた。相手の SPDP より先に届いた handshake の要求を捨てていて、送り手が 500 ms 後に送り直すまで待っていたため。いまは、その要求を相手を見つけるまで取っておいて、見つけたらすぐ答える（参加者 256 まで、相手ごとに最後の 1 つ）。直したあとは 10 者で 84〜95 ms、20 者で 283〜384 ms。Cyclone DDS は 2 者でも約 330 ms、10 者 530〜710 ms、20 者 1.5 s。Fast DDS は 10 者で約 1.1 s、20 者の署名・暗号化では 3 回とも 20 s のうちにすべてはマッチしなかった。
+- handshake の通信量は rustorb-dds と Cyclone DDS が同じくらい（20 者の暗号化で 5.6 MiB と 6.4 MiB）、Fast DDS は約 110 MiB（すべてはマッチしないまま送り直し続けた）。
+- 1 プロセスの最大 RSS は、Security で rustorb-dds が 6 → 8 MiB、Cyclone DDS が 8 → 13 MiB、Fast DDS が 16 → 22〜29 MiB。
+
+### 往復とスループット
+
+#### Latency, reliable: round trip, median (µs)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 76.5 | 82.0 | 95.1 | 101.1 | 70.7 | 73.7 | 107.8 | 110.9 | 94.8 | 97.2 | 347.3 | 336.1 |
+| 4 KiB | 78.1 | 91.1 | 119.0 | 138.8 | 75.9 | 74.6 | 112.9 | 118.7 | 96.3 | 106.1 | 352.3 | 334.2 |
+| 64 KiB | 184.6 | 203.6 | 645.0 | 762.9 | 151.4 | 149.8 | 416.5 | 441.4 | 130.6 | 140.9 | 656.8 | 702.8 |
+
+In this table the runs of a cell differed by 8 % (median over the cells), 28 % at most.
+
+#### Latency, reliable: round trip, 99th percentile (µs)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 191.0 | 179.8 | 215.9 | 222.3 | 156.8 | 157.5 | 223.6 | 253.8 | 204.3 | 202.5 | 966.0 | 1,208 |
+| 4 KiB | 180.8 | 222.3 | 250.4 | 303.4 | 175.5 | 173.2 | 226.8 | 235.6 | 200.7 | 198.1 | 1,127 | 1,370 |
+| 64 KiB | 417.0 | 493.8 | 1,654 | 2,179 | 357.0 | 296.6 | 1,086 | 1,225 | 274.1 | 291.1 | 2,493 | 2,653 |
+
+In this table the runs of a cell differed by 18 % (median over the cells), 68 % at most.
+
+#### Throughput, reliable (Mbit/s of payload received)
+
+| size | rustorb udp+none | rustorb udp+auth | rustorb udp+sign | rustorb udp+encrypt | cyclonedds udp+none | cyclonedds udp+auth | cyclonedds udp+sign | cyclonedds udp+encrypt | fastdds udp+none | fastdds udp+auth | fastdds udp+sign | fastdds udp+encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 21.4 | 20.9 | 16.2 | 16.1 | 34.0 | 35.2 | 11.8 | 11.6 | 4.6 | 4.7 | 3.8 | 3.8 |
+| 4 KiB | 2,643 | 2,375 | 1,329 | 1,254 | 2,754 | 2,796 | 1,341 | 1,382 | 353.6 | 376.5 | 252.0 | 256.6 |
+| 64 KiB | 9,153 | 8,161 | 2,723 | 2,378 | 11,879 | 11,685 | 3,973 | 3,710 | 3,332 | 3,198 | 1,689 | 1,867 |
+
+In this table the runs of a cell differed by 8 % (median over the cells), 42 % at most.
+
+### Discovery
+
+#### Until all matched, the last participant (ms, median of runs)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 5 | 13 | 12 | 14 | 9 | 332 | 332 | 335 | 14 | 29 | 31 | 28 |
+| 5 | 11 | 29 | 33 | 27 | 23 | 448 | 601 | 646 | 187 | 290 | 291 | 295 |
+| 10 | 23 | 84 | 95 | 93 | 40 | 532 | 691 | 709 | 125 | 1,053 | 1,116 | 1,088 |
+| 20 | 90 | 283 | 367 | 384 | 197 | 1,478 | 1,558 | 1,472 | 241 | 1,299 | 3,989 (3 of 3 not all matched) | 2,365 (3 of 3 not all matched) |
+
+#### CPU time of all the processes over the run (s)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 0.03 | 0.04 | 0.04 | 0.05 | 0.01 | 0.05 | 0.05 | 0.05 | 0.03 | 0.06 | 0.06 | 0.06 |
+| 5 | 0.08 | 0.13 | 0.17 | 0.15 | 0.05 | 0.20 | 0.23 | 0.23 | 0.09 | 0.24 | 0.29 | 0.29 |
+| 10 | 0.17 | 0.41 | 0.50 | 0.49 | 0.13 | 0.64 | 0.77 | 0.75 | 0.26 | 0.80 | 1.40 | 1.38 |
+| 20 | 0.81 | 1.76 | 2.32 | 2.38 | 0.53 | 2.15 | 2.92 | 2.92 | 0.89 | 3.67 | 9.92 (3 of 3 not all matched) | 9.25 (3 of 3 not all matched) |
+
+#### UDP octets of the run (KiB)
+
+| participants | rustorb | rustorb auth | rustorb sign | rustorb encrypt | cyclonedds | cyclonedds auth | cyclonedds sign | cyclonedds encrypt | fastdds | fastdds auth | fastdds sign | fastdds encrypt |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 4 | 18 | 31 | 31 | 6 | 20 | 30 | 31 | 26 | 58 | 69 | 69 |
+| 5 | 37 | 160 | 298 | 299 | 50 | 201 | 325 | 328 | 180 | 762 | 1,013 | 1,019 |
+| 10 | 165 | 707 | 1,321 | 1,342 | 201 | 912 | 1,464 | 1,479 | 824 | 6,126 | 8,717 | 9,192 |
+| 20 | 733 | 3,012 | 5,622 | 5,745 | 915 | 3,955 | 6,406 | 6,507 | 4,717 | 59,474 | 116,087 (3 of 3 not all matched) | 111,849 (3 of 3 not all matched) |
+
+## 言語バインディング（#107）
+
+C++、Java、.NET、Python、Ruby の各バインディングで書いた ping（[bench/bindings](../bench/bindings)）から、Rust の `rustorb-dds-perf pong` に往復させ、Rust の ping との差をバインディングの上乗せとみなした。型は `bench/idl/Perf.idl` を rustorb-idl で生成したもの（`bench/bindings/generated`）。バインディングには共有メモリを切る設定がないので、どれも共有メモリ（Rust 側は `--transport shm`）。reliable、KEEP_LAST 1、各 5 秒を 3 回、その中央値。
+
+```sh
+bench/bindings.py                                   # 見つかったバインディングすべて
+bench/bindings.py --bindings rust,cpp,python --sizes 32,4096
+```
+
+数値は [bench/results/2026-11-26-container-bindings](../bench/results/2026-11-26-container-bindings)（直す前は `before/`）。
+
+わかったこと:
+
+- 測り始めたとき、どのバインディングも 4 KiB 以上で桁違いに遅かった（64 KiB の往復が Rust 200 µs に対して 5.7〜8.5 ms）。バインディングは標本を `DynamicData` で受け渡していて、`DynamicData` が octet の列を 1 要素ずつ `DynamicData` として持っていたため（1 octet に数十バイトと割り当て 1 回）。octet（byte、uint8）の列と配列はバイト列のまま持つようにし、CDR の読み書きと `get/set_byte_values` などをまとめて行うようにした。Python はさらに `bytes` との変換を 1 回で行う。→ #120
+- 直したあと（往復の中央値、µs、括弧内は Rust との差）:
+
+| size | rust | cpp | java | dotnet | python | ruby |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 85 | 96 (+10) | 100 (+15) | 92 (+7) | 120 (+35) | 103 (+18) |
+| 4 KiB | 94 | 98 (+4) | 103 (+9) | 92 (-1) | 118 (+24) | 193 (+99) |
+| 64 KiB | 195 | 215 (+20) | 251 (+56) | 248 (+53) | 270 (+75) | 1,245 (+1,050) |
+
+- 直す前:
+
+| size | rust | cpp | java | dotnet | python | ruby |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 87 | 102 (+15) | 102 (+15) | 106 (+18) | 134 (+47) | 125 (+38) |
+| 4 KiB | 91 | 562 (+471) | 580 (+489) | 604 (+514) | 743 (+652) | 695 (+604) |
+| 64 KiB | 200 | 5,750 (+5,549) | 6,770 (+6,570) | 7,468 (+7,268) | 8,466 (+8,266) | 7,130 (+6,929) |
+
+- 小さな標本では、上乗せは C++・Java・.NET で 10〜15 µs、Python と Ruby で 20〜35 µs。
+- Ruby は 64 KiB でまだ約 1 ms 上乗せがある。Ruby の型対応では octet の列が Integer の Array なので、受け取るたびに 65,536 要素の Array を作るため（送る側は String を渡せる）。
 
 ## 結果の表
 

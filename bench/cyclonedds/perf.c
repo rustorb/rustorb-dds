@@ -4,10 +4,11 @@
  * protocol and JSON output, so that bench/run.py measures both the same
  * way and they can talk to each other (rustorb-dds#103).
  *
- *   perf ping|pong|pub|sub [--domain N] [--size N | --sizes A,B,...]
+ *   perf ping|pong|pub|sub|disc [--domain N] [--size N | --sizes A,B,...]
  *        [--reliability reliable|best-effort] [--transport udp|shm]
  *        [--warmup S] [--duration S] [--count N] [--rate N] [--depth N]
  *        [--reply-timeout MS] [--timeout S] [--label TEXT] [--json]
+ *        [--participants N] [--start T]
  *
  * --transport only goes into the output: Cyclone DDS's shared memory is
  * turned on by its configuration (CYCLONEDDS_URI, which bench/run.py
@@ -28,7 +29,7 @@
 /* The samples a best-effort sub keeps not yet taken (as rustorb-dds-perf). */
 #define READER_MAX_SAMPLES 1000
 
-enum mode { PING, PONG, PUB, SUB };
+enum mode { PING, PONG, PUB, SUB, DISC };
 
 static struct {
   enum mode mode;
@@ -43,9 +44,11 @@ static struct {
   double reply_timeout;
   const char *label;
   int json;
+  int participants;
+  double start; /* seconds since the epoch, 0: this process's start */
 } o;
 
-static const char *mode_name[] = {"ping", "pong", "pub", "sub"};
+static const char *mode_name[] = {"ping", "pong", "pub", "sub", "disc"};
 
 static double now_s(void)
 {
@@ -83,6 +86,7 @@ static void parse(int argc, char **argv)
   else if (!strcmp(argv[1], "pong")) o.mode = PONG;
   else if (!strcmp(argv[1], "pub")) o.mode = PUB;
   else if (!strcmp(argv[1], "sub")) o.mode = SUB;
+  else if (!strcmp(argv[1], "disc")) o.mode = DISC;
   else usage("unknown mode");
   o.reliable = 1;
   o.transport = "udp";
@@ -92,6 +96,7 @@ static void parse(int argc, char **argv)
   o.reply_timeout = 1.0;
   o.count = -1;
   o.depth = -1;
+  o.participants = 2;
   for (int i = 2; i < argc; i++) {
     const char *a = argv[i];
     const char *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -117,6 +122,8 @@ static void parse(int argc, char **argv)
     else if (!strcmp(a, "--reply-timeout")) o.reply_timeout = atof(v) / 1000.0;
     else if (!strcmp(a, "--timeout")) o.timeout = atof(v);
     else if (!strcmp(a, "--label")) o.label = v;
+    else if (!strcmp(a, "--participants")) o.participants = atoi(v);
+    else if (!strcmp(a, "--start")) o.start = atof(v);
     else usage("unknown option");
 #undef VALUE
   }
@@ -165,6 +172,7 @@ static void setup(void)
     case PONG: w = "RustorbPerf_pong"; r = "RustorbPerf_ping"; break;
     case PUB: w = "RustorbPerf_data"; break;
     case SUB: r = "RustorbPerf_data"; break;
+    case DISC: w = r = "RustorbPerf_disc"; break;
   }
   participant = dds_create_participant(o.domain, NULL, NULL);
   if (participant < 0)
@@ -198,7 +206,7 @@ static void setup(void)
     if (writer < 0) die("dds_create_writer", writer);
   }
   if (r) {
-    rtopic = dds_create_topic(participant, &RustorbPerf_Sample_desc, r, NULL, NULL);
+    rtopic = w && !strcmp(w, r) ? wtopic : dds_create_topic(participant, &RustorbPerf_Sample_desc, r, NULL, NULL);
     if (rtopic < 0) die("dds_create_topic", rtopic);
     reader = dds_create_reader(participant, rtopic, rq, NULL);
     if (reader < 0) die("dds_create_reader", reader);
@@ -477,16 +485,61 @@ static void subscribe(void)
   }
 }
 
+static double wall_s(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+/* disc: the seconds from the common start until the participant is
+   created and until its writer and reader match those of all the
+   participants (its own included); stays to --duration for the others. */
+static void discovery(void)
+{
+  double start = o.start > 0 ? o.start : wall_s();
+  setup();
+  double created = wall_s() - start, matched = -1;
+  uint32_t all = (uint32_t)o.participants;
+  while (matched < 0 && wall_s() < start + o.duration) {
+    if (writer_matched() >= all && reader_matched() >= all)
+      matched = wall_s() - start;
+    else
+      sleep_s(0.001);
+  }
+  /* Then stays, for the others. */
+  sleep_s(start + o.duration - wall_s());
+  if (o.json) {
+    printf("{\"tool\":\"rustorb-dds-perf\",\"impl\":\"cyclonedds\",\"version\":\"%s\",\"mode\":\"disc\","
+           "\"transport\":\"%s\",\"participants\":%d,\"create_s\":%.6f,\"writer_matched\":%u,\"reader_matched\":%u",
+           DDS_VERSION, o.transport, o.participants, created, writer_matched(), reader_matched());
+    if (matched >= 0)
+      printf(",\"match_s\":%.6f", matched);
+    if (o.label)
+      printf(",\"label\":\"%s\"", o.label);
+    printf("}\n");
+  } else if (matched >= 0)
+    printf("disc: participant at %.3f s, all matched at %.3f s\n", created, matched);
+  else
+    printf("disc: matched %u writers and %u readers of %u\n", writer_matched(), reader_matched(), all);
+}
+
 int main(int argc, char **argv)
 {
   parse(argc, argv);
   setvbuf(stdout, NULL, _IOLBF, 0);
+  if (o.mode == DISC) {
+    discovery();
+    dds_delete(participant);
+    return 0;
+  }
   setup();
   switch (o.mode) {
     case PING: ping(); break;
     case PONG: pong(); break;
     case PUB: publish(); break;
     case SUB: subscribe(); break;
+    case DISC: break;
   }
   dds_delete(participant);
   return 0;

@@ -52,6 +52,25 @@ def tool_args(mode, domain, transport, reliability, warmup, duration, sizes):
     return a
 
 
+def peak_rss_kib(pid):
+    """The largest resident set of a running process so far (VmHWM), in
+    KiB, or None once it is gone.
+
+    `wait4`'s ru_maxrss cannot be used: a child forked from Python starts
+    with Python's resident set as its high-water mark, and keeps it across
+    exec, so a small program shows the size of the runner instead of its
+    own. The runners read this while the program runs, every 50 ms.
+    """
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
 def json_lines(out):
     rs = []
     for line in out.splitlines():
@@ -104,6 +123,14 @@ class Peer:
     def parse(self, kind, out, sizes):
         return json_lines(out)
 
+    # Whether `secure` can turn DDS Security on.
+    security = False
+
+    def secure(self, cmd, sec):
+        """`cmd` with DDS Security on, configured by the files of `sec`
+        (made by `security_files`)."""
+        raise NotImplementedError
+
 
 class Rustorb(Peer):
     name = "rustorb"
@@ -112,11 +139,20 @@ class Rustorb(Peer):
     def missing(self):
         return None if shutil.which("cargo") else "no cargo"
 
+    security = True
+    # Built with the feature `security` (bench/run.py --security sets it,
+    # for every case of the run, so that they all use one program).
+    with_security = False
+
     def build(self):
+        features = ["--features", "security"] if Rustorb.with_security else []
         subprocess.run(
-            ["cargo", "build", "--release", "--locked", "-p", "rustorb-dds-perf"],
+            ["cargo", "build", "--release", "--locked", "-p", "rustorb-dds-perf"] + features,
             cwd=ROOT, check=True,
         )
+
+    def secure(self, cmd, sec):
+        return Cmd(cmd.argv + ["--security", str(sec / "peer.properties")], cmd.env)
 
     def program(self):
         return ROOT / "target" / "release" / "rustorb-dds-perf"
@@ -189,6 +225,13 @@ class CycloneDds(Peer):
     def env(self, transport):
         return cyclone_env(transport)
 
+    security = True
+
+    def secure(self, cmd, sec):
+        env = dict(cmd.env)
+        env["CYCLONEDDS_URI"] = env.get("CYCLONEDDS_URI", "") + f",file://{sec / 'cyclonedds.xml'}"
+        return Cmd(cmd.argv, env)
+
 
 def cyclone_env(transport):
     """The configuration: shared memory through iceoryx (iox-roudi must
@@ -225,6 +268,11 @@ class FastDds(Peer):
 
     def program(self):
         return BUILD / "fastdds" / "perf"
+
+    security = True
+
+    def secure(self, cmd, sec):
+        return Cmd(cmd.argv, {**cmd.env, "FASTRTPS_DEFAULT_PROFILES_FILE": str(sec / "fastdds.xml")})
 
     def version(self):
         return dpkg_version("libfastrtps-dev")
@@ -351,6 +399,24 @@ def parse_ddsperf(kind, out, sizes):
         "seconds": float(n),
         "note": "ddsperf: mean of per-second values; size includes its 12-octet header",
     }]
+
+
+# The DDS Security settings of bench/run.py --security and
+# bench/discovery.py --security: the protection of discovery, liveliness,
+# metadata and data in the governance (the RTPS messages are not
+# protected). Every participant has the same identity and permissions.
+SECURITY = {"auth": "NONE", "sign": "SIGN", "encrypt": "ENCRYPT"}
+
+
+def security_files(kind, base):
+    """Makes (once) the certificates, governance, permissions and the
+    configuration of each implementation for `kind` in base/<kind>, with
+    interop/security/gen.sh, and returns that directory."""
+    d = Path(base) / kind
+    if not (d / "peer.properties").exists():
+        subprocess.run(["sh", str(ROOT / "interop" / "security" / "gen.sh"), str(d), "NONE",
+                        SECURITY[kind]], check=True)
+    return d
 
 
 def make(name):

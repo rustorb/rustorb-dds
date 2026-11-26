@@ -26,6 +26,13 @@ target/release/rustorb-dds-perf pub --size 4096
   the sequence numbers). It takes at most 256 samples at a time; a
   best-effort sub keeps at most 1000 not yet taken (KEEP_ALL with
   `max_samples`), so one slower than its pub loses the rest.
+- `disc` (for `bench/discovery.py`) creates a participant with a writer
+  and a reader of `RustorbPerf_disc`, waits until both matched
+  `--participants` participants' (its own included), and prints when it
+  created the participant and when all matched, in seconds from
+  `--start` (seconds since the epoch, the common start of the
+  processes); it then stays until `--start` plus `--duration`, so that
+  the others can match it.
 - `--transport udp` turns the shared memory off, `shm` (the default)
   uses it to the rustorb-dds participants of the host, `loan` writes
   loaned samples of `RustorbPerf::FixedN` (N a power of two, 32 to

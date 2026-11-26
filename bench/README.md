@@ -56,6 +56,50 @@ repeats, and how much the repeats differed.
   The sub takes 256 samples at a time; a best-effort sub keeps at most
   1000 not yet taken, in all three programs.
 
+Discovery (#106) is measured with `bench/discovery.py`:
+
+```sh
+bench/discovery.py                                  # every peer, 1 to 50 participants, 3 times
+bench/discovery.py --peers rustorb --counts 2,10    # some of it
+bench/discovery.py --mixed 'rustorb,cyclonedds'     # half and half ('' for none)
+bench/discovery.py --report bench/results/<run>     # the tables again
+```
+
+Each run starts N processes of the `disc` mode at once, each with one
+participant, one writer and one reader of one topic, in a domain of its
+own, and records when each created its participant and when its writer
+and reader matched those of all N participants (N each: its own match
+too), counted from the common start. With `tcpdump` and the right to
+capture, the UDP packets and octets of the whole run are counted: no
+sample is written, so this is the discovery traffic (SPDP, SEDP, their
+HEARTBEATs and ACKNACKs, liveliness) over the run's 5 to 20 seconds.
+The results are one JSON line per run in `<out>/discovery.jsonl`.
+
+DDS Security (#107): `--security none,auth,sign,encrypt` on either script
+runs each case (UDP only) or group with each setting, for the peers that
+have it (rustorb, cyclonedds, fastdds; rustorb-dds-perf is then built
+with the feature `security`). `auth` authenticates and checks the
+permissions but protects nothing; `sign` and `encrypt` protect
+discovery, liveliness, metadata and data with AES-GMAC or AES-GCM. The
+files come from `interop/security/gen.sh` (into `target/bench/security`),
+and every participant has the same identity.
+
+The language bindings (#107) are measured with `bench/bindings.py`: a
+ping written with each binding ([bindings/](bindings), C++, Java, .NET,
+Python, Ruby) against the Rust `rustorb-dds-perf pong`, and the Rust
+ping for the baseline; what a binding adds is its round trip less the
+Rust one. The bindings cannot turn their shared memory off, so these
+runs use it (`--transport shm` on the Rust side). The types are what
+rustorb-idl wrote for `idl/Perf.idl` (`bindings/generated`, checked in;
+written again with `rustorb-idl -b<backend> -C bench/bindings/generated/<lang> bench/idl/Perf.idl`,
+the backends `c++11`, `java`, `csharp` and `ruby`).
+
+```sh
+bench/bindings.py                               # every binding found, 3 times
+bench/bindings.py --bindings rust,cpp --sizes 32,4096
+bench/bindings.py --report bench/results/<run>  # the tables again
+```
+
 The numbers of a shared machine (a container, a CI runner) vary between
 runs: compare the cases of one run with each other, not with another
 run. The CI job `bench` runs every case for one second to check that

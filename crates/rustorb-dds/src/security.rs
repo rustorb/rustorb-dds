@@ -381,7 +381,15 @@ struct State {
     /// handshake with certificates and permissions outgrows the fragment
     /// size of some implementations).
     stateless_frags: HashMap<GuidPrefix, Reassembler>,
+    /// The last handshake message of each participant not discovered yet
+    /// (its SPDP announcement still on the way), handled once it is: not
+    /// left for the sender to send again (500 ms later). At most
+    /// `MAX_EARLY` participants.
+    early: HashMap<GuidPrefix, GenericMessage>,
 }
+
+/// At most this many participants' early handshake messages are kept.
+const MAX_EARLY: usize = 256;
 
 /// The security of a participant.
 pub(crate) struct Security {
@@ -593,6 +601,7 @@ impl Security {
                 revoked: HashSet::new(),
                 revoked_certs: HashSet::new(),
                 stateless_frags: HashMap::new(),
+                early: HashMap::new(),
             }),
         })
     }
@@ -722,6 +731,10 @@ impl Security {
             peer.handshake = Some(hs);
             let m = self.stateless(st, p.guid_prefix, MessageIdentity::default(), token);
             self.send_handshake(st, p.guid_prefix, m, now);
+        } else if let Some(m) = st.early.remove(&p.guid_prefix) {
+            // Its request came before its announcement.
+            drop(st);
+            self.stateless_received(p.guid_prefix, m, now);
         }
         false
     }
@@ -731,6 +744,7 @@ impl Security {
         let mut st = self.state();
         st.peers.remove(prefix);
         st.stateless_frags.remove(prefix);
+        st.early.remove(prefix);
         st.decoders.retain(|g, _| g.prefix != *prefix);
         st.protected_remote.retain(|g, _| g.prefix != *prefix);
         for e in st.endpoints.values_mut() {
@@ -919,6 +933,12 @@ impl Security {
         let mut g = self.state();
         let st = &mut *g;
         let Some(peer) = st.peers.get_mut(&src) else {
+            if token.class_id == auth::REQUEST_CLASS
+                && !st.revoked.contains(&src)
+                && (st.early.len() < MAX_EARLY || st.early.contains_key(&src))
+            {
+                st.early.insert(src, m);
+            }
             return;
         };
         match token.class_id.as_str() {
@@ -2043,5 +2063,71 @@ fn prefix_text(p: &GuidPrefix) -> String {
 fn stderr_log(s: &str) {
     if std::env::var_os("RUSTORB_DDS_SECURITY_LOG").is_some() {
         eprintln!("rustorb-dds security: {s}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustorb_rtps::VendorId;
+
+    const CERTS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rustorb-dds-security/tests/certs/"
+    );
+
+    fn participant(who: &str, n: u8) -> (Security, ParticipantData) {
+        let f = |name: &str| format!("file:{CERTS}{name}");
+        let config = SecurityConfig {
+            identity_ca: f("identity_ca.pem"),
+            identity_certificate: f(&format!("{who}_cert.pem")),
+            private_key: f(&format!("{who}_key.pem")),
+            permissions_ca: f("permissions_ca.pem"),
+            governance: f("governance.p7s"),
+            permissions: f(&format!("permissions_{who}.p7s")),
+            password: None,
+            crl: None,
+            ocsp: None,
+            logging: None,
+        };
+        let s = Security::new(
+            &config,
+            0,
+            GuidPrefix([n; 12]),
+            WriterConfig::default(),
+            ReaderConfig::default(),
+        )
+        .unwrap();
+        let mut data = ParticipantData::new(s.prefix(), VendorId::UNKNOWN);
+        data.metatraffic_unicast_locators = vec![Locator::udpv4("127.0.0.1:7410".parse().unwrap())];
+        s.announce(&mut data);
+        (s, data)
+    }
+
+    #[test]
+    fn a_request_before_the_announcement_is_answered_once_it_comes() {
+        let t = Instant::now();
+        let (a, da) = participant("p1", 1);
+        let (b, db) = participant("p2", 2);
+        let id = |p: GuidPrefix| Guid::new(p, EntityId::PARTICIPANT).to_bytes();
+        let (requester, replier, d_requester, d_replier) =
+            if auth::initiates(&id(a.prefix()), &id(b.prefix())) {
+                (&a, &b, &da, &db)
+            } else {
+                (&b, &a, &db, &da)
+            };
+        // The requester discovered the replier and sent its request; the
+        // replier gets it before the requester's announcement.
+        requester.participant_discovered(d_replier, t);
+        let (request, _) = requester.poll(t);
+        assert!(!request.is_empty());
+        for o in &request {
+            replier.handle_discovery(&o.bytes, t);
+        }
+        assert!(replier.poll(t).0.is_empty());
+        // Then the announcement: the reply goes at once.
+        replier.participant_discovered(d_requester, t);
+        let (reply, _) = replier.poll(t);
+        assert!(!reply.is_empty());
     }
 }

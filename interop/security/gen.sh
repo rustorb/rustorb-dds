@@ -1,24 +1,28 @@
 #!/bin/sh
 # Makes what the DDS Security cases of interop/run.sh use, in DIR:
 #
-#   interop/security/gen.sh DIR [rtps_protection]
+#   interop/security/gen.sh DIR [rtps_protection [protection]]
 #
 # - an identity CA (EC P-256) and a certificate for each side: rustorb
 #   and peer, both EC P-256;
 # - a permissions CA, and the governance and the permissions documents
 #   signed by it (S/MIME): every topic of domains 0-230 with discovery,
-#   liveliness, metadata and data encrypted, the RTPS messages protected
-#   as rtps_protection says (NONE, SIGN or ENCRYPT; default NONE), and
-#   both subjects allowed to publish and subscribe everything;
+#   liveliness, metadata and data protected as protection says (NONE,
+#   SIGN or ENCRYPT; default ENCRYPT), the RTPS messages as
+#   rtps_protection says (default NONE), and both subjects allowed to
+#   publish and subscribe everything (bench/run.py --security uses the
+#   other two values of protection);
 # - rustorb's private key encrypted (PKCS #8, password in
 #   dds.sec.auth.password), and a CRL of the identity CA that revokes a
 #   third certificate, so that rustorb-dds checks the peer against it;
 # - the configuration of each implementation: rustorb.properties (for
 #   RUSTORB_DDS_SECURITY), cyclonedds.xml (CYCLONEDDS_URI) and fastdds.xml
-#   (FASTRTPS_DEFAULT_PROFILES_FILE).
+#   (FASTRTPS_DEFAULT_PROFILES_FILE), and peer.properties (rustorb-dds with
+#   the peer's identity, for two rustorb-dds participants of the bench).
 set -e
 dir=$1
 rtps=${2:-NONE}
+kind=${3:-ENCRYPT}
 mkdir -p "$dir"
 cd "$dir"
 days=3650
@@ -62,8 +66,8 @@ cat > governance.xml <<XML
       <domains><id_range><min>0</min><max>230</max></id_range></domains>
       <allow_unauthenticated_participants>false</allow_unauthenticated_participants>
       <enable_join_access_control>true</enable_join_access_control>
-      <discovery_protection_kind>ENCRYPT</discovery_protection_kind>
-      <liveliness_protection_kind>ENCRYPT</liveliness_protection_kind>
+      <discovery_protection_kind>$kind</discovery_protection_kind>
+      <liveliness_protection_kind>$kind</liveliness_protection_kind>
       <rtps_protection_kind>$rtps</rtps_protection_kind>
       <topic_access_rules>
         <topic_rule>
@@ -72,8 +76,8 @@ cat > governance.xml <<XML
           <enable_liveliness_protection>true</enable_liveliness_protection>
           <enable_read_access_control>true</enable_read_access_control>
           <enable_write_access_control>true</enable_write_access_control>
-          <metadata_protection_kind>ENCRYPT</metadata_protection_kind>
-          <data_protection_kind>ENCRYPT</data_protection_kind>
+          <metadata_protection_kind>$kind</metadata_protection_kind>
+          <data_protection_kind>$kind</data_protection_kind>
         </topic_rule>
       </topic_access_rules>
     </domain_rule>
@@ -119,6 +123,15 @@ dds.sec.auth.identity_certificate=file:$d/rustorb_cert.pem
 dds.sec.auth.private_key=file:$d/rustorb_key.pem
 dds.sec.auth.password=$password
 rustorb.dds.sec.auth.crl=file:$d/crl.pem
+dds.sec.access.permissions_ca=file:$d/permissions_ca.pem
+dds.sec.access.governance=file:$d/governance.p7s
+dds.sec.access.permissions=file:$d/permissions.p7s
+P
+
+cat > peer.properties <<P
+dds.sec.auth.identity_ca=file:$d/identity_ca.pem
+dds.sec.auth.identity_certificate=file:$d/peer_cert.pem
+dds.sec.auth.private_key=file:$d/peer_key.pem
 dds.sec.access.permissions_ca=file:$d/permissions_ca.pem
 dds.sec.access.governance=file:$d/governance.p7s
 dds.sec.access.permissions=file:$d/permissions.p7s

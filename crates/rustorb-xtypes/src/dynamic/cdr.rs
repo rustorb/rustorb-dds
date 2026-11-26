@@ -14,7 +14,9 @@
 use rustorb_cdr::xcdr::{DHeaderMark, Delimited, ListEnd, MemberHeader, Parameter, XcdrFormat};
 use rustorb_cdr::{ByteOrder, Decoder, Encoder, Encoding};
 
-use super::data::{DynamicData, Value, array_len, discriminator_value, selected};
+use super::data::{
+    DynamicData, Octets, Value, array_len, discriminator_value, octet_element, selected,
+};
 use super::ty::{DynamicType, resolve, struct_members};
 use crate::type_object::MemberId;
 use crate::types::*;
@@ -297,6 +299,18 @@ fn write(d: &DynamicData, enc: &mut Encoder, key: bool) -> Result<()> {
             }
             end_dheader(enc, mark)?;
         }
+        (Type::Sequence(s), Value::Octets(o)) => {
+            // Primitive elements: no DHEADER.
+            check_bound(o.bytes.len(), s.bound)?;
+            enc.write_len(o.bytes.len())?;
+            enc.write_octets(&o.bytes);
+        }
+        (Type::Array(a), Value::Octets(o)) => {
+            if o.bytes.len() != array_len(a) {
+                return Err(invalid("a value that is not of its type"));
+            }
+            enc.write_octets(&o.bytes);
+        }
         (Type::Array(a), Value::Collection(_)) => {
             let mark = (is_v2(enc) && !is_primitive(innermost(a))).then(|| enc.begin_dheader());
             write_in_array(d, enc, key)?;
@@ -342,6 +356,10 @@ fn write(d: &DynamicData, enc: &mut Encoder, key: bool) -> Result<()> {
 /// Writes the elements of an array, those of the arrays inside it
 /// without a DHEADER of their own.
 fn write_in_array(d: &DynamicData, enc: &mut Encoder, key: bool) -> Result<()> {
+    if let Value::Octets(o) = &d.value {
+        enc.write_octets(&o.bytes);
+        return Ok(());
+    }
     let Value::Collection(items) = &d.value else {
         return Err(invalid("a value that is not of its type"));
     };
@@ -610,6 +628,14 @@ fn read(ty: &Type, dec: &mut Decoder<'_>) -> Result<DynamicData> {
         Type::Annotation(_) => {
             return Err(Error::Unsupported("reading a value of an annotation type"));
         }
+        Type::Sequence(s) if octet_element(ty).is_some() => {
+            let len = dec.read_len(1)?;
+            check_bound(len, s.bound)?;
+            Value::Octets(Octets::new(dec.read_octets(len)?.to_vec()))
+        }
+        Type::Array(a) if octet_element(ty).is_some() => {
+            Value::Octets(Octets::new(dec.read_octets(array_len(a))?.to_vec()))
+        }
         Type::Sequence(s) => {
             let delimited = read_delimited(dec, is_v2_in(dec) && !is_primitive(&s.element.ty))?;
             let len = dec.read_len(1)?;
@@ -668,6 +694,10 @@ fn read_in_array(a: &ArrayType, dec: &mut Decoder<'_>) -> Result<Vec<DynamicData
     let mut items = Vec::with_capacity(len.min(4096));
     for _ in 0..len {
         items.push(match element {
+            Type::Array(inner) if octet_element(element).is_some() => DynamicData {
+                ty: element.clone(),
+                value: Value::Octets(Octets::new(dec.read_octets(array_len(inner))?.to_vec())),
+            },
             Type::Array(inner) => DynamicData {
                 ty: element.clone(),
                 value: Value::Collection(read_in_array(inner, dec)?),

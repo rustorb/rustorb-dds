@@ -399,12 +399,13 @@ impl Spdp {
 
     /// The next time [`Spdp::poll_announce`] or [`Spdp::remove_expired`]
     /// has something to do.
+    ///
+    /// An announcement that is due (the first one, or one to answer a new
+    /// participant) makes it now: the caller does not sleep first.
     pub fn next_deadline(&self) -> Option<Instant> {
+        let announce = self.next_announce.unwrap_or_else(Instant::now);
         let expiry = self.remote.values().filter_map(|r| r.expires).min();
-        match (self.next_announce, expiry) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        Some(expiry.map_or(announce, |e| e.min(announce)))
     }
 
     /// The remote participants currently known.
@@ -649,6 +650,8 @@ mod tests {
         let mut s = spdp(1);
         s.config.announce_locators = vec![Locator::udpv4("239.255.0.1:9150".parse().unwrap())];
         let t0 = Instant::now();
+        // The first announcement is due at once.
+        assert!(s.next_deadline().unwrap() <= Instant::now());
         let (bytes, to) = s.poll_announce(t0).unwrap();
         assert_eq!(to.len(), 1);
         let msg = Message::decode(&bytes).unwrap();

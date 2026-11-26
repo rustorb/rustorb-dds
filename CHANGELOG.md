@@ -47,6 +47,38 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   value (so `get_key_value` gives `None` on a keyless topic, as it did for
   loaned samples). The reliable round trip of 16 KiB went from about 160
   to 105 µs, and of 256 KiB from about 600 to 550 µs, in the container.
+- Discovery is faster (#106). The participant's first SPDP announcement,
+  and its answer to a new participant, go out at once rather than at the
+  thread's next wake-up (up to 50 ms); the SEDP writers send a HEARTBEAT
+  every 100 ms (was 1 s) while something is not acknowledged; and a
+  reliable reader's first ACKNACK to a newly matched writer asks for a
+  HEARTBEAT (final flag clear), so what the writer sent before the reader
+  knew it is asked for at once. In the container, 10 participants started
+  together all matched in about 30 ms instead of about 1 s.
+  `SedpConfig::default()` has the 100 ms period; `Spdp::next_deadline`
+  is now when an announcement is due.
+- `DynamicData` keeps a sequence or an array of octets (`byte`,
+  `uint8`) as bytes, not as one `DynamicData` per element, and reads,
+  writes, compares and copies it (`get/set_byte_values`,
+  `get/set_uint8_values`, CDR) all at once; it becomes one value per
+  element only when one is borrowed for change (`loan_value`). The
+  bindings, which pass samples as `DynamicData`, round-trip 64 KiB of
+  octets in about 0.2 ms instead of 6 to 8 ms; Python converts `bytes`
+  in one step too (#120).
+- A reliable writer sends a HEARTBEAT to a newly matched reliable reader
+  at once, even with nothing written, rather than only when the reader's
+  first ACKNACK asks for one. An OpenDDS reader whose first ACKNACK was
+  lost could otherwise get a large sample's fragments before any
+  HEARTBEAT, drop them, and deliver the next sample first (seen once in
+  the `rustorb-to-opendds-large` interop case, which drops one in five
+  received datagrams).
+- DDS Security: a handshake request that comes before the requester's
+  SPDP announcement is kept (the last one of each participant, for at
+  most 256 participants) and answered once the participant is
+  discovered, rather than dropped and left for the requester to send
+  again 500 ms later. With 10 participants started together, all
+  authenticated and matched in about 90 ms instead of about 520 ms in the
+  container (#107).
 - A read or take with `max_samples` costs in proportion to `max_samples`,
   not to the samples in the reader (#110).
 - The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
@@ -62,6 +94,21 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   loaned samples), the same program for Cyclone DDS and Fast DDS in
   `bench/`, `bench/run.py` and `bench/report.py`, and the first results
   in docs/benchmark.md (#101 to #105, #109).
+- Discovery measurements (#106): the `disc` mode of `rustorb-dds-perf`
+  and of the Cyclone DDS and Fast DDS programs, and `bench/discovery.py`,
+  which starts N participants at once (alone or mixed with another
+  implementation) and gives the time until all matched, CPU time, memory
+  and the UDP traffic; the results are in docs/benchmark.md.
+- DDS Security measurements (#107): `bench/run.py --security` and
+  `bench/discovery.py --security` with `none`, `auth` (authentication
+  and access control, nothing protected), `sign` and `encrypt`, for
+  rustorb-dds, Cyclone DDS and Fast DDS; `interop/security/gen.sh` takes
+  the protection kind of discovery, liveliness, metadata and data as a
+  third argument and writes `peer.properties`. The Fast DDS program
+  starts from the default participant QoS of its XML profiles.
+- Language binding measurements (#107): `bench/bindings.py` and a ping
+  in C++, Java, .NET, Python and Ruby (`bench/bindings/`) against the
+  Rust `rustorb-dds-perf pong`; the results are in docs/benchmark.md.
 
 ### Fixed
 

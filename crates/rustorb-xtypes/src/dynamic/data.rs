@@ -28,11 +28,28 @@ impl DynamicDataFactory {
 /// [`MEMBER_ID_INVALID`]. The getters and setters convert between
 /// integer, floating point and character types as 7.5.2.11.9 allows, and
 /// take enums as signed integers and bitmasks as unsigned ones.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DynamicData {
     /// The type, its aliases resolved.
     pub(crate) ty: Type,
     pub(crate) value: Value,
+}
+
+impl PartialEq for DynamicData {
+    fn eq(&self, other: &DynamicData) -> bool {
+        self.ty == other.ty
+            && match (&self.value, &other.value) {
+                // The same elements, one side as octets.
+                (Value::Octets(o), Value::Collection(items))
+                | (Value::Collection(items), Value::Octets(o)) => {
+                    o.bytes.len() == items.len()
+                        && items.iter().zip(&o.bytes).all(
+                            |(d, b)| matches!(d.value, Value::Byte(x) | Value::Uint8(x) if x == *b),
+                        )
+                }
+                (a, b) => a == b,
+            }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +86,79 @@ pub(crate) enum Value {
     },
     /// The elements of a sequence or (flattened) array.
     Collection(Vec<DynamicData>),
+    /// The elements of a sequence or an array of `octet` or `uint8`
+    /// ([`octet_element`]), as octets.
+    Octets(Octets),
     Map(Vec<(DynamicData, DynamicData)>),
+}
+
+/// The elements of a sequence or an array of `octet` or `uint8`, kept as
+/// octets rather than as a [`DynamicData`] each: reading, writing and
+/// serializing them costs a copy, not an allocation per octet
+/// (rustorb-dds#120). An element is made a [`DynamicData`] only when it is
+/// borrowed: all of them at once, by [`Octets::view`] to read, or by
+/// turning the value into a [`Value::Collection`] to change one in place.
+#[derive(Debug, Default)]
+pub(crate) struct Octets {
+    pub(crate) bytes: Vec<u8>,
+    view: std::sync::OnceLock<Vec<DynamicData>>,
+}
+
+impl Octets {
+    pub(crate) fn new(bytes: Vec<u8>) -> Octets {
+        Octets {
+            bytes,
+            view: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The elements as values of `element` (the resolved element type).
+    pub(crate) fn view(&self, element: &Type) -> &[DynamicData] {
+        self.view
+            .get_or_init(|| self.bytes.iter().map(|b| octet_data(element, *b)).collect())
+    }
+}
+
+impl Clone for Octets {
+    fn clone(&self) -> Octets {
+        Octets::new(self.bytes.clone())
+    }
+}
+
+impl PartialEq for Octets {
+    fn eq(&self, other: &Octets) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+/// The element type of a sequence or an array of `octet` or `uint8`
+/// (aliases resolved), whose value is [`Value::Octets`].
+pub(crate) fn octet_element(ty: &Type) -> Option<&Type> {
+    let element = match ty {
+        Type::Sequence(s) => resolve(&s.element.ty),
+        Type::Array(a) => resolve(&a.element.ty),
+        _ => return None,
+    };
+    matches!(element, Type::Primitive(Primitive::Byte | Primitive::Uint8)).then_some(element)
+}
+
+/// An element of [`Value::Octets`] as a value of `element`.
+pub(crate) fn octet_data(element: &Type, b: u8) -> DynamicData {
+    DynamicData {
+        ty: element.clone(),
+        value: match element {
+            Type::Primitive(Primitive::Uint8) => Value::Uint8(b),
+            _ => Value::Byte(b),
+        },
+    }
+}
+
+/// The octet of a value of `octet` or `uint8`.
+fn octet_of(d: &DynamicData) -> u8 {
+    match d.value {
+        Value::Byte(b) | Value::Uint8(b) => b,
+        _ => unreachable!("an octet element"),
+    }
 }
 
 fn bad(what: impl Into<String>) -> Error {
@@ -191,6 +280,10 @@ impl DynamicData {
                 Primitive::Char16 => Value::Char16('\0'),
             },
             Type::String { .. } => Value::String(String::new()),
+            Type::Sequence(_) if octet_element(&ty).is_some() => Value::Octets(Octets::default()),
+            Type::Array(a) if octet_element(&ty).is_some() => {
+                Value::Octets(Octets::new(vec![0; array_len(a)]))
+            }
             Type::Sequence(_) => Value::Collection(Vec::new()),
             Type::Array(a) => {
                 let element = DynamicData::new(&a.element.ty);
@@ -255,6 +348,7 @@ impl DynamicData {
     pub fn get_item_count(&self) -> u32 {
         (match &self.value {
             Value::Collection(v) => v.len(),
+            Value::Octets(o) => o.bytes.len(),
             Value::Map(v) => v.len(),
             Value::Bitmask(b) => match &self.ty {
                 Type::Bitmask(t) => t
@@ -319,6 +413,8 @@ impl DynamicData {
             },
             (Type::Sequence(_), Value::Collection(v)) if i <= v.len() => Some(index),
             (_, Value::Collection(v)) if i < v.len() => Some(index),
+            (Type::Sequence(_), Value::Octets(o)) if i <= o.bytes.len() => Some(index),
+            (_, Value::Octets(o)) if i < o.bytes.len() => Some(index),
             _ => None,
         }
         .unwrap_or(MEMBER_ID_INVALID)
@@ -360,7 +456,35 @@ impl DynamicData {
             (_, Value::Collection(v)) => v
                 .get(id as usize)
                 .ok_or_else(|| bad(format!("no element {id}"))),
+            (ty, Value::Octets(o)) => {
+                let element = octet_element(ty).expect("octets");
+                o.view(element)
+                    .get(id as usize)
+                    .ok_or_else(|| bad(format!("no element {id}")))
+            }
             _ => Err(bad(format!("no member {id}"))),
+        }
+    }
+
+    /// The elements of a sequence or an array, to read.
+    pub(crate) fn elements(&self) -> Option<&[DynamicData]> {
+        match &self.value {
+            Value::Collection(v) => Some(v),
+            Value::Octets(o) => Some(o.view(octet_element(&self.ty).expect("octets"))),
+            _ => None,
+        }
+    }
+
+    /// Turns [`Value::Octets`] into [`Value::Collection`], so that an
+    /// element can be borrowed to change.
+    fn spread(&mut self) {
+        if let Value::Octets(o) = &mut self.value {
+            let element = octet_element(&self.ty).expect("octets");
+            let items = match o.view.take() {
+                Some(v) => v,
+                None => o.bytes.iter().map(|b| octet_data(element, *b)).collect(),
+            };
+            self.value = Value::Collection(items);
         }
     }
 
@@ -371,6 +495,7 @@ impl DynamicData {
         if id == MEMBER_ID_INVALID {
             return Ok(self);
         }
+        self.spread();
         match (&self.ty, &mut self.value) {
             (Type::Struct(s), Value::Struct(values)) => {
                 let members = struct_members(s);
@@ -468,6 +593,11 @@ impl DynamicData {
             }
             (Type::Sequence(_), Value::Collection(v)) if (id as usize) < v.len() => {
                 v.remove(id as usize);
+                Ok(())
+            }
+            (Type::Sequence(_), Value::Octets(o)) if (id as usize) < o.bytes.len() => {
+                o.bytes.remove(id as usize);
+                o.view = std::sync::OnceLock::new();
                 Ok(())
             }
             (Type::Bitmask(_), Value::Bitmask(b)) => {
@@ -718,6 +848,16 @@ impl DynamicData {
     }
 
     fn get_scalar(&self, id: MemberId, want: TypeKind) -> Result<Scalar> {
+        if id != MEMBER_ID_INVALID
+            && let Value::Octets(o) = &self.value
+        {
+            let element = octet_element(&self.ty).expect("octets");
+            let b = *o
+                .bytes
+                .get(id as usize)
+                .ok_or_else(|| bad(format!("no element {id}")))?;
+            return octet_data(element, b).get_scalar(MEMBER_ID_INVALID, want);
+        }
         if want == TK_BOOLEAN
             && let Some(flag) = self.flag(id)
         {
@@ -756,6 +896,36 @@ impl DynamicData {
     }
 
     fn set_scalar(&mut self, id: MemberId, value: Scalar) -> Result<()> {
+        if id != MEMBER_ID_INVALID
+            && let Value::Octets(o) = &self.value
+        {
+            let i = id as usize;
+            let len = o.bytes.len();
+            let append = match &self.ty {
+                Type::Sequence(s) if i == len => {
+                    if s.bound != 0 && len >= s.bound as usize {
+                        return Err(bad("the sequence is full"));
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if i >= len && !append {
+                return Err(bad(format!("no element {id}")));
+            }
+            let mut d = octet_data(octet_element(&self.ty).expect("octets"), 0);
+            d.set_scalar(MEMBER_ID_INVALID, value)?;
+            let Value::Octets(o) = &mut self.value else {
+                unreachable!("octets");
+            };
+            if append {
+                o.bytes.push(octet_of(&d));
+            } else {
+                o.bytes[i] = octet_of(&d);
+            }
+            o.view = std::sync::OnceLock::new();
+            return Ok(());
+        }
         if let Scalar::Bool(on) = value
             && let Some(flag) = self.flag(id)
         {
@@ -1072,6 +1242,39 @@ fn unsigned_bits(kind: TypeKind) -> Option<u16> {
     }
 }
 
+/// Values that are octets themselves (`u8`): copied as they are into and
+/// out of [`Value::Octets`].
+trait OctetValues: Sized {
+    fn to_octets(_: &[Self]) -> Option<Vec<u8>> {
+        None
+    }
+    fn from_octets(_: &[u8]) -> Option<Vec<Self>> {
+        None
+    }
+}
+
+impl OctetValues for u8 {
+    fn to_octets(v: &[u8]) -> Option<Vec<u8>> {
+        Some(v.to_vec())
+    }
+    fn from_octets(b: &[u8]) -> Option<Vec<u8>> {
+        Some(b.to_vec())
+    }
+}
+
+impl OctetValues for bool {}
+impl OctetValues for i8 {}
+impl OctetValues for i16 {}
+impl OctetValues for u16 {}
+impl OctetValues for i32 {}
+impl OctetValues for u32 {}
+impl OctetValues for i64 {}
+impl OctetValues for u64 {}
+impl OctetValues for f32 {}
+impl OctetValues for f64 {}
+impl OctetValues for LongDouble {}
+impl OctetValues for char {}
+
 macro_rules! accessors {
     ($($get:ident, $set:ident, $gets:ident, $sets:ident, $t:ty, $variant:ident, $kind:ident;)*) => {
         impl DynamicData {
@@ -1092,10 +1295,24 @@ macro_rules! accessors {
                 #[doc = concat!("`", stringify!($gets), "`: the elements of a sequence or an array.")]
                 pub fn $gets(&self, id: MemberId) -> Result<Vec<$t>> {
                     let target = self.member(id)?;
-                    let Value::Collection(items) = &target.value else {
-                        return Err(bad("not a sequence or an array"));
-                    };
-                    items.iter().map(|item| item.$get(MEMBER_ID_INVALID)).collect()
+                    match &target.value {
+                        Value::Collection(items) => {
+                            items.iter().map(|item| item.$get(MEMBER_ID_INVALID)).collect()
+                        }
+                        Value::Octets(o) => {
+                            let element = octet_element(&target.ty).expect("octets");
+                            if kind_of(element) == $kind
+                                && let Some(v) = <$t as OctetValues>::from_octets(&o.bytes)
+                            {
+                                return Ok(v);
+                            }
+                            o.bytes
+                                .iter()
+                                .map(|b| octet_data(element, *b).$get(MEMBER_ID_INVALID))
+                                .collect()
+                        }
+                        _ => Err(bad("not a sequence or an array")),
+                    }
                 }
 
                 #[doc = concat!("`", stringify!($sets), "`: the elements of a sequence (all of them) or an array (as many as it has).")]
@@ -1116,9 +1333,26 @@ macro_rules! accessors {
                         }
                         _ => return Err(bad("not a sequence or an array")),
                     };
+                    if let Some(element) = octet_element(&target.ty) {
+                        let bytes = match <$t as OctetValues>::to_octets(values) {
+                            Some(b) if kind_of(element) == $kind => b,
+                            _ => {
+                                let mut item = octet_data(element, 0);
+                                let mut bytes = Vec::with_capacity(values.len());
+                                for v in values {
+                                    item.$set(MEMBER_ID_INVALID, *v)?;
+                                    bytes.push(octet_of(&item));
+                                }
+                                bytes
+                            }
+                        };
+                        target.value = Value::Octets(Octets::new(bytes));
+                        return Ok(());
+                    }
+                    let element = element.clone();
                     let mut items = Vec::with_capacity(values.len());
                     for v in values {
-                        let mut item = DynamicData::new(element);
+                        let mut item = DynamicData::new(&element);
                         item.$set(MEMBER_ID_INVALID, *v)?;
                         items.push(item);
                     }
@@ -1369,5 +1603,113 @@ mod tests {
         assert_eq!(a.get_int32_values(0), Ok(vec![0, 0, 0, 5]));
         assert_eq!(a.get_member_id_by_name("a"), 0);
         assert_eq!(a.get_member_id_by_name("b"), MEMBER_ID_INVALID);
+    }
+}
+
+#[cfg(test)]
+mod octet_tests {
+    use super::*;
+    use rustorb_cdr::{ByteOrder, Encoding};
+    use std::sync::Arc;
+
+    fn octets(element: Primitive, bound: u32) -> Type {
+        Type::Sequence(Arc::new(SequenceType {
+            element: Element::new(Type::Primitive(element)),
+            bound,
+        }))
+    }
+
+    fn holder(member: Type) -> DynamicType {
+        DynamicType::new(
+            StructType {
+                name: "M::Holder".into(),
+                members: vec![StructMember::new("payload", 0, member)],
+                ..StructType::default()
+            }
+            .into(),
+        )
+    }
+
+    #[test]
+    fn a_sequence_of_octets_is_kept_as_octets() {
+        let ty = holder(octets(Primitive::Byte, 0));
+        let mut d = DynamicDataFactory::create_data(&ty);
+        d.set_byte_values(0, &[1, 2, 3]).unwrap();
+        let Value::Struct(m) = &d.value else { panic!() };
+        assert!(matches!(&m[0].as_ref().unwrap().value, Value::Octets(o) if o.bytes == [1, 2, 3]));
+        assert_eq!(d.get_byte_values(0).unwrap(), [1, 2, 3]);
+        // Through CDR and back, as octets.
+        for e in [Encoding::Xcdr1, Encoding::Xcdr2] {
+            let bytes = d.to_payload(e, ByteOrder::Little).unwrap();
+            let back = DynamicData::from_payload(&ty, &bytes).unwrap();
+            assert_eq!(back, d);
+            assert_eq!(back.get_byte_values(0).unwrap(), [1, 2, 3]);
+        }
+        // An element, read and changed, and one appended.
+        let mut seq = d.get_complex_value(0).unwrap();
+        assert_eq!(seq.get_item_count(), 3);
+        assert_eq!(seq.get_byte_value(1).unwrap(), 2);
+        assert_eq!(seq.get_int32_value(2).unwrap(), 3);
+        seq.set_byte_value(1, 20).unwrap();
+        seq.set_byte_value(3, 4).unwrap();
+        assert!(seq.set_byte_value(5, 6).is_err());
+        assert_eq!(
+            seq.get_byte_values(MEMBER_ID_INVALID).unwrap(),
+            [1, 20, 3, 4]
+        );
+        assert_eq!(
+            seq.get_value(3)
+                .unwrap()
+                .get_byte_value(MEMBER_ID_INVALID)
+                .unwrap(),
+            4
+        );
+        seq.clear_value(0).unwrap();
+        assert_eq!(seq.get_byte_values(MEMBER_ID_INVALID).unwrap(), [20, 3, 4]);
+    }
+
+    #[test]
+    fn octets_equal_the_same_elements_one_by_one() {
+        let ty = holder(octets(Primitive::Uint8, 4));
+        let mut a = DynamicDataFactory::create_data(&ty);
+        a.set_uint8_values(0, &[7, 8]).unwrap();
+        // Borrowing an element to change it spreads the octets into values.
+        let mut b = DynamicDataFactory::create_data(&ty);
+        b.set_uint8_values(0, &[7, 0]).unwrap();
+        b.loan_value(0)
+            .unwrap()
+            .loan_value(1)
+            .unwrap()
+            .set_uint8_value(MEMBER_ID_INVALID, 8)
+            .unwrap();
+        let Value::Struct(m) = &b.value else { panic!() };
+        assert!(matches!(m[0].as_ref().unwrap().value, Value::Collection(_)));
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+        // Serialized the same.
+        let pa = a.to_payload(Encoding::Xcdr2, ByteOrder::Big).unwrap();
+        let pb = b.to_payload(Encoding::Xcdr2, ByteOrder::Big).unwrap();
+        assert_eq!(pa, pb);
+        // The bound still holds, and other kinds convert as before.
+        assert!(a.set_uint8_values(0, &[1, 2, 3, 4, 5]).is_err());
+        a.set_uint16_values(0, &[1, 2]).unwrap_err();
+        assert_eq!(a.get_uint16_values(0).unwrap(), [7, 8]);
+        a.set_byte_values(0, &[9]).unwrap();
+        assert_eq!(a.get_uint8_values(0).unwrap(), [9]);
+    }
+
+    #[test]
+    fn an_array_of_octets() {
+        let ty = holder(Type::Array(Arc::new(ArrayType {
+            element: Element::new(Type::Primitive(Primitive::Byte)),
+            dimensions: vec![2, 3],
+        })));
+        let mut d = DynamicDataFactory::create_data(&ty);
+        assert_eq!(d.get_byte_values(0).unwrap(), [0; 6]);
+        assert!(d.set_byte_values(0, &[1, 2]).is_err());
+        d.set_byte_values(0, &[1, 2, 3, 4, 5, 6]).unwrap();
+        let bytes = d.to_payload(Encoding::Xcdr2, ByteOrder::Little).unwrap();
+        let back = DynamicData::from_payload(&ty, &bytes).unwrap();
+        assert_eq!(back.get_byte_values(0).unwrap(), [1, 2, 3, 4, 5, 6]);
     }
 }

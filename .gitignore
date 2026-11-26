@@ -12,3 +12,5 @@ __pycache__/
 /ruby/vendor
 /ruby/*.gem
 bench/results/*/log.txt
+/bench/bindings/dotnet/bin
+/bench/bindings/dotnet/obj

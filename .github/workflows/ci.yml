@@ -252,6 +252,12 @@ jobs:
           python3 bench/run.py --interop --sizes 32,65536 --warmup 0.2
           --duration 1 --repeat 1 --out target/bench/smoke
       - run: python3 bench/report.py target/bench/smoke
+      - run: >
+          python3 bench/discovery.py --counts 2,5 --repeat 1 --strict
+          --out target/bench/smoke
+      - run: >
+          python3 bench/bindings.py --bindings rust,cpp --sizes 32,65536
+          --warmup 0.2 --duration 1 --repeat 1 --strict --out target/bench/smoke
       - name: Keep the results and the log
         if: always()
         uses: actions/upload-artifact@v4

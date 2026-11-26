@@ -506,7 +506,12 @@ impl ReliableWriter {
             last_nackfrag: None,
             repair_at: None,
             last_acknack: None,
-            heartbeat_due: false,
+            // A new reliable reader is sent a HEARTBEAT at once, even with
+            // nothing to send: it learns the writer's range before any
+            // data, without waiting for its own first ACKNACK to get
+            // here (some implementations, OpenDDS among them, only take
+            // data from a writer once they have its HEARTBEAT).
+            heartbeat_due: m.reliable,
         });
         p.unicast = m.unicast;
         p.multicast = m.multicast;
@@ -1192,8 +1197,13 @@ impl ReliableReader {
                 set.insert(*sn);
             }
             self.acknack_count = self.acknack_count.wrapping_add(1);
+            // Before anything came from the writer (the ACKNACK sent when
+            // it is matched), ask for a HEARTBEAT: what the writer sent
+            // before it was matched here (and so was dropped) is then
+            // asked for at once, not at its next periodic HEARTBEAT.
+            let first = p.last_heartbeat.is_none() && p.next_expected == SequenceNumber(1);
             let a = Submessage::AckNack(AckNack {
-                final_flag: missing.is_empty(),
+                final_flag: missing.is_empty() && !first,
                 reader_id: self.guid.entity_id,
                 writer_id: g.entity_id,
                 reader_sn_state: set,
@@ -1347,6 +1357,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_new_reliable_reader_is_sent_a_heartbeat_at_once() {
+        // Even with nothing written, and before its first ACKNACK comes
+        // (it may be lost), the reader learns the writer's range.
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.poll(t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        let out = w.poll(t);
+        assert!(out.iter().all(|o| o.locators == loc(2)));
+        assert!(matches!(
+            &subs(&out)[..],
+            [.., Submessage::Heartbeat(h)] if h.first_sn == SequenceNumber(1) && h.last_sn == SequenceNumber(0)
+        ));
+        // Only once.
+        assert!(subs(&w.poll(t)).is_empty());
+    }
+
+    #[test]
+    fn data_sent_before_the_reader_matched_comes_at_once() {
+        // The writer matched the reader first and sent 1..=2, which the
+        // reader dropped (it did not know the writer yet). Its first
+        // ACKNACK asks for a HEARTBEAT, so they come without waiting for
+        // the writer's period (10 s here).
+        let t = Instant::now();
+        let config = WriterConfig {
+            heartbeat_period: Duration::from_secs(10),
+            ..WriterConfig::default()
+        };
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, config);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_change(None, payload(1));
+        w.add_change(None, payload(2));
+        let lost = w.poll(t);
+        assert!(!lost.is_empty());
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        let first = r.poll(t);
+        assert!(matches!(&subs(&first)[..], [Submessage::AckNack(a)] if !a.final_flag));
+        acknacks(&mut w, &first, t);
+        assert!(deliver(&mut r, &w.poll(t), &[], t).is_empty());
+        acknacks(&mut w, &r.poll(t), t);
+        let got = deliver(&mut r, &w.poll(t), &[], t);
+        assert_eq!(got.len(), 2);
     }
 
     #[test]
@@ -1583,8 +1639,9 @@ mod tests {
         };
         let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, cfg);
         w.add_reader(rguid(2), loc(2), vec![]);
-        // The first poll is the periodic one: it asks.
-        assert!(w.poll(t).is_empty());
+        // The first poll sends the HEARTBEAT for the match; with nothing
+        // written, it asks for nothing.
+        assert!(matches!(&subs(&w.poll(t))[..], [.., Submessage::Heartbeat(h)] if h.final_flag));
         let finals = |out: &[Outgoing]| -> Vec<bool> {
             subs(out)
                 .iter()
@@ -1711,9 +1768,18 @@ mod tests {
         };
         w.add_matched_reader(rguid(3), m);
         // Nothing is sent to it for 1..=3, and its early ACKNACK (which
-        // acknowledges nothing) does not bring them either.
+        // acknowledges nothing) does not bring them either: only the
+        // HEARTBEAT it asks for, which says 1..=3 are not for it.
         acknacks(&mut w, &r.poll(t), t);
-        assert!(w.poll(t).iter().all(|o| o.locators != loc(3)));
+        for o in w.poll(t).iter().filter(|o| o.locators == loc(3)) {
+            for s in Message::decode(&o.bytes).unwrap().submessages {
+                match s {
+                    Submessage::Heartbeat(h) => assert_eq!(h.first_sn, SequenceNumber(4)),
+                    Submessage::InfoDestination(_) | Submessage::InfoTimestamp(_) => {}
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
         // A request for 2 anyway is not answered with the DATA: for this
         // reader, 1..=3 count as acknowledged.
         let mut set = SequenceNumberSet::new(SequenceNumber(1), 4).unwrap();
