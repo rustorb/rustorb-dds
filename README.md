@@ -11,7 +11,8 @@ and listeners for the communication statuses, content filtered topics, and reque
 and Fast DDS, reliable transient-local and liveliness too, with OpenDDS (reliable, keyed,
 large samples, TypeLookup), and `std_msgs/msg/String` both ways
 with ROS 2's demo talker and listener, and the `add_two_ints` service both ways ([interop](interop/)). Which parts of the OMG specifications are done is in
-[docs/compliance.md](docs/compliance.md). The plan is
+[docs/compliance.md](docs/compliance.md). Latency and throughput against Cyclone DDS and
+Fast DDS are measured in [docs/benchmark.md](docs/benchmark.md) ([bench](bench/)). The plan is
 [rustorb/rustorb#111](https://github.com/rustorb/rustorb/issues/111).
 
 Try the hello world in two terminals:

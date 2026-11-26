@@ -234,6 +234,32 @@ jobs:
             !target/interop/build
           if-no-files-found: ignore
 
+  # The performance measurements (bench/, rustorb-dds#100) still run:
+  # every program and transport for a second, the numbers not looked at
+  # (a CI runner is no place to measure).
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the peers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ \
+            cyclonedds-dev cyclonedds-tools libfastrtps-dev fastddsgen iceoryx
+      - run: >
+          python3 bench/run.py --interop --sizes 32,65536 --warmup 0.2
+          --duration 1 --repeat 1 --out target/bench/smoke
+      - run: python3 bench/report.py target/bench/smoke
+      - name: Keep the results and the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: target/bench/smoke
+          if-no-files-found: ignore
+
   # The same cases with OpenDDS (RTPS discovery and the RTPS_UDP
   # transport), built and run in OpenDDS's Docker image.
   opendds:

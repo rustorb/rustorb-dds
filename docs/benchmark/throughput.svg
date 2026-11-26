@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" font-family="sans-serif" font-size="12">
+<rect width="760" height="420" fill="#fff"/>
+<text x="70" y="22" font-size="14" font-weight="bold">Throughput, reliable</text>
+<line x1="70" x2="540" y1="370.0" y2="370.0" stroke="#ddd"/>
+<text x="64" y="374.0" text-anchor="end">1</text>
+<line x1="70" x2="540" y1="315.0" y2="315.0" stroke="#ddd"/>
+<text x="64" y="319.0" text-anchor="end">10</text>
+<line x1="70" x2="540" y1="260.0" y2="260.0" stroke="#ddd"/>
+<text x="64" y="264.0" text-anchor="end">100</text>
+<line x1="70" x2="540" y1="205.0" y2="205.0" stroke="#ddd"/>
+<text x="64" y="209.0" text-anchor="end">1000</text>
+<line x1="70" x2="540" y1="150.0" y2="150.0" stroke="#ddd"/>
+<text x="64" y="154.0" text-anchor="end">10000</text>
+<line x1="70" x2="540" y1="95.0" y2="95.0" stroke="#ddd"/>
+<text x="64" y="99.0" text-anchor="end">100000</text>
+<line x1="70" x2="540" y1="40.0" y2="40.0" stroke="#ddd"/>
+<text x="64" y="44.0" text-anchor="end">1e+06</text>
+<line x1="70.0" x2="70.0" y1="40" y2="370" stroke="#eee"/>
+<text x="70.0" y="386" text-anchor="middle">32 B</text>
+<line x1="132.7" x2="132.7" y1="40" y2="370" stroke="#eee"/>
+<text x="132.7" y="386" text-anchor="middle">128 B</text>
+<line x1="195.3" x2="195.3" y1="40" y2="370" stroke="#eee"/>
+<text x="195.3" y="386" text-anchor="middle">512 B</text>
+<line x1="258.0" x2="258.0" y1="40" y2="370" stroke="#eee"/>
+<text x="258.0" y="386" text-anchor="middle">2 KiB</text>
+<line x1="320.7" x2="320.7" y1="40" y2="370" stroke="#eee"/>
+<text x="320.7" y="386" text-anchor="middle">8 KiB</text>
+<line x1="383.3" x2="383.3" y1="40" y2="370" stroke="#eee"/>
+<text x="383.3" y="386" text-anchor="middle">32 KiB</text>
+<line x1="446.0" x2="446.0" y1="40" y2="370" stroke="#eee"/>
+<text x="446.0" y="386" text-anchor="middle">128 KiB</text>
+<line x1="508.7" x2="508.7" y1="40" y2="370" stroke="#eee"/>
+<text x="508.7" y="386" text-anchor="middle">512 KiB</text>
+<text x="305.0" y="410" text-anchor="middle">sample size</text>
+<text x="16" y="205.0" text-anchor="middle" transform="rotate(-90 16 205.0)">Mbit/s</text>
+<polyline points="70.0,304.2 164.0,254.0 226.7,221.8 289.3,188.4 352.0,160.7 414.7,153.9 477.3,155.0 540.0,151.8" fill="none" stroke="#2a6fdb" stroke-width="2"/>
+<circle cx="70.0" cy="304.2" r="2.5" fill="#2a6fdb"/>
+<circle cx="164.0" cy="254.0" r="2.5" fill="#2a6fdb"/>
+<circle cx="226.7" cy="221.8" r="2.5" fill="#2a6fdb"/>
+<circle cx="289.3" cy="188.4" r="2.5" fill="#2a6fdb"/>
+<circle cx="352.0" cy="160.7" r="2.5" fill="#2a6fdb"/>
+<circle cx="414.7" cy="153.9" r="2.5" fill="#2a6fdb"/>
+<circle cx="477.3" cy="155.0" r="2.5" fill="#2a6fdb"/>
+<circle cx="540.0" cy="151.8" r="2.5" fill="#2a6fdb"/>
+<line x1="552" x2="576" y1="50" y2="50" stroke="#2a6fdb" stroke-width="2"/>
+<text x="582" y="54">rustorb udp</text>
+<polyline points="70.0,300.1 164.0,251.8 226.7,219.2 289.3,186.5 352.0,159.2 414.7,153.4 477.3,166.2 540.0,161.4" fill="none" stroke="#e0663a" stroke-width="2"/>
+<circle cx="70.0" cy="300.1" r="2.5" fill="#e0663a"/>
+<circle cx="164.0" cy="251.8" r="2.5" fill="#e0663a"/>
+<circle cx="226.7" cy="219.2" r="2.5" fill="#e0663a"/>
+<circle cx="289.3" cy="186.5" r="2.5" fill="#e0663a"/>
+<circle cx="352.0" cy="159.2" r="2.5" fill="#e0663a"/>
+<circle cx="414.7" cy="153.4" r="2.5" fill="#e0663a"/>
+<circle cx="477.3" cy="166.2" r="2.5" fill="#e0663a"/>
+<circle cx="540.0" cy="161.4" r="2.5" fill="#e0663a"/>
+<line x1="552" x2="576" y1="68" y2="68" stroke="#e0663a" stroke-width="2"/>
+<text x="582" y="72">rustorb shm</text>
+<polyline points="70.0,300.3 164.0,251.5 226.7,217.9 289.3,184.9 352.0,151.9 414.7,118.8 477.3,182.5 540.0,93.0" fill="none" stroke="#2e9e5b" stroke-width="2"/>
+<circle cx="70.0" cy="300.3" r="2.5" fill="#2e9e5b"/>
+<circle cx="164.0" cy="251.5" r="2.5" fill="#2e9e5b"/>
+<circle cx="226.7" cy="217.9" r="2.5" fill="#2e9e5b"/>
+<circle cx="289.3" cy="184.9" r="2.5" fill="#2e9e5b"/>
+<circle cx="352.0" cy="151.9" r="2.5" fill="#2e9e5b"/>
+<circle cx="414.7" cy="118.8" r="2.5" fill="#2e9e5b"/>
+<circle cx="477.3" cy="182.5" r="2.5" fill="#2e9e5b"/>
+<circle cx="540.0" cy="93.0" r="2.5" fill="#2e9e5b"/>
+<line x1="552" x2="576" y1="86" y2="86" stroke="#2e9e5b" stroke-width="2"/>
+<text x="582" y="90">rustorb loan</text>
+<polyline points="70.0,288.0 164.0,237.4 226.7,208.6 289.3,180.4 352.0,162.3 414.7,143.6 477.3,147.2 540.0,151.7" fill="none" stroke="#9b59b6" stroke-width="2"/>
+<circle cx="70.0" cy="288.0" r="2.5" fill="#9b59b6"/>
+<circle cx="164.0" cy="237.4" r="2.5" fill="#9b59b6"/>
+<circle cx="226.7" cy="208.6" r="2.5" fill="#9b59b6"/>
+<circle cx="289.3" cy="180.4" r="2.5" fill="#9b59b6"/>
+<circle cx="352.0" cy="162.3" r="2.5" fill="#9b59b6"/>
+<circle cx="414.7" cy="143.6" r="2.5" fill="#9b59b6"/>
+<circle cx="477.3" cy="147.2" r="2.5" fill="#9b59b6"/>
+<circle cx="540.0" cy="151.7" r="2.5" fill="#9b59b6"/>
+<line x1="552" x2="576" y1="104" y2="104" stroke="#9b59b6" stroke-width="2"/>
+<text x="582" y="108">cyclonedds udp</text>
+<polyline points="70.0,287.0 164.0,237.5 226.7,208.1 289.3,181.0 352.0,162.8 414.7,143.9 477.3,147.4 540.0,152.0" fill="none" stroke="#c99a06" stroke-width="2"/>
+<circle cx="70.0" cy="287.0" r="2.5" fill="#c99a06"/>
+<circle cx="164.0" cy="237.5" r="2.5" fill="#c99a06"/>
+<circle cx="226.7" cy="208.1" r="2.5" fill="#c99a06"/>
+<circle cx="289.3" cy="181.0" r="2.5" fill="#c99a06"/>
+<circle cx="352.0" cy="162.8" r="2.5" fill="#c99a06"/>
+<circle cx="414.7" cy="143.9" r="2.5" fill="#c99a06"/>
+<circle cx="477.3" cy="147.4" r="2.5" fill="#c99a06"/>
+<circle cx="540.0" cy="152.0" r="2.5" fill="#c99a06"/>
+<line x1="552" x2="576" y1="122" y2="122" stroke="#c99a06" stroke-width="2"/>
+<text x="582" y="126">cyclonedds shm</text>
+<polyline points="70.0,239.9 164.0,201.0 226.7,178.2 289.3,161.2 352.0,159.5 414.7,150.7 477.3,152.4 540.0,156.1" fill="none" stroke="#17a2b8" stroke-width="2"/>
+<circle cx="70.0" cy="239.9" r="2.5" fill="#17a2b8"/>
+<circle cx="164.0" cy="201.0" r="2.5" fill="#17a2b8"/>
+<circle cx="226.7" cy="178.2" r="2.5" fill="#17a2b8"/>
+<circle cx="289.3" cy="161.2" r="2.5" fill="#17a2b8"/>
+<circle cx="352.0" cy="159.5" r="2.5" fill="#17a2b8"/>
+<circle cx="414.7" cy="150.7" r="2.5" fill="#17a2b8"/>
+<circle cx="477.3" cy="152.4" r="2.5" fill="#17a2b8"/>
+<circle cx="540.0" cy="156.1" r="2.5" fill="#17a2b8"/>
+<line x1="552" x2="576" y1="140" y2="140" stroke="#17a2b8" stroke-width="2"/>
+<text x="582" y="144">cyclonedds-ddsperf udp</text>
+<polyline points="70.0,241.6 164.0,202.9 226.7,178.0 289.3,163.3 352.0,159.1 414.7,150.0 477.3,150.4 540.0,156.8" fill="none" stroke="#d63384" stroke-width="2"/>
+<circle cx="70.0" cy="241.6" r="2.5" fill="#d63384"/>
+<circle cx="164.0" cy="202.9" r="2.5" fill="#d63384"/>
+<circle cx="226.7" cy="178.0" r="2.5" fill="#d63384"/>
+<circle cx="289.3" cy="163.3" r="2.5" fill="#d63384"/>
+<circle cx="352.0" cy="159.1" r="2.5" fill="#d63384"/>
+<circle cx="414.7" cy="150.0" r="2.5" fill="#d63384"/>
+<circle cx="477.3" cy="150.4" r="2.5" fill="#d63384"/>
+<circle cx="540.0" cy="156.8" r="2.5" fill="#d63384"/>
+<line x1="552" x2="576" y1="158" y2="158" stroke="#d63384" stroke-width="2"/>
+<text x="582" y="162">cyclonedds-ddsperf shm</text>
+<polyline points="70.0,333.0 164.0,283.3 226.7,250.3 289.3,225.6 352.0,203.7 414.7,176.8 477.3,150.6 540.0,143.4" fill="none" stroke="#6c757d" stroke-width="2"/>
+<circle cx="70.0" cy="333.0" r="2.5" fill="#6c757d"/>
+<circle cx="164.0" cy="283.3" r="2.5" fill="#6c757d"/>
+<circle cx="226.7" cy="250.3" r="2.5" fill="#6c757d"/>
+<circle cx="289.3" cy="225.6" r="2.5" fill="#6c757d"/>
+<circle cx="352.0" cy="203.7" r="2.5" fill="#6c757d"/>
+<circle cx="414.7" cy="176.8" r="2.5" fill="#6c757d"/>
+<circle cx="477.3" cy="150.6" r="2.5" fill="#6c757d"/>
+<circle cx="540.0" cy="143.4" r="2.5" fill="#6c757d"/>
+<line x1="552" x2="576" y1="176" y2="176" stroke="#6c757d" stroke-width="2"/>
+<text x="582" y="180">fastdds udp</text>
+<polyline points="70.0,332.8 164.0,283.2 226.7,250.4 289.3,217.1 352.0,189.4 414.7,174.9 477.3,147.2 540.0,139.7" fill="none" stroke="#8c564b" stroke-width="2"/>
+<circle cx="70.0" cy="332.8" r="2.5" fill="#8c564b"/>
+<circle cx="164.0" cy="283.2" r="2.5" fill="#8c564b"/>
+<circle cx="226.7" cy="250.4" r="2.5" fill="#8c564b"/>
+<circle cx="289.3" cy="217.1" r="2.5" fill="#8c564b"/>
+<circle cx="352.0" cy="189.4" r="2.5" fill="#8c564b"/>
+<circle cx="414.7" cy="174.9" r="2.5" fill="#8c564b"/>
+<circle cx="477.3" cy="147.2" r="2.5" fill="#8c564b"/>
+<circle cx="540.0" cy="139.7" r="2.5" fill="#8c564b"/>
+<line x1="552" x2="576" y1="194" y2="194" stroke="#8c564b" stroke-width="2"/>
+<text x="582" y="198">fastdds shm</text>
+</svg>

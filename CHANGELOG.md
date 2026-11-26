@@ -8,6 +8,21 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ## [Unreleased]
 
+### Added
+
+- Performance measurements (#100): `rustorb-dds-perf` (round-trip latency
+  and throughput in the manner of ddsperf, over UDP, shared memory or
+  loaned samples), the same program for Cyclone DDS and Fast DDS in
+  `bench/`, `bench/run.py` and `bench/report.py`, and the first results
+  in docs/benchmark.md (#101 to #105, #109).
+
+### Fixed
+
+- A writer faster than its reader no longer fails with "the shared
+  memory buffer is full" once the reader's ring is full: the message is
+  lost on the way like a datagram, and reliable readers get it again
+  (#101).
+
 ### Changed
 
 - The NuGet package `Rustorb.Dds` depends on rustorb's `Rustorb.Types`

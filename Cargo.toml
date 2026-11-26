@@ -8,6 +8,7 @@ members = [
     "crates/rustorb-dds-ffi",
     "crates/rustorb-dds-corba",
     "crates/rustorb-dds-security",
+    "crates/rustorb-dds-perf",
 ]
 exclude = ["fuzz"]
 

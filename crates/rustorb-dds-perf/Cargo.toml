@@ -1,0 +1,27 @@
+[package]
+name = "rustorb-dds-perf"
+description = "Latency and throughput measurements of rustorb-dds, in the manner of ddsperf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# A tool of this repository (bench/), not a library to depend on.
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `--security <file>`: DDS Security with the builtin plugins.
+security = ["rustorb-dds/security"]
+
+[dependencies]
+rustorb-dds.workspace = true
+rustorb-xtypes.workspace = true
+rustorb-typesupport.workspace = true

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(rustorb_bench_cyclonedds C)
+find_package(CycloneDDS REQUIRED)
+idlc_generate(TARGET perf_type FILES ../idl/Perf.idl)
+add_executable(perf perf.c)
+target_link_libraries(perf perf_type CycloneDDS::ddsc)

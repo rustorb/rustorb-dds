@@ -81,3 +81,79 @@ fn udp_with_a_participant_without_shared_memory() {
     exchange(&a, &b, 10, 100_000);
     exchange(&b, &a, 10, 1000);
 }
+
+/// A writer faster than its reader fills the reader's ring: the messages
+/// that do not fit are lost on the way, as datagrams can be, and the
+/// write does not fail (rustorb-dds#101 found it failing with "the shared
+/// memory buffer is full"). A reliable reader still gets every sample.
+#[test]
+fn a_full_ring_is_not_an_error_of_the_write() {
+    let (a, b) = (participant(93, true), participant(93, true));
+    let ta = a.create_topic::<Shape>("Flood").unwrap();
+    let tb = b.create_topic::<Shape>("Flood").unwrap();
+    for reliable in [false, true] {
+        let reliability = if reliable {
+            Reliability::reliable()
+        } else {
+            Reliability::best_effort()
+        };
+        let writer = a
+            .create_publisher()
+            .unwrap()
+            .create_datawriter_with_qos(
+                &ta,
+                DataWriterQos {
+                    reliability,
+                    history: History::KeepAll,
+                    ..DataWriterQos::default()
+                },
+            )
+            .unwrap();
+        let reader = b
+            .create_subscriber()
+            .unwrap()
+            .create_datareader_with_qos(
+                &tb,
+                DataReaderQos {
+                    reliability,
+                    history: History::KeepAll,
+                    ..DataReaderQos::default()
+                },
+            )
+            .unwrap();
+        assert!(writer.wait_for_subscriptions(1, WAIT));
+        // 600 samples of 100 kB, at once: 60 MB, 15 times the ring
+        // (4 MiB).
+        let n = 600;
+        let mut s = Shape {
+            id: 0,
+            index: 0,
+            message: "y".repeat(100_000),
+        };
+        for i in 0..n {
+            (s.id, s.index) = (i, i);
+            writer
+                .write(&s)
+                .unwrap_or_else(|e| panic!("write {i} (reliable: {reliable}): {e}"));
+        }
+        let deadline = Instant::now() + WAIT * 3;
+        let mut got = 0;
+        while Instant::now() < deadline && (got < n || !reliable) {
+            let taken = reader
+                .take()
+                .into_iter()
+                .filter(|s| s.data.is_some())
+                .count();
+            got += taken as u32;
+            if !reliable && taken == 0 && got > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if reliable {
+            assert_eq!(got, n, "reliable: {got} of {n} samples in {:?}", WAIT * 3);
+        } else {
+            assert!(got > 0);
+        }
+    }
+}
