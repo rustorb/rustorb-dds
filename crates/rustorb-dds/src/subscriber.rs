@@ -431,10 +431,14 @@ impl<T> DataReader<T> {
         T: 'static,
     {
         let l = reader_listener(self.samples.clone(), listener);
-        let mut g = self.shared.lock_any();
-        if let Some(r) = g.readers.get_mut(&self.guid) {
-            r.listener = Some((l, mask));
-        }
+        // The one before is dropped with no lock held (#117).
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.readers
+                .get_mut(&self.guid)
+                .and_then(|r| r.listener.replace((l, mask)))
+        };
+        drop(before);
     }
 
     /// Sets a listener for DATA_AVAILABLE alone: `f` is called with the
@@ -462,10 +466,13 @@ impl<T> DataReader<T> {
 
     /// Removes the listener.
     pub fn clear_listener(&self) {
-        let mut g = self.shared.lock_any();
-        if let Some(r) = g.readers.get_mut(&self.guid) {
-            r.listener = None;
-        }
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.readers
+                .get_mut(&self.guid)
+                .and_then(|r| r.listener.take())
+        };
+        drop(before);
     }
 
     /// The statuses changed since they were last read

@@ -65,6 +65,10 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Fixed
 
+- A listener that holds an entity of its own participant (a reader's
+  listener that writes back with a writer, say) is dropped with no lock
+  held: deleting the reader or writer, or replacing the listener, no
+  longer hangs (#117).
 - A writer faster than its reader no longer fails with "the shared
   memory buffer is full" once the reader's ring is full: the message is
   lost on the way like a datagram, and reliable readers get it again

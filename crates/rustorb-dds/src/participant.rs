@@ -2078,17 +2078,24 @@ impl Shared {
     /// the participant keeps it, with its samples, until it is deleted
     /// itself (DDS 1.4, 2.2.3.4).
     pub(crate) fn remove_writer(&self, guid: &Guid) {
-        {
+        let orphaned = {
             let mut g = self.lock_any();
             let deleted = g.deleted;
-            if let Some(w) = g.writers.get_mut(guid)
-                && !deleted
-                && !w.orphan
-                && w.qos.durability >= DurabilityKind::Transient
-            {
-                w.orphan(Instant::now());
-                return;
+            match g.writers.get_mut(guid) {
+                Some(w)
+                    if !deleted && !w.orphan && w.qos.durability >= DurabilityKind::Transient =>
+                {
+                    let listener = w.listener.take();
+                    w.orphan(Instant::now());
+                    Some(listener)
+                }
+                _ => None,
             }
+        };
+        if orphaned.is_some() {
+            // Its listener goes with no lock held (#117).
+            drop(orphaned);
+            return;
         }
         let handles: Vec<InstanceHandle> = {
             let g = self.lock_any();
@@ -2108,6 +2115,8 @@ impl Shared {
                 Time::now(),
             );
         }
+        // Dropped with no lock held, as in `remove_reader`.
+        let removed;
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
@@ -2115,7 +2124,8 @@ impl Shared {
             if let Some(sec) = &inner.security {
                 sec.remove_local_endpoint(guid);
             }
-            if inner.writers.remove(guid).is_none() {
+            removed = inner.writers.remove(guid);
+            if removed.is_none() {
                 return;
             }
             for (rg, r) in inner.readers.iter_mut() {
@@ -2129,6 +2139,7 @@ impl Shared {
             }
         }
         self.flush();
+        drop(removed);
     }
 
     /// Registers an instance of a local writer, as a write would.
@@ -2149,10 +2160,14 @@ impl Shared {
     }
 
     pub(crate) fn remove_reader(&self, guid: &Guid) {
+        // Dropped with no lock held: its listener may hold an entity of
+        // this participant, whose drop takes the lock (#117).
+        let removed;
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
-            if inner.readers.remove(guid).is_none() {
+            removed = inner.readers.remove(guid);
+            if removed.is_none() {
                 return;
             }
             #[cfg(feature = "security")]
@@ -2170,6 +2185,7 @@ impl Shared {
         }
         self.acknowledged.notify_all();
         self.flush();
+        drop(removed);
     }
 
     /// Writes a change of instance `h` from a local writer (a value, a
@@ -3242,12 +3258,19 @@ impl DomainParticipant {
         listener: impl DomainParticipantListener + 'static,
         mask: StatusMask,
     ) {
-        self.shared.lock_any().listener = Some((Arc::new(listener), mask));
+        // The one before is dropped with no lock held (#117).
+        let before = self
+            .shared
+            .lock_any()
+            .listener
+            .replace((Arc::new(listener), mask));
+        drop(before);
     }
 
     /// Removes the participant's listener.
     pub fn clear_listener(&self) {
-        self.shared.lock_any().listener = None;
+        let before = self.shared.lock_any().listener.take();
+        drop(before);
     }
 
     /// Asserts the liveliness of the participant's MANUAL_BY_PARTICIPANT
