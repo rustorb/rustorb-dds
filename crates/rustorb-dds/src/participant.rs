@@ -123,7 +123,9 @@ impl ParticipantConfig {
     /// The announcement period is shorter than SPDP's suggested 30 s so
     /// that participants find each other quickly in a small domain.
     /// Writers send a HEARTBEAT every 200 ms while some reliable reader
-    /// has not acknowledged everything.
+    /// has not acknowledged everything, and ask the readers to
+    /// acknowledge every 16 samples and 1 ms after the last one, not
+    /// each sample.
     pub fn new(domain_id: u32) -> Self {
         ParticipantConfig {
             udp: UdpConfig::new(domain_id),
@@ -131,6 +133,10 @@ impl ParticipantConfig {
             lease_duration: Duration::from_secs(20),
             writer: WriterConfig {
                 heartbeat_period: Duration::from_millis(200),
+                // A stream of samples is acknowledged every 16 samples,
+                // and once it pauses, rather than sample by sample (#111).
+                acknowledgment_batch: 16,
+                acknowledgment_delay: Duration::from_millis(1),
                 ..WriterConfig::default()
             },
             reader: ReaderConfig::default(),
@@ -2193,6 +2199,7 @@ impl Shared {
                 return Err(Error::AlreadyDeleted);
             };
             let deadline = Instant::now() + blocking;
+            let mut asked = false;
             loop {
                 let Some(w) = g.writers.get_mut(&writer) else {
                     return Err(Error::AlreadyDeleted);
@@ -2203,6 +2210,15 @@ impl Shared {
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(Error::Timeout);
+                }
+                if !asked {
+                    // Full: what frees it are acknowledgments.
+                    asked = true;
+                    g = self.request_acknowledgment(g, &writer);
+                    if g.deleted {
+                        return Err(Error::AlreadyDeleted);
+                    }
+                    continue;
                 }
                 g = match self.acknowledged.wait_timeout(g, deadline - now) {
                     Ok((g, _)) => g,
@@ -2418,11 +2434,38 @@ impl Shared {
         Ok(())
     }
 
+    /// Asks the readers of `writer` that have not acknowledged everything
+    /// to answer now, rather than at the writer's next pause
+    /// (`acknowledgment_batch`): for a call that waits for them. Takes
+    /// the lock and gives it back.
+    fn request_acknowledgment<'a>(
+        &'a self,
+        mut g: MutexGuard<'a, Inner>,
+        writer: &Guid,
+    ) -> MutexGuard<'a, Inner> {
+        let out = match g.writers.get_mut(writer) {
+            Some(w) => {
+                w.rtps.request_acknowledgment();
+                w.rtps.poll(Instant::now())
+            }
+            None => return g,
+        };
+        if out.is_empty() {
+            return g;
+        }
+        drop(g);
+        for o in &out {
+            let _ = self.send(&o.bytes, &o.locators);
+        }
+        self.lock_any()
+    }
+
     /// Waits until every matched reliable reader has acknowledged every
     /// sample `writer` wrote, or `timeout` passes.
     pub(crate) fn wait_for_acknowledgments(&self, writer: &Guid, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut g = self.lock()?;
+        let g = self.lock()?;
+        let mut g = self.request_acknowledgment(g, writer);
         loop {
             match g.writers.get(writer) {
                 None => return Ok(()),

@@ -26,6 +26,15 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   `UdpTransport::open_with` takes a `UserHandler`; `injector` gives a
   `Sink`, which `ShmTransport::open` takes; `Incoming::handled` says how
   many user datagrams were handled.
+- A writer of the participant asks its reliable readers to acknowledge
+  every 16 samples, and 1 ms after the last one, rather than with each
+  sample: the HEARTBEAT sent with the others has the final flag set
+  (DDSI-RTPS 2.5, 8.4.2.2.3). A blocked write and
+  `wait_for_acknowledgments` ask at once. Reliable throughput of 256-octet
+  samples went from about 156 to 241 Mbit/s in the container (#111,
+  #113). `WriterConfig` has `acknowledgment_batch` (1 by default, as
+  before) and `acknowledgment_delay`; `ReliableWriter` has
+  `request_acknowledgment`.
 - A read or take with `max_samples` costs in proportion to `max_samples`,
   not to the samples in the reader (#110).
 - The sub of `rustorb-dds-perf` takes 256 samples at a time (as the

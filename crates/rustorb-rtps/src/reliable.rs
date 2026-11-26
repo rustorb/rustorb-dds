@@ -224,6 +224,15 @@ pub struct WriterConfig {
     pub max_message_size: usize,
     /// When and how to send a change as DATA_FRAG.
     pub fragmentation: Fragmentation,
+    /// How many changes a reader may have not acknowledged before the
+    /// HEARTBEAT sent with the next change asks it to answer (final flag
+    /// not set). 1, the default, asks with every change; more saves an
+    /// ACKNACK for each change, as for a stream of samples.
+    pub acknowledgment_batch: u64,
+    /// With `acknowledgment_batch` above 1: how long after the last
+    /// change sent a HEARTBEAT asks the readers that have not
+    /// acknowledged it to answer.
+    pub acknowledgment_delay: Duration,
 }
 
 impl Default for WriterConfig {
@@ -233,6 +242,8 @@ impl Default for WriterConfig {
             nack_response_delay: Duration::ZERO,
             max_message_size: 16 * 1024,
             fragmentation: Fragmentation::default(),
+            acknowledgment_batch: 1,
+            acknowledgment_delay: Duration::ZERO,
         }
     }
 }
@@ -292,6 +303,11 @@ pub struct ReliableWriter {
     directed: BTreeMap<SequenceNumber, Guid>,
     heartbeat_count: i32,
     next_heartbeat: Option<Instant>,
+    /// When to ask the readers to acknowledge what was sent without
+    /// asking (`acknowledgment_delay`).
+    ask_at: Option<Instant>,
+    /// Ask at the next poll ([`Self::request_acknowledgment`]).
+    ask_now: bool,
 }
 
 impl ReliableWriter {
@@ -307,7 +323,16 @@ impl ReliableWriter {
             directed: BTreeMap::new(),
             heartbeat_count: 0,
             next_heartbeat: None,
+            ask_at: None,
+            ask_now: false,
         }
+    }
+
+    /// Makes the next [`Self::poll`] ask every reader that has not
+    /// acknowledged everything to answer, as for a write that waits for
+    /// acknowledgments.
+    pub fn request_acknowledgment(&mut self) {
+        self.ask_now = true;
     }
 
     /// The writer's GUID.
@@ -585,6 +610,12 @@ impl ReliableWriter {
         if periodic {
             self.next_heartbeat = Some(now + self.config.heartbeat_period);
         }
+        let ask_all = std::mem::take(&mut self.ask_now) || self.ask_at.is_some_and(|t| t <= now);
+        if ask_all {
+            self.ask_at = None;
+        }
+        let batch = self.config.acknowledgment_batch.max(1);
+        let mut sent_without_asking = false;
         let header = Header::new(self.vendor_id, self.guid.prefix);
         let writer_id = self.guid.entity_id;
         let frag = self.config.fragmentation;
@@ -669,8 +700,19 @@ impl ReliableWriter {
                 sent_something = true;
             }
             let unacked = p.acked < self.last_sn;
-            let want_hb = p.heartbeat_due || sent_something || (periodic && unacked);
+            // Asked for an answer: when the reader asked for a HEARTBEAT,
+            // periodically, when asked to, or once `batch` changes are
+            // not acknowledged.
+            let ask = unacked
+                && (p.heartbeat_due
+                    || periodic
+                    || ask_all
+                    || u64::try_from(self.last_sn.0 - p.acked.0).unwrap_or(u64::MAX) >= batch);
+            let want_hb = p.heartbeat_due || sent_something || ((periodic || ask_all) && unacked);
             p.heartbeat_due = false;
+            if sent_something && unacked && !ask {
+                sent_without_asking = true;
+            }
             if want_hb {
                 // A HEARTBEAT after data asks the reader to answer, so it
                 // can ask for what it missed (final flag not set). What
@@ -678,7 +720,7 @@ impl ReliableWriter {
                 // this reader.
                 self.heartbeat_count = self.heartbeat_count.wrapping_add(1);
                 let hb = Heartbeat {
-                    final_flag: !unacked,
+                    final_flag: !ask,
                     liveliness_flag: false,
                     reader_id: g.entity_id,
                     writer_id,
@@ -690,6 +732,10 @@ impl ReliableWriter {
                 b.push(Submessage::Heartbeat(hb), 32);
             }
             b.finish(&dest, &mut out);
+        }
+        if sent_without_asking {
+            // Reset by each change sent: asked once the writer pauses.
+            self.ask_at = Some(now + self.config.acknowledgment_delay);
         }
         out
     }
@@ -744,6 +790,16 @@ impl ReliableWriter {
             if p.highest_sent < self.last_sn || p.heartbeat_due {
                 take(Instant::now());
             }
+        }
+        let unacked = self
+            .readers
+            .values()
+            .any(|p| p.reliable && p.acked < self.last_sn);
+        if unacked && self.ask_now {
+            take(Instant::now());
+        }
+        if unacked && let Some(t) = self.ask_at {
+            take(t);
         }
         if self
             .readers
@@ -1496,6 +1552,71 @@ mod tests {
         w.remove_reader(&rguid(2));
         w.remove_readers_of(&rguid(3).prefix);
         assert_eq!(w.readers().count(), 0);
+    }
+
+    #[test]
+    fn acknowledgments_asked_for_in_batches() {
+        let t = Instant::now();
+        let cfg = WriterConfig {
+            heartbeat_period: Duration::from_secs(10),
+            acknowledgment_batch: 3,
+            acknowledgment_delay: Duration::from_millis(5),
+            ..WriterConfig::default()
+        };
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, cfg);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        // The first poll is the periodic one: it asks.
+        assert!(w.poll(t).is_empty());
+        let finals = |out: &[Outgoing]| -> Vec<bool> {
+            subs(out)
+                .iter()
+                .filter_map(|s| match s {
+                    Submessage::Heartbeat(h) => Some(h.final_flag),
+                    _ => None,
+                })
+                .collect()
+        };
+        w.add_change(None, payload(1));
+        assert_eq!(finals(&w.poll(t)), [true]);
+        w.add_change(None, payload(2));
+        assert_eq!(finals(&w.poll(t)), [true]);
+        // Three not acknowledged: asks.
+        w.add_change(None, payload(3));
+        assert_eq!(finals(&w.poll(t)), [false]);
+        // Still three or more: asks again.
+        w.add_change(None, payload(4));
+        assert_eq!(finals(&w.poll(t)), [false]);
+        let ack = |w: &mut ReliableWriter, n: i64| {
+            let a = AckNack {
+                reader_id: rguid(2).entity_id,
+                writer_id: wguid().entity_id,
+                reader_sn_state: SequenceNumberSet::new(SequenceNumber(n), 0).unwrap(),
+                count: Count(n as i32),
+                final_flag: true,
+            };
+            w.handle_acknack(rguid(2), &a, t);
+        };
+        ack(&mut w, 5);
+        w.add_change(None, payload(5));
+        assert_eq!(finals(&w.poll(t)), [true]);
+        // A pause of acknowledgment_delay: asks, without data.
+        assert_eq!(w.next_deadline(), Some(t + Duration::from_millis(5)));
+        assert!(w.poll(t + Duration::from_millis(4)).is_empty());
+        let out = w.poll(t + Duration::from_millis(5));
+        assert_eq!(finals(&out), [false]);
+        assert!(
+            subs(&out)
+                .iter()
+                .all(|s| matches!(s, Submessage::Heartbeat(_)))
+        );
+        // Asked to ask: at once.
+        w.add_change(None, payload(6));
+        assert_eq!(finals(&w.poll(t + Duration::from_millis(6))), [true]);
+        w.request_acknowledgment();
+        assert_eq!(finals(&w.poll(t + Duration::from_millis(6))), [false]);
+        // Once all is acknowledged, nothing more.
+        ack(&mut w, 7);
+        assert!(w.poll(t + Duration::from_millis(20)).is_empty());
     }
 
     #[test]
