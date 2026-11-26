@@ -648,8 +648,12 @@ impl ReliableWriter {
                 continue;
             }
             let mut sent_something = false;
+            // Repairs, or changes sent in fragments: the reader may well
+            // miss something, so the HEARTBEAT asks it to say what.
+            let mut likely_missed = false;
             // Repairs.
             if p.repair_at.is_some_and(|t| t <= now) {
+                likely_missed = true;
                 p.repair_at = None;
                 let mut missing = Vec::new();
                 let requested = std::mem::take(&mut p.requested);
@@ -690,6 +694,7 @@ impl ReliableWriter {
                             32,
                         );
                     }
+                    likely_missed |= frag.needed(c);
                     b.push_change(g.entity_id, c, &frag, None);
                     next = SequenceNumber(sn.0 + 1);
                 }
@@ -701,12 +706,13 @@ impl ReliableWriter {
             }
             let unacked = p.acked < self.last_sn;
             // Asked for an answer: when the reader asked for a HEARTBEAT,
-            // periodically, when asked to, or once `batch` changes are
-            // not acknowledged.
+            // periodically, when asked to, after repairs or fragments, or
+            // once `batch` changes are not acknowledged.
             let ask = unacked
                 && (p.heartbeat_due
                     || periodic
                     || ask_all
+                    || likely_missed
                     || u64::try_from(self.last_sn.0 - p.acked.0).unwrap_or(u64::MAX) >= batch);
             let want_hb = p.heartbeat_due || sent_something || ((periodic || ask_all) && unacked);
             p.heartbeat_due = false;
@@ -1617,6 +1623,19 @@ mod tests {
         // Once all is acknowledged, nothing more.
         ack(&mut w, 7);
         assert!(w.poll(t + Duration::from_millis(20)).is_empty());
+        // A change in fragments: asks at once.
+        w.config.fragmentation = Fragmentation {
+            max_datagram_size: 64,
+            fragment_size: 16,
+        };
+        w.add_change(
+            None,
+            Some(SerializedPayload {
+                kind: PayloadKind::Data,
+                bytes: vec![0; 100],
+            }),
+        );
+        assert_eq!(finals(&w.poll(t + Duration::from_millis(21))), [false]);
     }
 
     #[test]
