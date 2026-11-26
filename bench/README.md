@@ -84,6 +84,22 @@ discovery, liveliness, metadata and data with AES-GMAC or AES-GCM. The
 files come from `interop/security/gen.sh` (into `target/bench/security`),
 and every participant has the same identity.
 
+The language bindings (#107) are measured with `bench/bindings.py`: a
+ping written with each binding ([bindings/](bindings), C++, Java, .NET,
+Python, Ruby) against the Rust `rustorb-dds-perf pong`, and the Rust
+ping for the baseline; what a binding adds is its round trip less the
+Rust one. The bindings cannot turn their shared memory off, so these
+runs use it (`--transport shm` on the Rust side). The types are what
+rustorb-idl wrote for `idl/Perf.idl` (`bindings/generated`, checked in;
+written again with `rustorb-idl -b<backend> -C bench/bindings/generated/<lang> bench/idl/Perf.idl`,
+the backends `c++11`, `java`, `csharp` and `ruby`).
+
+```sh
+bench/bindings.py                               # every binding found, 3 times
+bench/bindings.py --bindings rust,cpp --sizes 32,4096
+bench/bindings.py --report bench/results/<run>  # the tables again
+```
+
 The numbers of a shared machine (a container, a CI runner) vary between
 runs: compare the cases of one run with each other, not with another
 run. The CI job `bench` runs every case for one second to check that

@@ -223,6 +223,39 @@ In this table the runs of a cell differed by 8 % (median over the cells), 42 % a
 | 10 | 165 | 707 | 1,321 | 1,342 | 201 | 912 | 1,464 | 1,479 | 824 | 6,126 | 8,717 | 9,192 |
 | 20 | 733 | 3,012 | 5,622 | 5,745 | 915 | 3,955 | 6,406 | 6,507 | 4,717 | 59,474 | 116,087 (3 of 3 not all matched) | 111,849 (3 of 3 not all matched) |
 
+## 言語バインディング（#107）
+
+C++、Java、.NET、Python、Ruby の各バインディングで書いた ping（[bench/bindings](../bench/bindings)）から、Rust の `rustorb-dds-perf pong` に往復させ、Rust の ping との差をバインディングの上乗せとみなした。型は `bench/idl/Perf.idl` を rustorb-idl で生成したもの（`bench/bindings/generated`）。バインディングには共有メモリを切る設定がないので、どれも共有メモリ（Rust 側は `--transport shm`）。reliable、KEEP_LAST 1、各 5 秒を 3 回、その中央値。
+
+```sh
+bench/bindings.py                                   # 見つかったバインディングすべて
+bench/bindings.py --bindings rust,cpp,python --sizes 32,4096
+```
+
+数値は [bench/results/2026-11-26-container-bindings](../bench/results/2026-11-26-container-bindings)（直す前は `before/`）。
+
+わかったこと:
+
+- 測り始めたとき、どのバインディングも 4 KiB 以上で桁違いに遅かった（64 KiB の往復が Rust 200 µs に対して 5.7〜8.5 ms）。バインディングは標本を `DynamicData` で受け渡していて、`DynamicData` が octet の列を 1 要素ずつ `DynamicData` として持っていたため（1 octet に数十バイトと割り当て 1 回）。octet（byte、uint8）の列と配列はバイト列のまま持つようにし、CDR の読み書きと `get/set_byte_values` などをまとめて行うようにした。Python はさらに `bytes` との変換を 1 回で行う。→ #120
+- 直したあと（往復の中央値、µs、括弧内は Rust との差）:
+
+| size | rust | cpp | java | dotnet | python | ruby |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 85 | 96 (+10) | 100 (+15) | 92 (+7) | 120 (+35) | 103 (+18) |
+| 4 KiB | 94 | 98 (+4) | 103 (+9) | 92 (-1) | 118 (+24) | 193 (+99) |
+| 64 KiB | 195 | 215 (+20) | 251 (+56) | 248 (+53) | 270 (+75) | 1,245 (+1,050) |
+
+- 直す前:
+
+| size | rust | cpp | java | dotnet | python | ruby |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 87 | 102 (+15) | 102 (+15) | 106 (+18) | 134 (+47) | 125 (+38) |
+| 4 KiB | 91 | 562 (+471) | 580 (+489) | 604 (+514) | 743 (+652) | 695 (+604) |
+| 64 KiB | 200 | 5,750 (+5,549) | 6,770 (+6,570) | 7,468 (+7,268) | 8,466 (+8,266) | 7,130 (+6,929) |
+
+- 小さな標本では、上乗せは C++・Java・.NET で 10〜15 µs、Python と Ruby で 20〜35 µs。
+- Ruby は 64 KiB でまだ約 1 ms 上乗せがある。Ruby の型対応では octet の列が Integer の Array なので、受け取るたびに 65,536 要素の Array を作るため（送る側は String を渡せる）。
+
 ## 結果の表
 
 `bench/report.py` の出力。列は実装と転送。2 つの実装の組は、レイテンシでは「ping↔pong」、スループットでは「pub→sub」。「lost」はすべての往復が失われたもの、「–」は測っていないもの。

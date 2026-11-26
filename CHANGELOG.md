@@ -57,6 +57,14 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   together all matched in about 30 ms instead of about 1 s.
   `SedpConfig::default()` has the 100 ms period; `Spdp::next_deadline`
   is now when an announcement is due.
+- `DynamicData` keeps a sequence or an array of octets (`byte`,
+  `uint8`) as bytes, not as one `DynamicData` per element, and reads,
+  writes, compares and copies it (`get/set_byte_values`,
+  `get/set_uint8_values`, CDR) all at once; it becomes one value per
+  element only when one is borrowed for change (`loan_value`). The
+  bindings, which pass samples as `DynamicData`, round-trip 64 KiB of
+  octets in about 0.2 ms instead of 6 to 8 ms; Python converts `bytes`
+  in one step too (#120).
 - A reliable writer sends a HEARTBEAT to a newly matched reliable reader
   at once, even with nothing written, rather than only when the reader's
   first ACKNACK asks for one. An OpenDDS reader whose first ACKNACK was
@@ -98,6 +106,9 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   the protection kind of discovery, liveliness, metadata and data as a
   third argument and writes `peer.properties`. The Fast DDS program
   starts from the default participant QoS of its XML profiles.
+- Language binding measurements (#107): `bench/bindings.py` and a ping
+  in C++, Java, .NET, Python and Ruby (`bench/bindings/`) against the
+  Rust `rustorb-dds-perf pong`; the results are in docs/benchmark.md.
 
 ### Fixed
 
