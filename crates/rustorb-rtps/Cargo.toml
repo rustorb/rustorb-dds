@@ -18,6 +18,9 @@ rustorb-xtypes.workspace = true
 socket2.workspace = true
 memmap2 = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [features]
 default = ["shm"]
 # The shared memory transport between participants of one host.

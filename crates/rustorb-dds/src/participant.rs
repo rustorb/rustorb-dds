@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,9 @@ use rustorb_rtps::sedp::{EndpointData, Match, Sedp, SedpConfig, SedpEvent, match
 use rustorb_rtps::spdp::{ParticipantData, ParticipantEvent, Spdp, SpdpConfig};
 use rustorb_rtps::spdp_secure::SpdpSecure;
 use rustorb_rtps::typelookup::{TypeLookup, TypeLookupReplied};
-use rustorb_rtps::udp::{Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport};
+use rustorb_rtps::udp::{
+    Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport, UserHandler,
+};
 use rustorb_rtps::wlp::{self, Wlp};
 use rustorb_rtps::{
     Endianness, EntityId, Guid, GuidPrefix, Locator, Parameter, ParameterList, PayloadKind,
@@ -121,7 +123,9 @@ impl ParticipantConfig {
     /// The announcement period is shorter than SPDP's suggested 30 s so
     /// that participants find each other quickly in a small domain.
     /// Writers send a HEARTBEAT every 200 ms while some reliable reader
-    /// has not acknowledged everything.
+    /// has not acknowledged everything, and ask the readers to
+    /// acknowledge every 16 samples and 1 ms after the last one, not
+    /// each sample.
     pub fn new(domain_id: u32) -> Self {
         ParticipantConfig {
             udp: UdpConfig::new(domain_id),
@@ -129,6 +133,10 @@ impl ParticipantConfig {
             lease_duration: Duration::from_secs(20),
             writer: WriterConfig {
                 heartbeat_period: Duration::from_millis(200),
+                // A stream of samples is acknowledged every 16 samples,
+                // and once it pauses, rather than sample by sample (#111).
+                acknowledgment_batch: 16,
+                acknowledgment_delay: Duration::from_millis(1),
                 ..WriterConfig::default()
             },
             reader: ReaderConfig::default(),
@@ -2191,6 +2199,7 @@ impl Shared {
                 return Err(Error::AlreadyDeleted);
             };
             let deadline = Instant::now() + blocking;
+            let mut asked = false;
             loop {
                 let Some(w) = g.writers.get_mut(&writer) else {
                     return Err(Error::AlreadyDeleted);
@@ -2201,6 +2210,15 @@ impl Shared {
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(Error::Timeout);
+                }
+                if !asked {
+                    // Full: what frees it are acknowledgments.
+                    asked = true;
+                    g = self.request_acknowledgment(g, &writer);
+                    if g.deleted {
+                        return Err(Error::AlreadyDeleted);
+                    }
+                    continue;
                 }
                 g = match self.acknowledged.wait_timeout(g, deadline - now) {
                     Ok((g, _)) => g,
@@ -2416,11 +2434,38 @@ impl Shared {
         Ok(())
     }
 
+    /// Asks the readers of `writer` that have not acknowledged everything
+    /// to answer now, rather than at the writer's next pause
+    /// (`acknowledgment_batch`): for a call that waits for them. Takes
+    /// the lock and gives it back.
+    fn request_acknowledgment<'a>(
+        &'a self,
+        mut g: MutexGuard<'a, Inner>,
+        writer: &Guid,
+    ) -> MutexGuard<'a, Inner> {
+        let out = match g.writers.get_mut(writer) {
+            Some(w) => {
+                w.rtps.request_acknowledgment();
+                w.rtps.poll(Instant::now())
+            }
+            None => return g,
+        };
+        if out.is_empty() {
+            return g;
+        }
+        drop(g);
+        for o in &out {
+            let _ = self.send(&o.bytes, &o.locators);
+        }
+        self.lock_any()
+    }
+
     /// Waits until every matched reliable reader has acknowledged every
     /// sample `writer` wrote, or `timeout` passes.
     pub(crate) fn wait_for_acknowledgments(&self, writer: &Guid, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut g = self.lock()?;
+        let g = self.lock()?;
+        let mut g = self.request_acknowledgment(g, writer);
         loop {
             match g.writers.get(writer) {
                 None => return Ok(()),
@@ -2708,6 +2753,9 @@ fn type_lookup_replied(inner: &mut Inner, r: TypeLookupReplied, now: Instant) {
 pub struct DomainParticipant {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    /// The participant whose user traffic the receive threads handle
+    /// themselves (`user_handler`); emptied when it is deleted.
+    direct: Direct,
     /// The thread that publishes the messages of the security logging
     /// plugin, when they are distributed.
     #[cfg(feature = "security")]
@@ -2736,7 +2784,9 @@ impl DomainParticipant {
     /// Joins a domain.
     pub fn with_config(config: ParticipantConfig) -> Result<Self> {
         let domain_id = config.udp.domain_id;
-        let (transport, incoming) = UdpTransport::open(&config.udp)?;
+        let direct: Direct = Arc::new(RwLock::new(None));
+        let (transport, incoming) =
+            UdpTransport::open_with(&config.udp, Some(user_handler(&direct)))?;
         #[allow(unused_mut)]
         let mut prefix = GuidPrefix::generate(VENDOR_ID);
         #[cfg(feature = "security")]
@@ -2900,6 +2950,7 @@ impl DomainParticipant {
                 u64::from_le_bytes(prefix.0[4..12].try_into().expect("8 bytes")) | 1,
             ),
         });
+        *direct.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::downgrade(&shared));
         let s = shared.clone();
         let thread = std::thread::Builder::new()
             .name(format!("rustorb-dds-{domain_id}"))
@@ -2908,6 +2959,7 @@ impl DomainParticipant {
         let mut participant = DomainParticipant {
             shared,
             thread: Some(thread),
+            direct,
             #[cfg(feature = "security")]
             log_thread: None,
             #[cfg(feature = "security")]
@@ -3306,6 +3358,10 @@ impl Drop for DomainParticipant {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+        // The receive threads stop handling the user traffic (waiting
+        // for those doing it now): what comes now goes to the queue of
+        // the participant's thread, which stops next.
+        *self.direct.write().unwrap_or_else(PoisonError::into_inner) = None;
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -3374,12 +3430,42 @@ fn run(shared: Arc<Shared>, incoming: UdpIncoming) {
                 datagrams.push(d);
             }
         }
-        step(&shared, datagrams);
+        let user = datagrams.iter().filter(|d| d.channel.is_user()).count();
+        step(&shared, datagrams, true);
+        incoming.handled(user);
     }
 }
 
-/// Handles received datagrams and sends what discovery has due.
-fn step(shared: &Shared, datagrams: Vec<Datagram>) {
+/// The participant whose user traffic the receive threads handle.
+type Direct = Arc<RwLock<Option<Weak<Shared>>>>;
+
+/// Handles user traffic on the thread that received it, rather than
+/// handing it to the participant's thread: one hand-over between threads
+/// fewer for each message (#111). Before the participant is made, and
+/// once it is deleted, the datagrams go to the participant's queue.
+///
+/// The participant is upgraded only while `direct` is read-locked, and
+/// `DomainParticipant::drop` empties `direct` under the write lock
+/// while it still holds the participant: a receive thread never holds
+/// the last reference, whose drop would join that thread.
+fn user_handler(direct: &Direct) -> UserHandler {
+    let direct = direct.clone();
+    Arc::new(move |d| {
+        let g = direct.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(shared) = g.as_ref().and_then(Weak::upgrade) else {
+            return Some(d);
+        };
+        if shared.stop.load(Ordering::Relaxed) {
+            return Some(d);
+        }
+        step(&shared, vec![d], false);
+        None
+    })
+}
+
+/// Handles received datagrams and sends what the endpoints have due, and
+/// with `discovery` what discovery and the timers have due.
+fn step(shared: &Shared, datagrams: Vec<Datagram>, discovery: bool) {
     let now = Instant::now();
     let mut out: Vec<(Vec<u8>, Vec<Locator>)> = Vec::new();
     {
@@ -3459,39 +3545,41 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
                 }
             }
         }
-        for e in inner.spdp.remove_expired(now) {
-            participant_event(inner, e, now);
-        }
-        inner.check_timers(now);
-        if let Some((bytes, to)) = inner.spdp.poll_announce(now) {
-            out.push((bytes, to.to_vec()));
-        }
-        for o in inner.sedp.poll(now) {
-            out.push((o.bytes, o.locators));
-        }
-        for o in inner.wlp.poll(now) {
-            out.push((o.bytes, o.locators));
-        }
-        if let Some(w) = inner.wlp_secure.as_mut() {
-            for o in w.poll(now) {
+        if discovery {
+            for e in inner.spdp.remove_expired(now) {
+                participant_event(inner, e, now);
+            }
+            inner.check_timers(now);
+            if let Some((bytes, to)) = inner.spdp.poll_announce(now) {
+                out.push((bytes, to.to_vec()));
+            }
+            for o in inner.sedp.poll(now) {
                 out.push((o.bytes, o.locators));
             }
-        }
-        if let Some(s) = inner.spdp_secure.as_mut() {
-            for o in s.poll(now) {
+            for o in inner.wlp.poll(now) {
                 out.push((o.bytes, o.locators));
             }
-        }
-        for o in inner.typelookup.poll(now) {
-            out.push((o.bytes, o.locators));
-        }
-        #[cfg(feature = "security")]
-        if let Some(sec) = inner.security.clone() {
-            let (o, events) = sec.poll(now);
-            out.extend(o.into_iter().map(|o| (o.bytes, o.locators)));
-            for e in events {
-                match e {
-                    PeerEvent::Ready(p) => participant_ready(inner, &p, now),
+            if let Some(w) = inner.wlp_secure.as_mut() {
+                for o in w.poll(now) {
+                    out.push((o.bytes, o.locators));
+                }
+            }
+            if let Some(s) = inner.spdp_secure.as_mut() {
+                for o in s.poll(now) {
+                    out.push((o.bytes, o.locators));
+                }
+            }
+            for o in inner.typelookup.poll(now) {
+                out.push((o.bytes, o.locators));
+            }
+            #[cfg(feature = "security")]
+            if let Some(sec) = inner.security.clone() {
+                let (o, events) = sec.poll(now);
+                out.extend(o.into_iter().map(|o| (o.bytes, o.locators)));
+                for e in events {
+                    match e {
+                        PeerEvent::Ready(p) => participant_ready(inner, &p, now),
+                    }
                 }
             }
         }
@@ -3512,12 +3600,14 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>) {
             shared.acknowledged.notify_all();
         }
     }
+    // The readers' waiters and listeners first: sending (an ACKNACK, say)
+    // takes a while, and the data does not wait for it (#111).
+    shared.flush();
     for (bytes, to) in out {
         // Discovery and reliable traffic are repeated, so a datagram
         // that cannot be sent now is sent again later.
         let _ = shared.send(&bytes, &to);
     }
-    shared.flush();
 }
 
 fn participant_event(inner: &mut Inner, e: ParticipantEvent, now: Instant) {

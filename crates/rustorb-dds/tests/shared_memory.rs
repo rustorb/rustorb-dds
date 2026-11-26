@@ -122,6 +122,9 @@ fn a_full_ring_is_not_an_error_of_the_write() {
             )
             .unwrap();
         assert!(writer.wait_for_subscriptions(1, WAIT));
+        // Both ways: a best-effort reader drops what comes from a writer
+        // it has not matched yet.
+        assert!(reader.wait_for_publications(1, WAIT));
         // 600 samples of 100 kB, at once: 60 MB, 15 times the ring
         // (4 MiB).
         let n = 600;

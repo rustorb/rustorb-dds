@@ -694,20 +694,30 @@ impl ReaderHistory {
                 } else {
                     ViewState::NotNew
                 };
-                arrivals.extend(inst.samples.iter().filter_map(|s| {
-                    let st = if s.read {
-                        SampleState::Read
-                    } else {
-                        SampleState::NotRead
-                    };
-                    filter.accepts(st, view, inst.state).then_some(s.arrival)
-                }));
+                // An instance's samples are in the order of arrival, so
+                // the `max` first overall are among its `max` first.
+                arrivals.extend(
+                    inst.samples
+                        .iter()
+                        .filter_map(|s| {
+                            let st = if s.read {
+                                SampleState::Read
+                            } else {
+                                SampleState::NotRead
+                            };
+                            filter.accepts(st, view, inst.state).then_some(s.arrival)
+                        })
+                        .take(max),
+                );
             }
             if max == 0 {
                 return Vec::new();
             }
-            arrivals.sort_unstable();
-            arrivals.get(max - 1).copied().unwrap_or(u64::MAX)
+            if arrivals.len() < max {
+                u64::MAX
+            } else {
+                *arrivals.select_nth_unstable(max - 1).1
+            }
         };
         for h in &handles {
             let Some(inst) = self.instances.get_mut(h) else {
@@ -720,16 +730,21 @@ impl ReaderHistory {
             };
             let state = inst.state;
             let current_generation = inst.generation();
-            let mut kept = VecDeque::new();
+            let mut kept = Vec::new();
             let mut mine = Vec::new();
-            for s in inst.samples.drain(..) {
+            // Only up to `last`: the samples after it stay where they are.
+            while let Some(s) = inst.samples.pop_front() {
+                if s.arrival > last {
+                    inst.samples.push_front(s);
+                    break;
+                }
                 let st = if s.read {
                     SampleState::Read
                 } else {
                     SampleState::NotRead
                 };
-                if s.arrival > last || !filter.accepts(st, view, state) {
-                    kept.push_back(s);
+                if !filter.accepts(st, view, state) {
+                    kept.push(s);
                     continue;
                 }
                 let info = SampleInfo {
@@ -752,10 +767,12 @@ impl ReaderHistory {
                     mine.push((s.arrival, s.payload, info));
                 } else {
                     mine.push((s.arrival, s.payload.clone(), info));
-                    kept.push_back(Stored { read: true, ..s });
+                    kept.push(Stored { read: true, ..s });
                 }
             }
-            inst.samples = kept;
+            for s in kept.into_iter().rev() {
+                inst.samples.push_front(s);
+            }
             if !mine.is_empty() {
                 inst.new = false;
                 let n = mine.len();
@@ -898,6 +915,21 @@ mod tests {
         assert!(r.select_max(StateFilter::ANY, None, true, 0).is_empty());
         let s = r.select_max(StateFilter::ANY, Some(h(2)), true, 5);
         assert_eq!(values(&s), [Some(3)]);
+    }
+
+    #[test]
+    fn max_samples_keeps_the_order_of_those_left() {
+        let mut r = ReaderHistory::new(History::KeepAll);
+        for v in 1..=5 {
+            r.accept(write(w(1), v as i64, 1, v));
+        }
+        let s = r.select_max(StateFilter::ANY, None, false, 2);
+        assert_eq!(values(&s), [Some(1), Some(2)]);
+        // 1 and 2 are read: passed over and kept, before those after 4.
+        let s = r.select_max(StateFilter::NOT_READ, None, true, 2);
+        assert_eq!(values(&s), [Some(3), Some(4)]);
+        let s = r.select(StateFilter::ANY, None, true);
+        assert_eq!(values(&s), [Some(1), Some(2), Some(5)]);
     }
 
     #[test]

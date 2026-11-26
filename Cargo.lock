@@ -866,6 +866,7 @@ dependencies = [
 name = "rustorb-rtps"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "memmap2",
  "rustorb-cdr",
  "rustorb-typesupport",

@@ -8,6 +8,40 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ## [Unreleased]
 
+### Changed
+
+- The datagrams received and not yet handled are at most
+  `rustorb_rtps::udp::INCOMING_CAPACITY` (1024): when the participant's
+  thread falls behind, the receive threads wait and the kernel drops what
+  the sockets cannot hold, instead of the queue growing without end
+  (#110). `UdpTransport::injector` and `ShmTransport::open` take a
+  `SyncSender`.
+- User traffic is handled on the thread that received it (UDP or shared
+  memory) rather than handed to the participant's thread, when it comes
+  alone and nothing received before it is still waiting; a burst still
+  goes to the participant's thread. The readers' waiters and listeners
+  are told of new data before what is due is sent (an ACKNACK, say).
+  The round trip of a small reliable sample went from about 123 µs to
+  85 µs in the container (#111).
+  `UdpTransport::open_with` takes a `UserHandler`; `injector` gives a
+  `Sink`, which `ShmTransport::open` takes; `Incoming::handled` says how
+  many user datagrams were handled.
+- A writer of the participant asks its reliable readers to acknowledge
+  every 16 samples, and 1 ms after the last one, rather than with each
+  sample: the HEARTBEAT sent with the others has the final flag set. A blocked write and
+  `wait_for_acknowledgments` ask at once. Reliable throughput of 256-octet
+  samples went from about 156 to 241 Mbit/s in the container (#111,
+  #113). `WriterConfig` has `acknowledgment_batch` (1 by default, as
+  before) and `acknowledgment_delay`; `ReliableWriter` has
+  `request_acknowledgment`.
+- A read or take with `max_samples` costs in proportion to `max_samples`,
+  not to the samples in the reader (#110).
+- The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
+  Cyclone DDS program does), and the best-effort sub of all three
+  programs keeps at most 1000 samples not yet taken (KEEP_ALL with
+  `max_samples`): one slower than its pub loses samples instead of
+  keeping them all (#110).
+
 ### Added
 
 - Performance measurements (#100): `rustorb-dds-perf` (round-trip latency

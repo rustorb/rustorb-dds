@@ -22,13 +22,13 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
 
-use crate::udp::{Channel, Datagram};
+use crate::udp::{Channel, Datagram, Sink};
 use crate::{GuidPrefix, Locator};
 
 /// The port of a shared memory locator for metatraffic.
@@ -332,13 +332,14 @@ impl std::fmt::Debug for ShmTransport {
 
 impl ShmTransport {
     /// Creates the receive segment and socket of the participant `prefix`
-    /// and starts receiving: the messages go to `tx`, as datagrams of the
-    /// unicast channels.
+    /// and starts receiving: the messages go to `sink` (a [`Sink`], or the
+    /// sender of a queue), as datagrams of the unicast channels.
     pub fn open(
         config: &ShmConfig,
         prefix: GuidPrefix,
-        tx: mpsc::Sender<Datagram>,
+        sink: impl Into<Sink>,
     ) -> io::Result<ShmTransport> {
+        let sink = sink.into();
         let segment_id = fnv(&prefix.0) ^ u64::from(std::process::id());
         let path = segment_path(&config.directory, segment_id);
         let _ = std::fs::remove_file(&path);
@@ -353,7 +354,7 @@ impl ShmTransport {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name("rtps-shm".into())
-                .spawn(move || receive_loop(&segment, &socket, &stop, &tx))?
+                .spawn(move || receive_loop(&segment, &socket, &stop, &sink))?
         };
         Ok(ShmTransport {
             host: host_id(),
@@ -479,38 +480,32 @@ impl Drop for ShmTransport {
     }
 }
 
-fn receive_loop(
-    segment: &Segment,
-    socket: &UdpSocket,
-    stop: &AtomicBool,
-    tx: &mpsc::Sender<Datagram>,
-) {
+fn receive_loop(segment: &Segment, socket: &UdpSocket, stop: &AtomicBool, sink: &Sink) {
     let mut buf = [0u8; 64];
+    let mut got = Vec::new();
     let source = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     while !stop.load(Ordering::Relaxed) {
         // A ring, or the poll interval, wakes it; then it drains the
         // buffer, which may hold more than one message per ring.
         let _ = socket.recv(&mut buf);
-        let mut closed = false;
         segment.drain(|port, data| {
             let channel = if port == PORT_METATRAFFIC {
                 Channel::DiscoveryUnicast
             } else {
                 Channel::UserUnicast
             };
-            if tx
-                .send(Datagram {
-                    channel,
-                    source,
-                    data,
-                })
-                .is_err()
-            {
-                closed = true;
-            }
+            got.push(Datagram {
+                channel,
+                source,
+                data,
+            });
         });
-        if closed {
-            return;
+        // Delivered once out of the ring: a handler may send.
+        let alone = got.len() == 1;
+        for d in got.drain(..) {
+            if !sink.deliver(d, alone) {
+                return;
+            }
         }
     }
 }
@@ -897,6 +892,7 @@ impl Pools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn config() -> ShmConfig {
         ShmConfig {
@@ -911,8 +907,8 @@ mod tests {
 
     #[test]
     fn messages_go_through_in_order() {
-        let (tx_a, _rx_a) = mpsc::channel();
-        let (tx_b, rx_b) = mpsc::channel();
+        let (tx_a, _rx_a) = mpsc::sync_channel(64);
+        let (tx_b, rx_b) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(1), tx_a).unwrap();
         let b = ShmTransport::open(&config(), prefix(2), tx_b).unwrap();
         let to = b.user_locator();
@@ -953,7 +949,7 @@ mod tests {
 
     #[test]
     fn other_hosts_and_gone_peers_use_udp() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(3), tx).unwrap();
         let udp = Locator::udpv4("127.0.0.1:7411".parse().unwrap());
         let mut elsewhere = a.user_locator();
@@ -964,7 +960,7 @@ mod tests {
         assert_eq!(a.select(&[gone, udp]), vec![&udp]);
         assert!(a.send(b"x", &gone).is_err());
         // Too large for the ring: not sent this way.
-        let (tx_b, _rx_b) = mpsc::channel();
+        let (tx_b, _rx_b) = mpsc::sync_channel(64);
         let b = ShmTransport::open(&config(), prefix(4), tx_b).unwrap();
         assert!(a.send(&[0u8; 2048], &b.user_locator()).is_err());
     }
@@ -1005,7 +1001,7 @@ mod tests {
 
     #[test]
     fn dropping_removes_the_files() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(64);
         let a = ShmTransport::open(&config(), prefix(5), tx).unwrap();
         let seg = a.path.clone();
         assert!(seg.exists());

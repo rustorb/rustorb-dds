@@ -42,6 +42,9 @@ using namespace eprosima::fastdds::dds;
 using Clock = std::chrono::steady_clock;
 
 enum Mode { PING, PONG, PUB, SUB };
+// The samples a best-effort sub keeps not yet taken (as rustorb-dds-perf).
+static const int READER_MAX_SAMPLES = 1000;
+
 static const char* mode_name[] = {"ping", "pong", "pub", "sub"};
 
 static struct Opts {
@@ -184,6 +187,13 @@ static void setup()
     }
     if (throughput) {
         rq.history().kind = KEEP_ALL_HISTORY_QOS;
+        if (!o.reliable) {
+            // A best-effort sub slower than its pub drops what does not
+            // fit (as rustorb-dds-perf; Fast DDS's default is 5000, 400
+            // an instance).
+            rq.resource_limits().max_samples = READER_MAX_SAMPLES;
+            rq.resource_limits().max_samples_per_instance = READER_MAX_SAMPLES;
+        }
     } else {
         rq.history().kind = KEEP_LAST_HISTORY_QOS;
         rq.history().depth = depth;

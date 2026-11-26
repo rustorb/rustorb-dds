@@ -231,6 +231,14 @@ trait Endpoint {
     fn matched(&self) -> (u32, u32);
 }
 
+/// The most samples taken at once (as `MAX_TAKE` of
+/// bench/cyclonedds/perf.c).
+const MAX_TAKE: usize = 256;
+
+/// The samples a best-effort sub keeps not yet taken (`max_samples`
+/// of its KEEP_ALL history), as in the other tools.
+const READER_MAX_SAMPLES: usize = 1000;
+
 struct Endpoints<W, R> {
     writer: Option<DataWriter<W>>,
     reader: Option<DataReader<R>>,
@@ -281,7 +289,11 @@ impl Endpoint for Plain {
     }
     fn recv(&mut self, out: &mut Vec<Got>) {
         if let Some(r) = &self.ep.reader {
-            out.extend(r.take().into_iter().filter_map(|s| s.data).map(|d| Got {
+            // MAX_TAKE at a time: a reader that fell behind is not
+            // decoded all at once, and the caller counts the seconds
+            // between takes.
+            let batch = r.max_samples(MAX_TAKE).take();
+            out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
                 seq: d.seq(),
                 stamp: d.stamp(),
                 len: d.payload_len(),
@@ -314,16 +326,12 @@ impl<T: Fixed> Endpoint for Loaned<T> {
     }
     fn recv(&mut self, out: &mut Vec<Got>) {
         if let Some(r) = &self.ep.reader {
-            out.extend(
-                r.take_loaned()
-                    .into_iter()
-                    .filter_map(|s| s.data)
-                    .map(|d| Got {
-                        seq: d.seq(),
-                        stamp: d.stamp(),
-                        len: d.payload_len(),
-                    }),
-            );
+            let batch = r.take_loaned_max(MAX_TAKE);
+            out.extend(batch.into_iter().filter_map(|s| s.data).map(|d| Got {
+                seq: d.seq(),
+                stamp: d.stamp(),
+                len: d.payload_len(),
+            }));
         }
     }
     fn wait(&self, timeout: Duration) -> bool {
@@ -434,6 +442,16 @@ fn endpoints(
             History::KeepAll
         } else {
             History::KeepLast(depth)
+        },
+        // A best-effort sub slower than its pub drops what does not fit,
+        // as a lost datagram, instead of keeping all (#110).
+        resource_limits: if throughput && !o.reliable {
+            ResourceLimits {
+                max_samples: Some(READER_MAX_SAMPLES),
+                ..ResourceLimits::default()
+            }
+        } else {
+            ResourceLimits::default()
         },
         ..DataReaderQos::default()
     };
