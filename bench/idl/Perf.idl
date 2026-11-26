@@ -1,0 +1,11 @@
+// The sample types of the performance measurements (rustorb-dds#100).
+// rustorb-dds-perf has them written by hand (crates/rustorb-dds-perf/src/
+// types.rs); the programs for the other implementations generate theirs
+// from this file.
+module RustorbPerf {
+    @final struct Sample {
+        unsigned long long seq;    // the sender's sequence number
+        unsigned long long stamp;  // when it was sent, ns since the sender's start
+        sequence<octet> payload;   // octets of no meaning, for the size
+    };
+};

@@ -75,8 +75,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Packages and builds each crate against the others as packaged, in
       # the order of their dependencies.
-      - run: cargo publish --workspace --dry-run --locked --exclude rustorb-dds-python
-      - run: cargo package --workspace --locked --no-verify --exclude rustorb-dds-python
+      - run: cargo publish --workspace --dry-run --locked --exclude rustorb-dds-python --exclude rustorb-dds-perf
+      - run: cargo package --workspace --locked --no-verify --exclude rustorb-dds-python --exclude rustorb-dds-perf
       - uses: actions/upload-artifact@v4
         with:
           name: crates
