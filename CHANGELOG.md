@@ -34,6 +34,19 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   #113). `WriterConfig` has `acknowledgment_batch` (1 by default, as
   before) and `acknowledgment_delay`; `ReliableWriter` has
   `request_acknowledgment`.
+- `rustorb-dds-perf --listener` (ping, pong) answers in the reader's
+  listener, as Cyclone DDS's `ddsperf` does, and `bench/run.py` has it as
+  the latency-only peer `rustorb-listener`. The round trip of 32 octets
+  went from 85 µs (WaitSet) to 51 µs in the container (#111).
+- Large samples (#112): the HEARTBEAT sent after a change goes in the same
+  message as long as the transport carries it, instead of a second
+  datagram for a change of about 16 KiB; on Linux, a UDP datagram is
+  received straight into a buffer of its size rather than copied out of
+  the receive buffer; a received value moves into the reader without a
+  copy, and a reader of a keyless topic no longer keeps a copy of the last
+  value (so `get_key_value` gives `None` on a keyless topic, as it did for
+  loaned samples). The reliable round trip of 16 KiB went from about 160
+  to 105 µs, and of 256 KiB from about 600 to 550 µs, in the container.
 - A read or take with `max_samples` costs in proportion to `max_samples`,
   not to the samples in the reader (#110).
 - The sub of `rustorb-dds-perf` takes 256 samples at a time (as the
@@ -52,6 +65,10 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Fixed
 
+- A listener that holds an entity of its own participant (a reader's
+  listener that writes back with a writer, say) is dropped with no lock
+  held: deleting the reader or writer, or replacing the listener, no
+  longer hangs (#117).
 - A writer faster than its reader no longer fails with "the shared
   memory buffer is full" once the reader's ring is full: the message is
   lost on the way like a datagram, and reliable readers get it again

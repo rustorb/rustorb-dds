@@ -389,10 +389,10 @@ impl<T> DataReader<T> {
     }
 
     /// The key of an instance (`get_key_value`): the last value received
-    /// for it, whose key members identify it. `None` if the reader has
-    /// not received a value for it, or has forgotten the instance: one
-    /// with no samples left and no writers is forgotten at the read or
-    /// take after the one that emptied it.
+    /// for it, whose key members identify it. `None` on a keyless topic,
+    /// if the reader has not received a value for it, or if it has
+    /// forgotten the instance: one with no samples left and no writers is
+    /// forgotten at the read or take after the one that emptied it.
     pub fn get_key_value(&self, instance: InstanceHandle) -> Option<T> {
         let g = self.shared.lock_any();
         let r = g.readers.get(&self.guid)?;
@@ -431,10 +431,14 @@ impl<T> DataReader<T> {
         T: 'static,
     {
         let l = reader_listener(self.samples.clone(), listener);
-        let mut g = self.shared.lock_any();
-        if let Some(r) = g.readers.get_mut(&self.guid) {
-            r.listener = Some((l, mask));
-        }
+        // The one before is dropped with no lock held (#117).
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.readers
+                .get_mut(&self.guid)
+                .and_then(|r| r.listener.replace((l, mask)))
+        };
+        drop(before);
     }
 
     /// Sets a listener for DATA_AVAILABLE alone: `f` is called with the
@@ -462,10 +466,13 @@ impl<T> DataReader<T> {
 
     /// Removes the listener.
     pub fn clear_listener(&self) {
-        let mut g = self.shared.lock_any();
-        if let Some(r) = g.readers.get_mut(&self.guid) {
-            r.listener = None;
-        }
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.readers
+                .get_mut(&self.guid)
+                .and_then(|r| r.listener.take())
+        };
+        drop(before);
     }
 
     /// The statuses changed since they were last read

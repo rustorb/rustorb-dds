@@ -138,6 +138,18 @@ impl Batcher {
         self.push_unchecked(sub, approx_size);
     }
 
+    /// Pushes a small submessage that closes what was pushed before it
+    /// (a HEARTBEAT): into the last message while that stays within
+    /// `limit`, the largest message the transport carries, even past
+    /// `max_size`. A HEARTBEAT in a message of its own made a second
+    /// datagram for each sample of about `max_size` (#112).
+    fn push_trailer(&mut self, sub: Submessage, approx_size: usize, limit: usize) {
+        if self.messages.is_empty() || self.size + approx_size > limit.max(self.max_size) {
+            self.start_if_full(usize::MAX);
+        }
+        self.push_unchecked(sub, approx_size);
+    }
+
     fn start_if_full(&mut self, approx_size: usize) {
         if self.messages.is_empty() || self.size + approx_size > self.max_size {
             let mut m = Message::new(self.header);
@@ -735,7 +747,7 @@ impl ReliableWriter {
                     count: Count(self.heartbeat_count),
                     group_info: None,
                 };
-                b.push(Submessage::Heartbeat(hb), 32);
+                b.push_trailer(Submessage::Heartbeat(hb), 32, frag.max_datagram_size);
             }
             b.finish(&dest, &mut out);
         }

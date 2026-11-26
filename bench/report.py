@@ -83,7 +83,7 @@ def spread(rows, kind, reliability, field):
 
 
 def order(groups):
-    rank = {"rustorb": 0, "cyclonedds": 1, "cyclonedds-ddsperf": 2, "fastdds": 3}
+    rank = {"rustorb": 0, "rustorb-listener": 1, "cyclonedds": 2, "cyclonedds-ddsperf": 3, "fastdds": 4}
     tr = {"udp": 0, "shm": 1, "loan": 2}
 
     def key(g):

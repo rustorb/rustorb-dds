@@ -509,49 +509,81 @@ impl Drop for UdpTransport {
 
 fn receive_loop(socket: &UdpSocket, channel: Channel, stop: &AtomicBool, sink: &Sink) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
+    // The size of the datagram known to wait first, when the system
+    // tells it: received straight into a buffer of its size rather than
+    // copied out of `buf` (#112).
+    let mut next = 0;
     while !stop.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut buf) {
-            Ok((n, source)) => {
+        let got = if next > 0 {
+            receive_sized(socket, next)
+        } else {
+            socket
+                .recv_from(&mut buf)
+                .map(|(n, source)| (buf[..n].to_vec(), source))
+        };
+        match got {
+            Ok((data, source)) => {
                 let d = Datagram {
                     channel,
                     source,
-                    data: buf[..n].to_vec(),
+                    data,
                 };
                 // Alone when no other waits behind it: a burst goes to
                 // the participant's thread while this one receives.
-                if !sink.deliver(d, !pending(socket)) {
+                let waiting = pending(socket);
+                next = if EXACT_PENDING { waiting } else { 0 };
+                if !sink.deliver(d, waiting == 0) {
                     return;
                 }
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
+            Err(e) => {
+                next = 0;
+                match e.kind() {
                     io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) => {}
-            // On Windows a previous send to a closed port shows up here as
-            // ConnectionReset; it says nothing about this socket.
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
-            Err(_) => std::thread::sleep(POLL),
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::Interrupted => {}
+                    // On Windows a previous send to a closed port shows up
+                    // here as ConnectionReset; it says nothing about this
+                    // socket.
+                    io::ErrorKind::ConnectionReset => {}
+                    _ => std::thread::sleep(POLL),
+                }
+            }
         }
     }
 }
 
-/// Whether a datagram waits on `socket`.
+/// Receives a datagram of `size` octets into a buffer of that size.
+fn receive_sized(socket: &UdpSocket, size: usize) -> io::Result<(Vec<u8>, SocketAddr)> {
+    let mut data = Vec::with_capacity(size);
+    let (n, source) = socket2::SockRef::from(socket).recv_from(data.spare_capacity_mut())?;
+    // SAFETY: the system wrote the first `n` octets, `n` <= capacity.
+    unsafe { data.set_len(n) };
+    let source = source
+        .as_socket()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok((data, source))
+}
+
+/// Whether [`pending`] tells the size of the first datagram waiting, as
+/// Linux does for a UDP socket, rather than of all of them.
+const EXACT_PENDING: bool = cfg!(target_os = "linux");
+
+/// How many octets wait on `socket`: on Linux the size of the first
+/// datagram. 0 when none waits, or for an empty datagram.
 #[cfg(unix)]
-fn pending(socket: &UdpSocket) -> bool {
+fn pending(socket: &UdpSocket) -> usize {
     use std::os::fd::AsRawFd;
     let mut n: libc::c_int = 0;
     // SAFETY: FIONREAD writes one c_int, to `n`, for an open socket.
     let r = unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut n) };
-    r == 0 && n > 0
+    if r == 0 { n.max(0) as usize } else { 0 }
 }
 
-/// Whether a datagram waits on `socket`: unknown here, so no.
+/// How many octets wait on `socket`: unknown here, so none.
 #[cfg(not(unix))]
-fn pending(_socket: &UdpSocket) -> bool {
-    false
+fn pending(_socket: &UdpSocket) -> usize {
+    0
 }
 
 fn new_udp_socket() -> io::Result<Socket> {

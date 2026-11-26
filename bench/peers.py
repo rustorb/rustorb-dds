@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
 BUILD = Path(os.environ.get("BENCH_BUILD", ROOT / "target" / "bench"))
 
-NAMES = ["rustorb", "cyclonedds", "fastdds", "cyclonedds-ddsperf"]
+NAMES = ["rustorb", "rustorb-listener", "cyclonedds", "fastdds", "cyclonedds-ddsperf"]
 
 
 @dataclass
@@ -124,6 +124,26 @@ class Rustorb(Peer):
     def version(self):
         m = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M)
         return m and m.group(1)
+
+
+class RustorbListener(Rustorb):
+    """rustorb-dds-perf with --listener: ping and pong receive in the
+    reader's listener and answer from it, as ddsperf does. Latency only."""
+
+    name = "rustorb-listener"
+    latency_only = True
+    # rustorb-dds-perf's interop cases are those of `rustorb`.
+    interop = False
+
+    def ping(self, **c):
+        cmd = super().ping(**c)
+        cmd.argv.append("--listener")
+        return cmd
+
+    def pong(self, **c):
+        cmd = super().pong(**c)
+        cmd.argv.append("--listener")
+        return cmd
 
 
 def dpkg_version(package):
@@ -336,6 +356,7 @@ def parse_ddsperf(kind, out, sizes):
 def make(name):
     return {
         "rustorb": Rustorb,
+        "rustorb-listener": RustorbListener,
         "cyclonedds": CycloneDds,
         "fastdds": FastDds,
         "cyclonedds-ddsperf": CycloneDdsperf,

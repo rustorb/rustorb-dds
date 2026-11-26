@@ -384,18 +384,25 @@ impl<T> DataWriter<T> {
         T: 'static,
     {
         let l = writer_listener(self.encoding, self.samples.clone(), listener);
-        let mut g = self.shared.lock_any();
-        if let Some(w) = g.writers.get_mut(&self.guid) {
-            w.listener = Some((l, mask));
-        }
+        // The one before is dropped with no lock held (#117).
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.writers
+                .get_mut(&self.guid)
+                .and_then(|w| w.listener.replace((l, mask)))
+        };
+        drop(before);
     }
 
     /// Removes the listener.
     pub fn clear_listener(&self) {
-        let mut g = self.shared.lock_any();
-        if let Some(w) = g.writers.get_mut(&self.guid) {
-            w.listener = None;
-        }
+        let before = {
+            let mut g = self.shared.lock_any();
+            g.writers
+                .get_mut(&self.guid)
+                .and_then(|w| w.listener.take())
+        };
+        drop(before);
     }
 
     /// The statuses changed since they were last read

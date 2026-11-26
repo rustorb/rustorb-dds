@@ -294,3 +294,47 @@ fn inconsistent_topic_listeners() {
     assert_eq!(topic_b.inconsistent_topic_status().total_count_change, 0);
     assert_eq!(topic_b.inconsistent_topic_status().total_count, 1);
 }
+
+/// Echoes what it reads with a writer it holds.
+struct Echo(Arc<rustorb_dds::DataWriter<Greeting>>);
+
+impl DataReaderListener<Greeting> for Echo {
+    fn on_data_available(&self, reader: &DataReader<Greeting>) {
+        for s in reader.take() {
+            if let Some(g) = s.data {
+                let _ = self.0.write(&g);
+            }
+        }
+    }
+}
+
+/// A listener that holds an entity of its own participant is dropped
+/// with no lock held: dropping the entity takes the lock (#117).
+#[test]
+fn listener_holding_a_writer_lets_go() {
+    let (done, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let p = participant(18);
+        let t = p.create_topic::<Greeting>("Echoed").unwrap();
+        let back = p.create_topic::<Greeting>("EchoedBack").unwrap();
+        let writer = Arc::new(
+            p.create_publisher()
+                .unwrap()
+                .create_datawriter(&back)
+                .unwrap(),
+        );
+        let reader = p
+            .create_subscriber()
+            .unwrap()
+            .create_datareader(&t)
+            .unwrap();
+        reader.set_listener(Echo(writer.clone()), StatusMask::DATA_AVAILABLE);
+        // Replacing the listener drops the one before.
+        reader.set_listener(Echo(writer.clone()), StatusMask::DATA_AVAILABLE);
+        drop(writer);
+        drop(reader);
+        drop(p);
+        done.send(()).unwrap();
+    });
+    rx.recv_timeout(WAIT).expect("the drops finish");
+}

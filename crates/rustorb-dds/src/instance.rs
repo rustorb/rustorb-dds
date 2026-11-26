@@ -335,6 +335,9 @@ pub(crate) struct ReaderHistory {
     /// DDSI-RTPS 2.5, 8.4.11).
     last_sn: HashMap<Guid, SequenceNumber>,
     arrivals: u64,
+    /// Whether the topic has a key: only then is the last value of an
+    /// instance kept.
+    keyed: bool,
 }
 
 impl ReaderHistory {
@@ -354,7 +357,14 @@ impl ReaderHistory {
             instances: BTreeMap::new(),
             last_sn: HashMap::new(),
             arrivals: 0,
+            keyed: true,
         }
+    }
+
+    /// Says whether the topic has a key (by default it has).
+    pub(crate) fn keyed(mut self, keyed: bool) -> Self {
+        self.keyed = keyed;
+        self
     }
 
     /// The last value received for each instance, to recognise a key
@@ -458,11 +468,10 @@ impl ReaderHistory {
                 }
                 inst.state = InstanceState::Alive;
                 inst.writers.insert(c.writer);
-                // A sample in shared memory is not kept past its take:
-                // its octets are copied for a keyed topic, and not kept
-                // for a keyless one, which needs no key.
-                inst.last_value =
-                    (!v.is_loaned() || c.instance != InstanceHandle::KEYLESS).then(|| v.to_vec());
+                // Kept for a keyed topic only: a keyless one needs no
+                // key, and keeping it cost a copy of every sample (#112).
+                // (The handle does not tell: a key can hash to zeros.)
+                inst.last_value = self.keyed.then(|| v.to_vec());
                 payload = Some(v);
             }
             Change::Lifecycle {
@@ -894,6 +903,17 @@ mod tests {
         assert_eq!(r.last_value(&h(1)), Some(&[12][..]));
         assert!(r.select(StateFilter::ANY, None, true).is_empty());
         assert!(r.last_value(&h(1)).is_none());
+    }
+
+    #[test]
+    fn last_value_kept_for_a_keyed_topic_only() {
+        // A key may hash to zeros, the handle of a keyless topic.
+        let mut r = ReaderHistory::new(History::KeepAll);
+        r.accept(write(w(1), 1, 0, 5));
+        assert_eq!(r.last_value(&h(0)), Some(&[5][..]));
+        let mut r = ReaderHistory::new(History::KeepAll).keyed(false);
+        r.accept(write(w(1), 1, 0, 5));
+        assert!(r.last_value(&h(0)).is_none());
     }
 
     #[test]
