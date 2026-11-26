@@ -57,6 +57,13 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   together all matched in about 30 ms instead of about 1 s.
   `SedpConfig::default()` has the 100 ms period; `Spdp::next_deadline`
   is now when an announcement is due.
+- A reliable writer sends a HEARTBEAT to a newly matched reliable reader
+  at once, even with nothing written, rather than only when the reader's
+  first ACKNACK asks for one. An OpenDDS reader whose first ACKNACK was
+  lost could otherwise get a large sample's fragments before any
+  HEARTBEAT, drop them, and deliver the next sample first (seen once in
+  the `rustorb-to-opendds-large` interop case, which drops one in five
+  received datagrams).
 - DDS Security: a handshake request that comes before the requester's
   SPDP announcement is kept (the last one of each participant, for at
   most 256 participants) and answered once the participant is

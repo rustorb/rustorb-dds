@@ -506,7 +506,12 @@ impl ReliableWriter {
             last_nackfrag: None,
             repair_at: None,
             last_acknack: None,
-            heartbeat_due: false,
+            // A new reliable reader is sent a HEARTBEAT at once, even with
+            // nothing to send: it learns the writer's range before any
+            // data, without waiting for its own first ACKNACK to get
+            // here (some implementations, OpenDDS among them, only take
+            // data from a writer once they have its HEARTBEAT).
+            heartbeat_due: m.reliable,
         });
         p.unicast = m.unicast;
         p.multicast = m.multicast;
@@ -1355,6 +1360,24 @@ mod tests {
     }
 
     #[test]
+    fn a_new_reliable_reader_is_sent_a_heartbeat_at_once() {
+        // Even with nothing written, and before its first ACKNACK comes
+        // (it may be lost), the reader learns the writer's range.
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.poll(t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        let out = w.poll(t);
+        assert!(out.iter().all(|o| o.locators == loc(2)));
+        assert!(matches!(
+            &subs(&out)[..],
+            [.., Submessage::Heartbeat(h)] if h.first_sn == SequenceNumber(1) && h.last_sn == SequenceNumber(0)
+        ));
+        // Only once.
+        assert!(subs(&w.poll(t)).is_empty());
+    }
+
+    #[test]
     fn data_sent_before_the_reader_matched_comes_at_once() {
         // The writer matched the reader first and sent 1..=2, which the
         // reader dropped (it did not know the writer yet). Its first
@@ -1616,8 +1639,9 @@ mod tests {
         };
         let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, cfg);
         w.add_reader(rguid(2), loc(2), vec![]);
-        // The first poll is the periodic one: it asks.
-        assert!(w.poll(t).is_empty());
+        // The first poll sends the HEARTBEAT for the match; with nothing
+        // written, it asks for nothing.
+        assert!(matches!(&subs(&w.poll(t))[..], [.., Submessage::Heartbeat(h)] if h.final_flag));
         let finals = |out: &[Outgoing]| -> Vec<bool> {
             subs(out)
                 .iter()
