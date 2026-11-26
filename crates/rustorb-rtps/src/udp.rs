@@ -10,7 +10,7 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -161,6 +161,13 @@ pub enum Channel {
     UserUnicast,
 }
 
+impl Channel {
+    /// Whether it is a channel of user traffic.
+    pub fn is_user(self) -> bool {
+        matches!(self, Channel::UserMulticast | Channel::UserUnicast)
+    }
+}
+
 /// One received datagram: one RTPS message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Datagram {
@@ -178,6 +185,7 @@ pub struct Datagram {
 #[derive(Debug)]
 pub struct Incoming {
     rx: mpsc::Receiver<Datagram>,
+    queued: Arc<AtomicUsize>,
 }
 
 impl Incoming {
@@ -196,6 +204,16 @@ impl Incoming {
     pub fn try_recv(&self) -> Option<Datagram> {
         self.rx.try_recv().ok()
     }
+
+    /// Says that `user` datagrams of user traffic taken from here have
+    /// been handled. With a [`UserHandler`], user traffic goes to it only
+    /// while none taken from here is still being handled, so that it is
+    /// handled in the order it came.
+    pub fn handled(&self, user: usize) {
+        if user > 0 {
+            self.queued.fetch_sub(user, Ordering::AcqRel);
+        }
+    }
 }
 
 /// The most datagrams received and not yet taken from [`Incoming`].
@@ -205,6 +223,70 @@ impl Incoming {
 /// a bound, a fast sender made the receiver's memory grow without end
 /// (rustorb-dds#110). 1024 datagrams are at most 64 MiB.
 pub const INCOMING_CAPACITY: usize = 1024;
+
+/// Handles a datagram of user traffic on the thread that received it,
+/// or gives it back to be queued on [`Incoming`] like the others.
+pub type UserHandler = Arc<dyn Fn(Datagram) -> Option<Datagram> + Send + Sync>;
+
+/// Where the receive threads put what they receive: on the queue of
+/// [`Incoming`], or, for user traffic and with a [`UserHandler`], to
+/// that handler on the receiving thread, which saves a hand-over
+/// between threads for each message (rustorb-dds#111).
+#[derive(Clone)]
+pub struct Sink {
+    tx: mpsc::SyncSender<Datagram>,
+    user: Option<UserHandler>,
+    /// The user datagrams queued and not yet [`Incoming::handled`].
+    queued: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for Sink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sink")
+            .field("user_handler", &self.user.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<mpsc::SyncSender<Datagram>> for Sink {
+    fn from(tx: mpsc::SyncSender<Datagram>) -> Self {
+        Sink {
+            tx,
+            user: None,
+            queued: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl Sink {
+    /// Puts a datagram where it goes. `alone` says that no other has
+    /// come with it: user traffic goes to the handler only then (a
+    /// burst is queued, for the participant's thread to handle while
+    /// this one receives), and only while no user datagram queued
+    /// earlier is still to be handled. Returns `false` once the
+    /// receiving side is gone.
+    pub fn deliver(&self, d: Datagram, alone: bool) -> bool {
+        let user = d.channel.is_user();
+        let d = match &self.user {
+            Some(h) if user && alone && self.queued.load(Ordering::Acquire) == 0 => match h(d) {
+                Some(d) => d,
+                None => return true,
+            },
+            _ => d,
+        };
+        if user {
+            self.queued.fetch_add(1, Ordering::AcqRel);
+        }
+        if self.tx.send(d).is_ok() {
+            true
+        } else {
+            if user {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+            }
+            false
+        }
+    }
+}
 
 /// How often the receive threads look at the stop flag.
 const POLL: Duration = Duration::from_millis(100);
@@ -226,12 +308,21 @@ pub struct UdpTransport {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     /// For other transports to deliver to the same [`Incoming`].
-    tx: mpsc::SyncSender<Datagram>,
+    sink: Sink,
 }
 
 impl UdpTransport {
     /// Opens the sockets, joins the multicast group and starts receiving.
     pub fn open(config: &UdpConfig) -> io::Result<(UdpTransport, Incoming)> {
+        Self::open_with(config, None)
+    }
+
+    /// Like [`Self::open`], with user traffic given to `user` on the
+    /// receiving threads (see [`Sink`]).
+    pub fn open_with(
+        config: &UdpConfig,
+        user: Option<UserHandler>,
+    ) -> io::Result<(UdpTransport, Incoming)> {
         let ports = config.ports;
         let domain_id = config.domain_id;
         let port_err = || io::Error::new(io::ErrorKind::InvalidInput, "port number out of range");
@@ -268,14 +359,20 @@ impl UdpTransport {
         let user_uc = Arc::new(user_uc);
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::sync_channel(INCOMING_CAPACITY);
+        let queued = Arc::new(AtomicUsize::new(0));
+        let sink = Sink {
+            tx,
+            user,
+            queued: queued.clone(),
+        };
         let mut threads = Vec::new();
         let mut spawn = |socket: Arc<UdpSocket>, channel: Channel| -> io::Result<()> {
             socket.set_read_timeout(Some(POLL))?;
             let stop = stop.clone();
-            let tx = tx.clone();
+            let sink = sink.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("rtps-udp-{channel:?}"))
-                .spawn(move || receive_loop(&socket, channel, &stop, &tx))?;
+                .spawn(move || receive_loop(&socket, channel, &stop, &sink))?;
             threads.push(handle);
             Ok(())
         };
@@ -297,16 +394,16 @@ impl UdpTransport {
                 multicast_senders,
                 stop,
                 threads,
-                tx,
+                sink,
             },
-            Incoming { rx },
+            Incoming { rx, queued },
         ))
     }
 
     /// A sender of datagrams to this transport's [`Incoming`], for
     /// another transport (shared memory) to deliver there too.
-    pub fn injector(&self) -> mpsc::SyncSender<Datagram> {
-        self.tx.clone()
+    pub fn injector(&self) -> Sink {
+        self.sink.clone()
     }
 
     /// The domain id.
@@ -410,12 +507,7 @@ impl Drop for UdpTransport {
     }
 }
 
-fn receive_loop(
-    socket: &UdpSocket,
-    channel: Channel,
-    stop: &AtomicBool,
-    tx: &mpsc::SyncSender<Datagram>,
-) {
+fn receive_loop(socket: &UdpSocket, channel: Channel, stop: &AtomicBool, sink: &Sink) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     while !stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
@@ -425,7 +517,9 @@ fn receive_loop(
                     source,
                     data: buf[..n].to_vec(),
                 };
-                if tx.send(d).is_err() {
+                // Alone when no other waits behind it: a burst goes to
+                // the participant's thread while this one receives.
+                if !sink.deliver(d, !pending(socket)) {
                     return;
                 }
             }
@@ -442,6 +536,22 @@ fn receive_loop(
             Err(_) => std::thread::sleep(POLL),
         }
     }
+}
+
+/// Whether a datagram waits on `socket`.
+#[cfg(unix)]
+fn pending(socket: &UdpSocket) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut n: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int, to `n`, for an open socket.
+    let r = unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut n) };
+    r == 0 && n > 0
+}
+
+/// Whether a datagram waits on `socket`: unknown here, so no.
+#[cfg(not(unix))]
+fn pending(_socket: &UdpSocket) -> bool {
+    false
 }
 
 fn new_udp_socket() -> io::Result<Socket> {

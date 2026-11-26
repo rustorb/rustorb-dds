@@ -22,13 +22,13 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
 
-use crate::udp::{Channel, Datagram};
+use crate::udp::{Channel, Datagram, Sink};
 use crate::{GuidPrefix, Locator};
 
 /// The port of a shared memory locator for metatraffic.
@@ -332,13 +332,14 @@ impl std::fmt::Debug for ShmTransport {
 
 impl ShmTransport {
     /// Creates the receive segment and socket of the participant `prefix`
-    /// and starts receiving: the messages go to `tx`, as datagrams of the
-    /// unicast channels.
+    /// and starts receiving: the messages go to `sink` (a [`Sink`], or the
+    /// sender of a queue), as datagrams of the unicast channels.
     pub fn open(
         config: &ShmConfig,
         prefix: GuidPrefix,
-        tx: mpsc::SyncSender<Datagram>,
+        sink: impl Into<Sink>,
     ) -> io::Result<ShmTransport> {
+        let sink = sink.into();
         let segment_id = fnv(&prefix.0) ^ u64::from(std::process::id());
         let path = segment_path(&config.directory, segment_id);
         let _ = std::fs::remove_file(&path);
@@ -353,7 +354,7 @@ impl ShmTransport {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name("rtps-shm".into())
-                .spawn(move || receive_loop(&segment, &socket, &stop, &tx))?
+                .spawn(move || receive_loop(&segment, &socket, &stop, &sink))?
         };
         Ok(ShmTransport {
             host: host_id(),
@@ -479,38 +480,32 @@ impl Drop for ShmTransport {
     }
 }
 
-fn receive_loop(
-    segment: &Segment,
-    socket: &UdpSocket,
-    stop: &AtomicBool,
-    tx: &mpsc::SyncSender<Datagram>,
-) {
+fn receive_loop(segment: &Segment, socket: &UdpSocket, stop: &AtomicBool, sink: &Sink) {
     let mut buf = [0u8; 64];
+    let mut got = Vec::new();
     let source = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     while !stop.load(Ordering::Relaxed) {
         // A ring, or the poll interval, wakes it; then it drains the
         // buffer, which may hold more than one message per ring.
         let _ = socket.recv(&mut buf);
-        let mut closed = false;
         segment.drain(|port, data| {
             let channel = if port == PORT_METATRAFFIC {
                 Channel::DiscoveryUnicast
             } else {
                 Channel::UserUnicast
             };
-            if tx
-                .send(Datagram {
-                    channel,
-                    source,
-                    data,
-                })
-                .is_err()
-            {
-                closed = true;
-            }
+            got.push(Datagram {
+                channel,
+                source,
+                data,
+            });
         });
-        if closed {
-            return;
+        // Delivered once out of the ring: a handler may send.
+        let alone = got.len() == 1;
+        for d in got.drain(..) {
+            if !sink.deliver(d, alone) {
+                return;
+            }
         }
     }
 }
@@ -897,6 +892,7 @@ impl Pools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn config() -> ShmConfig {
         ShmConfig {
