@@ -10,6 +10,19 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Changed
 
+- A reliable KEEP_ALL writer with more than 2 MiB its readers have not
+  acknowledged waits for acknowledgments before it writes, up to
+  `max_blocking_time`, and then writes anyway. A fast writer used to
+  send more than a reader's socket holds: tens of thousands of
+  datagrams were dropped in 5 s and sent again. Reliable UDP throughput
+  of 64 KiB samples went from about 6 to 12 Gbit/s and of 256 KiB from
+  about 8.5 to 11.5 Gbit/s, as Cyclone DDS 0.10.4 on the same machine
+  (13 Gbit/s), with no drops (#112).
+- `ReliableWriter::unacknowledged_octets`: the octets of the changes
+  that some reliable reader has not acknowledged.
+- The reassembly of a fragmented sample no longer fills its buffer with
+  zeros first, and a typed writer sizes the buffer of a sample from the
+  last one it wrote (#112).
 - Payloads are shared rather than copied: `SerializedPayload::bytes`
   and `DataFrag::serialized_payload` are a new `rustorb_rtps::Octets`
   (a shared, immutable buffer and a range; `From<Vec<u8>>`, `Deref` to

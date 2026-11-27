@@ -4,8 +4,9 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustorb_typesupport::{ByteOrder, Decoder, Encoder, Encoding, TopicType};
+use rustorb_typesupport::{ByteOrder, Decoder, Encoder, Encoding, TopicType, XcdrFormat};
 use rustorb_xtypes::dynamic::{DynamicData, DynamicType};
 
 use crate::error::Result;
@@ -67,11 +68,20 @@ pub(crate) trait SampleType<T>: Send + Sync {
 }
 
 /// [`KeyOps`] and [`SampleType`] for the type `T`.
-pub(crate) struct Typed<T>(PhantomData<fn() -> T>);
+pub(crate) struct Typed<T> {
+    /// The length of the last payload written: the buffer of the next
+    /// one starts that large, rather than growing (and copying) as it
+    /// fills (#112).
+    last_len: AtomicUsize,
+    _t: PhantomData<fn() -> T>,
+}
 
 impl<T> Typed<T> {
     pub(crate) fn new() -> Self {
-        Typed(PhantomData)
+        Typed {
+            last_len: AtomicUsize::new(0),
+            _t: PhantomData,
+        }
     }
 }
 
@@ -130,7 +140,15 @@ impl<T: TopicType + 'static> SampleType<T> for Typed<T> {
     }
 
     fn to_payload(&self, v: &T, encoding: Encoding, order: ByteOrder) -> Result<Vec<u8>> {
-        Ok(v.to_payload(encoding, order)?)
+        // TopicType::to_payload, with the buffer sized beforehand.
+        let format = XcdrFormat::new(encoding, T::EXTENSIBILITY)
+            .ok_or(rustorb_typesupport::Error::NotXcdr)?;
+        let mut enc = Encoder::xcdr_payload(format, order);
+        enc.reserve(self.last_len.load(Ordering::Relaxed));
+        T::write(v, &mut enc)?;
+        let p = enc.finish_xcdr_payload();
+        self.last_len.store(p.len(), Ordering::Relaxed);
+        Ok(p)
     }
 
     fn decode(&self, payload: &[u8]) -> Option<T> {

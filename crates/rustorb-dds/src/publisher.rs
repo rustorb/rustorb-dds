@@ -207,7 +207,9 @@ impl<T> DataWriter<T> {
     /// A RELIABLE writer with KEEP_ALL history and `max_samples` set
     /// waits, when its history is full, for its readers to acknowledge
     /// samples; after `max_blocking_time` it fails with
-    /// [`Error::Timeout`](crate::Error::Timeout).
+    /// [`Error::Timeout`](crate::Error::Timeout). A RELIABLE KEEP_ALL
+    /// writer with more than 2 MiB its readers have not acknowledged also
+    /// waits, up to `max_blocking_time`, and then writes anyway.
     ///
     /// Writing registers the sample's instance if it is not yet. KEEP_LAST
     /// keeps the newest samples of each instance.
