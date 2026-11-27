@@ -346,6 +346,7 @@ bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/resu
 - rustorb → RustDDS の reliable のスループットは、64 KiB で 7.9 Gbit/s（前 9.2）、256 KiB で 9.5 Gbit/s（前 1.0）、1 MiB で 0.27 Gbit/s（前 0.002）。止まる回はなくなったが、1 MiB はまだ遅い（RustDDS が持つ組み立て途中の標本は 128 まで）。
 - RustDDS → rustorb の reliable は 64 KiB 以上で遅くなった（64 KiB で 0.5 Gbit/s → ほぼ 0、256 KiB で 0.37 → 0.05）。unicast で届くようになると、rustorb-dds の受信ソケットで溢れた分を RustDDS の writer が送り直すが、RustDDS 0.15 は送り直しを 10 ms ごとに 8 KiB までしか送らない（`REPAIR_INTERVAL_DEFAULT`、`REPAIR_BATCH_MAX_BYTES`）。RustDDS どうしでも 1 MiB は 5 Mbit/s。multicast のときは RustDDS が窓を待たずに送り続けていたので進んでいた。
 - best-effort の RustDDS の sub は、相変わらず速い pub からの標本をため続ける（16 KiB 以上で 3 GiB を超えて止められた）。
+- OpenDDS の writer も rustorb-dds の multicast の受け口へ送っていた。CI の `bench-opendds`（同じ runner、a5a563b のあとの 248b286）では、OpenDDS → rustorb の best-effort のスループットが 64 KiB で 5.4 → 9.1 Gbit/s、1 MiB で 8.1 → 15.6 Gbit/s になった。rustorb → OpenDDS の reliable の 1 MiB は 1.4 → 2.3 Gbit/s。reliable の往復（0.7〜2.5 ms、#124）は変わらない。
 
 ## 結果の表
 
