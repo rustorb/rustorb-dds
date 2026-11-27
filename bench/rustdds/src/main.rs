@@ -297,18 +297,17 @@ impl Perf {
             base().history(History::KeepLast { depth })
         }
         .build();
-        let rq = if throughput {
-            let q = base().history(History::KeepAll);
-            // A best-effort sub slower than its pub drops what does not fit.
-            if o.reliable {
-                q
-            } else {
-                q.resource_limits(ResourceLimits {
-                    max_samples: READER_MAX_SAMPLES,
-                    max_instances: -1,
-                    max_samples_per_instance: -1,
-                })
-            }
+        let rq = if throughput && o.reliable {
+            base().history(History::KeepAll)
+        } else if throughput {
+            // A best-effort sub slower than its pub drops what does not
+            // fit. The others have KEEP_ALL with at most
+            // READER_MAX_SAMPLES samples; RustDDS 0.15 delivers nothing
+            // to a reader with RESOURCE_LIMITS, so KEEP_LAST of as many
+            // (the oldest are dropped instead of the newest).
+            base().history(History::KeepLast {
+                depth: READER_MAX_SAMPLES,
+            })
         } else {
             base().history(History::KeepLast { depth })
         }
