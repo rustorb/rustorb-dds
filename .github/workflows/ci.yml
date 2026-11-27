@@ -266,6 +266,33 @@ jobs:
           path: target/bench/smoke
           if-no-files-found: ignore
 
+  # bench/run.py with OpenDDS (rustorb-dds#108): bench/opendds/perf.cpp
+  # built in OpenDDS's Docker image and run on the runner, with each of
+  # rustorb-dds and OpenDDS and with the other, so that OpenDDS's numbers
+  # are relative to rustorb-dds's of the same runner.
+  bench-opendds:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Allow the socket buffers of bench/opendds/rtps.ini
+        run: sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+      - name: Pull OpenDDS
+        run: docker pull -q ghcr.io/opendds/opendds:DDS-3.31
+      - run: >
+          python3 bench/run.py --peers rustorb,opendds --transports udp --interop
+          --sizes 32,1024,16384,65536,1048576 --warmup 0.5 --duration 3 --repeat 1
+          --out target/bench/opendds
+      - run: python3 bench/report.py target/bench/opendds
+      - name: Keep the results and the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-opendds
+          path: target/bench/opendds
+          if-no-files-found: ignore
+
   # The same cases with OpenDDS (RTPS discovery and the RTPS_UDP
   # transport), built and run in OpenDDS's Docker image.
   opendds:

@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
 BUILD = Path(os.environ.get("BENCH_BUILD", ROOT / "target" / "bench"))
 
-NAMES = ["rustorb", "rustorb-listener", "cyclonedds", "fastdds", "cyclonedds-ddsperf"]
+NAMES = ["rustorb", "rustorb-listener", "cyclonedds", "fastdds", "rustdds", "opendds", "cyclonedds-ddsperf"]
 
 
 @dataclass
@@ -278,6 +278,93 @@ class FastDds(Peer):
         return dpkg_version("libfastrtps-dev")
 
 
+class RustDds(Peer):
+    """bench/rustdds, a program of its own on RustDDS's API (its own
+    Cargo.lock, not in the workspace)."""
+
+    name = "rustdds"
+
+    def missing(self):
+        return None if shutil.which("cargo") else "no cargo"
+
+    def build(self):
+        subprocess.run(["cargo", "build", "--release", "--locked"], cwd=BENCH / "rustdds", check=True)
+
+    def program(self):
+        return BENCH / "rustdds" / "target" / "release" / "rustdds-perf"
+
+    def version(self):
+        lock = (BENCH / "rustdds" / "Cargo.lock").read_text()
+        m = re.search(r'name = "rustdds"\nversion = "([^"]+)"', lock)
+        return m and m.group(1)
+
+
+OPENDDS_IMAGE = os.environ.get("OPENDDS_IMAGE", "ghcr.io/opendds/opendds:DDS-3.31")
+# The libraries of the system, left out of those copied from the image.
+SYSTEM_LIBS = re.compile(r"/(libc|libm|libdl|libpthread|librt|ld-linux[^/]*)\.so")
+
+
+class OpenDds(Peer):
+    """bench/opendds/perf.cpp on OpenDDS's C++ API, with RTPS discovery
+    and the RTPS_UDP transport (bench/opendds/rtps.ini).
+
+    Built in OpenDDS's Docker image (OPENDDS_IMAGE, which has to be
+    pulled), as interop/run.sh builds its OpenDDS programs, and run here,
+    outside Docker, with the libraries it links copied from the image:
+    so that it is pinned to its CPUs and its CPU time and memory are its
+    own, as for the others. With OPENDDS_IMAGE empty, the OpenDDS of
+    DDS_ROOT here."""
+
+    name = "opendds"
+
+    def missing(self):
+        if not OPENDDS_IMAGE:
+            return None if os.environ.get("DDS_ROOT") else "no DDS_ROOT (OPENDDS_IMAGE is empty)"
+        if not shutil.which("docker"):
+            return "no docker"
+        r = subprocess.run(["docker", "image", "inspect", OPENDDS_IMAGE], capture_output=True)
+        if r.returncode != 0:
+            return f"no OpenDDS image (docker pull {OPENDDS_IMAGE})"
+        return None
+
+    def build(self):
+        out = BUILD / "opendds"
+        out.mkdir(parents=True, exist_ok=True)
+        script = (
+            'cmake -S "$1" -B "$2" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${DDS_ROOT:-/usr/local}" '
+            '>/dev/null && cmake --build "$2" -j "$(nproc)" >/dev/null && mkdir -p "$2/lib" && '
+            'ldd "$2/perf" | awk \'/=> \\// {print $3}\' > "$2/libs.txt"'
+        )
+        run = []
+        if OPENDDS_IMAGE:
+            df = f"FROM {OPENDDS_IMAGE}\nRUN (command -v cmake && command -v g++) >/dev/null || " \
+                 "(apt-get update -qq && apt-get install -y -qq cmake g++ >/dev/null)\n"
+            subprocess.run(["docker", "build", "-q", "-t", "rustorb-bench-opendds", "-"],
+                           input=df, text=True, check=True, stdout=subprocess.DEVNULL)
+            run = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+                   "-v", f"{ROOT}:{ROOT}", "-v", f"{out}:{out}", "rustorb-bench-opendds"]
+        subprocess.run(run + ["sh", "-c", script, "sh", str(BENCH / "opendds"), str(out)], check=True)
+        if OPENDDS_IMAGE:
+            # The libraries perf links, but those of the system, from the image.
+            libs = [l for l in (out / "libs.txt").read_text().split() if not SYSTEM_LIBS.search(l)]
+            copy = 'for l in "$@"; do cp -L "$l" "$0/"; done'
+            subprocess.run(run + ["sh", "-c", copy, str(out / "lib")] + libs, check=True)
+
+    def program(self):
+        return BUILD / "opendds" / "perf"
+
+    def env(self, transport):
+        return {"LD_LIBRARY_PATH": str(BUILD / "opendds" / "lib")} if OPENDDS_IMAGE else {}
+
+    def cmd(self, mode, **c):
+        cmd = super().cmd(mode, **c)
+        cmd.argv += ["-DCPSConfigFile", str(BENCH / "opendds" / "rtps.ini")]
+        return cmd
+
+    def version(self):
+        return OPENDDS_IMAGE or os.environ.get("DDS_ROOT")
+
+
 class CycloneDdsperf(Peer):
     """Cyclone DDS's ddsperf, with its own topic KS (keyed, a sequence
     of octets) and output."""
@@ -425,5 +512,7 @@ def make(name):
         "rustorb-listener": RustorbListener,
         "cyclonedds": CycloneDds,
         "fastdds": FastDds,
+        "rustdds": RustDds,
+        "opendds": OpenDds,
         "cyclonedds-ddsperf": CycloneDdsperf,
     }[name]()

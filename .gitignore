@@ -14,3 +14,4 @@ __pycache__/
 bench/results/*/log.txt
 /bench/bindings/dotnet/bin
 /bench/bindings/dotnet/obj
+/bench/rustdds/target
