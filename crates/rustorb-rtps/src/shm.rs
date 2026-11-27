@@ -6,8 +6,9 @@
 //! by every process that sends to it, holding a ring buffer of RTPS
 //! messages; and a UDP socket on the loopback interface, whose port the
 //! segment gives, that senders ring after writing. Senders take turns through a
-//! lock in the segment. A message that does not fit is dropped, like a
-//! datagram lost on the way: the reliable protocol repairs it.
+//! lock in the segment. A message that does not fit, after a short wait
+//! for the receiver to make room, is dropped, like a datagram lost on the
+//! way: the reliable protocol repairs it.
 //!
 //! The participant announces its segment with locators of the vendor
 //! kind [`Locator::KIND_SHM`] (the address holds the host and the segment,
@@ -56,6 +57,10 @@ const POLL: Duration = Duration::from_millis(100);
 /// How long a sender waits for the lock before it takes it from a holder
 /// that is gone.
 const LOCK_PATIENCE: Duration = Duration::from_millis(500);
+
+/// How long a send waits for room in a full ring before the message is
+/// dropped.
+const SEND_PATIENCE: Duration = Duration::from_millis(5);
 
 /// How the transport is set up.
 #[derive(Clone, Debug)]
@@ -295,6 +300,8 @@ impl Segment {
                 );
             }
             tail += (RECORD_HEADER + (len as usize).next_multiple_of(8)) as u64;
+            // Freed at once, for a writer waiting for room.
+            self.word(OFF_TAIL).store(tail, Ordering::Release);
             f(u32::from_ne_bytes(port), data);
         }
         self.word(OFF_TAIL).store(tail, Ordering::Release);
@@ -446,10 +453,23 @@ impl ShmTransport {
             io::Error::new(io::ErrorKind::Unsupported, "no such shared memory peer")
         })?;
         if !peer.segment.push(to.port, data) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "the shared memory buffer is full",
-            ));
+            // Full: the peer drains it as it receives, so wait a little
+            // for room rather than lose the message and wait for a repair
+            // (#112).
+            let _ = self.bell.send_to(&[0], peer.segment.bell());
+            let start = Instant::now();
+            loop {
+                std::thread::yield_now();
+                if peer.segment.push(to.port, data) {
+                    break;
+                }
+                if start.elapsed() > SEND_PATIENCE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "the shared memory buffer is full",
+                    ));
+                }
+            }
         }
         match self.bell.send_to(&[0], peer.segment.bell()) {
             Ok(_) => Ok(()),

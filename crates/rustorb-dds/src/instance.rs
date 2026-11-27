@@ -208,6 +208,7 @@ pub(crate) enum Payload {
 
 impl Payload {
     /// Whether it is a sample in shared memory.
+    #[cfg(feature = "shm")]
     pub(crate) fn is_loaned(&self) -> bool {
         match self {
             Payload::Owned(_) => false,

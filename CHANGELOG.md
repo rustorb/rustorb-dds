@@ -10,6 +10,26 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Changed
 
+- Payloads are shared rather than copied: `SerializedPayload::bytes`
+  and `DataFrag::serialized_payload` are a new `rustorb_rtps::Octets`
+  (a shared, immutable buffer and a range; `From<Vec<u8>>`, `Deref` to
+  `[u8]`). A received DATA or DATA_FRAG is a slice of its datagram
+  (`Message::parse_shared`, `receiver::receive_shared`), the DATA_FRAGs
+  of a change are slices of it, and a writer's history shares a sample
+  with its local readers. The reliable round trip of 256 KiB went from
+  about 575 to 500 µs, 512 KiB from 1,060 to 890 µs and 1 MiB from
+  2,770 to 1,690 µs (Cyclone DDS 0.10.4 on the same machine: 596, 985,
+  2,096 µs) (#112).
+- A shared memory send to a full ring wakes the receiver and waits up to
+  5 ms for room before it drops the message, and the receiver frees each
+  message as it reads it. Reliable SHM throughput of 256 KiB went from
+  7.6 to 11.3 Gbit/s, above UDP at every size (#112).
+- `DataWriter::loan_sample` of a reliable writer whose pool slots are
+  all held asks its readers for acknowledgments and waits up to
+  `max_blocking_time` for a slot, instead of falling back to a heap
+  sample at once. Reliable loaned 256 KiB samples went from about 1.3
+  to 200 Gbit/s and 1 MiB from 1.6 to 800 Gbit/s, where they had fallen
+  back to the heap and serialization most of the time (#112).
 - SPDP no longer announces a `defaultMulticastLocatorList` unless
   `ParticipantConfig::user_multicast` is set (a new field, false by
   default): remote writers send user data to this participant by

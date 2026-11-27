@@ -348,6 +348,36 @@ bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/resu
 - best-effort の RustDDS の sub は、相変わらず速い pub からの標本をため続ける（16 KiB 以上で 3 GiB を超えて止められた）。
 - OpenDDS の writer も rustorb-dds の multicast の受け口へ送っていた。CI の `bench-opendds`（同じ runner、a5a563b のあとの 248b286）では、OpenDDS → rustorb の best-effort のスループットが 64 KiB で 5.4 → 9.1 Gbit/s、1 MiB で 8.1 → 15.6 Gbit/s になった。rustorb → OpenDDS の reliable の 1 MiB は 1.4 → 2.3 Gbit/s。reliable の往復（0.7〜2.5 ms、#124）は変わらない。
 
+## #111・#112 の残り（コンテナ）
+
+2026-11-27、コンテナで rustorb-dds-perf を直す前（main、681207f）と後で交互に測った（同じマシンの騒がしさを打ち消すため。数値は回ごとの中央値の幅）。Cyclone DDS 0.10.4 も同じ回に測った。
+
+大きな標本の reliable の往復（UDP、中央値、µs）:
+
+| size | 直す前 | 直した後 | Cyclone DDS |
+|---:|---:|---:|---:|
+| 64 KiB | 217–263 | 207 | 145–163 |
+| 128 KiB | 467–527 | 429–468 | 256–383 |
+| 256 KiB | 573–579 | 487–510 | 530–596 |
+| 512 KiB | 1,049–1,070 | 867–919 | 904–985 |
+| 1 MiB | 2,772–3,568 | 1,664–1,735 | ~2,000–2,096 |
+
+- 標本の octet をコピーせずに共有するようにした（`rustorb_rtps::Octets`）。受け取った DATA・DATA_FRAG はデータグラムの一部を指し、送る DATA_FRAG は変更の一部を指し、writer の history と同じ参加者の reader は同じ標本を共有する。256 KiB 以上は Cyclone DDS と同じか速くなった。
+- 64 KiB と 128 KiB はまだ Cyclone DDS より 3〜5 割長い。プロファイルではカーネル（スレッドの切り替え、ソケットのコピー）が大半で、アプリ側に目立つものはない。直列化のバッファが伸びるたびの realloc（約 2%）は rustorb（typesupport）の側。
+
+reliable のスループット（Mbit/s、5 秒）:
+
+| size | UDP | SHM 前 | SHM 後 | 貸し出し 前 | 貸し出し 後 |
+|---:|---:|---:|---:|---:|---:|
+| 64 KiB | 6,400–7,400 | 8,400 | 11,900–12,900 | 1,400–50,000 | 49,000–56,000 |
+| 256 KiB | 6,400–12,200 | 7,600 | 11,300–11,400 | 1,300–216,000 | 197,000–204,000 |
+| 1 MiB | 11,700–12,400 | 11,800 | 13,300–13,500 | 1,600–1,900 | 805,000 |
+
+- SHM は ring（4 MiB）が満杯のときメッセージを捨て、再送を待っていた。いまは受け手を起こして最大 5 ms 空くのを待ち、受け手は読んだ record からすぐ空ける。SHM はどの大きさでも UDP 以上になった。
+- 貸し出しは、slot が全部ふさがっているとすぐにヒープの標本に切り替え、直列化して送っていた。速い回と遅い回に分かれていたのはこのため（1 MiB の遅さは rustorb#216 の 1 octet ずつの直列化だけが原因ではなかった）。いまは reliable の書き手が ACKNACK を求めて `max_blocking_time` まで slot を待つ。
+
+小さな標本（#111）の reliable の往復は、32 B で rustorb-dds 88〜89 µs、Cyclone DDS 72〜81 µs（この回）。1 往復あたりのシステムコールは、ping 側で sendto・recvfrom 各 1、futex 2 と Cyclone DDS（sendmsg・recvmsg 各 1、futex 3）とほぼ同じで、多いのは受信時の FIONREAD（ioctl）1 回だけ。ユーザ空間の CPU 時間は 1 往復あたり約 19 µs（Cyclone DDS 約 11 µs）で、多くの関数に薄く分かれていて、目立つ箇所はない。
+
 ## 結果の表
 
 `bench/report.py` の出力。列は実装と転送。2 つの実装の組は、レイテンシでは「ping↔pong」、スループットでは「pub→sub」。「lost」はすべての往復が失われたもの、「–」は測っていないもの。

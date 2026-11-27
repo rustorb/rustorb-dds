@@ -2357,6 +2357,36 @@ impl Shared {
     /// `size` octets, made on first use: `None` without shared memory, or
     /// with DDS Security on (whose samples stay out of files that other
     /// processes can map).
+    /// A slot of `pool` for a reliable `writer` whose slots are all
+    /// held: it waits up to `max_blocking_time` for its readers to
+    /// acknowledge and drop samples, as a KEEP_ALL `write` waits for room
+    /// in its history, rather than fall back to the heap at once (#112).
+    #[cfg(feature = "shm")]
+    pub(crate) fn wait_for_slot(
+        &self,
+        writer: &Guid,
+        pool: &Arc<rustorb_rtps::shm::Pool>,
+    ) -> Option<rustorb_rtps::shm::PoolSlot> {
+        let g = self.lock().ok()?;
+        let w = g.writers.get(writer)?;
+        if w.qos.reliability.kind != ReliabilityKind::Reliable {
+            return None;
+        }
+        let deadline = Instant::now() + w.qos.reliability.max_blocking_time;
+        drop(self.request_acknowledgment(g, writer));
+        loop {
+            // Readers in other processes free slots with no word to this
+            // one: look again shortly.
+            std::thread::sleep(Duration::from_micros(20));
+            if let Some(s) = pool.acquire() {
+                return Some(s);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     #[cfg(feature = "shm")]
     pub(crate) fn writer_pool(
         &self,

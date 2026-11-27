@@ -473,7 +473,8 @@ impl<T: PlainType> DataWriter<T> {
     /// the heap, and serialized when written, when the pool cannot be
     /// used: without shared memory (feature `shm` and
     /// [`ParticipantConfig::shared_memory`](crate::ParticipantConfig)),
-    /// with DDS Security, when every slot of the pool is held, or when
+    /// with DDS Security, when every slot of the pool is held (a reliable
+    /// writer first waits up to `max_blocking_time` for one), or when
     /// the layout of `T` is not its serialized form (see [`PlainType`]).
     ///
     /// A slot of the pool is used again once the writer's history no
@@ -486,7 +487,9 @@ impl<T: PlainType> DataWriter<T> {
             && let Some(pool) = self
                 .shared
                 .writer_pool(&self.guid, 4 + std::mem::size_of::<T>())?
-            && let Some(mut slot) = pool.acquire()
+            && let Some(mut slot) = pool
+                .acquire()
+                .or_else(|| self.shared.wait_for_slot(&self.guid, &pool))
         {
             slot.bytes_mut()[..4].copy_from_slice(&header);
             return Ok(WriteLoan {
