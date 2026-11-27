@@ -1825,13 +1825,18 @@ impl Security {
             return Some(Cow::Borrowed(bytes));
         }
         let st = self.state();
-        let mut out = bytes[..RTPS_HEADER].to_vec();
+        // The message is copied only from the first submessage that
+        // changes: one that is all left as it is (no protection asked)
+        // is not copied at all.
+        let mut out: Option<Vec<u8>> = None;
+        let at = |w: &[u8]| w.as_ptr() as usize - bytes.as_ptr() as usize;
         let mut rest = &bytes[RTPS_HEADER..];
         let mut dest = GuidPrefix::UNKNOWN;
-        let mut changed = false;
         let mut bootstrap = true;
         while !rest.is_empty() {
             let Ok((s, r)) = read_submessage(rest) else {
+                // What cannot be read is left out, as before.
+                out.get_or_insert_with(|| bytes[..at(rest)].to_vec());
                 break;
             };
             rest = r;
@@ -1839,7 +1844,9 @@ impl Security {
                 dest = GuidPrefix(s.body[..12].try_into().expect("12"));
             }
             let Some((reader, writer, from_writer)) = endpoints_of(s.id, s.body) else {
-                out.extend_from_slice(s.whole);
+                if let Some(o) = out.as_mut() {
+                    o.extend_from_slice(s.whole);
+                }
                 continue;
             };
             if !is_bootstrap(reader, writer) {
@@ -1847,8 +1854,8 @@ impl Security {
             }
             if is_volatile(reader, writer) {
                 let (enc, _) = st.peers.get(&dest).and_then(|p| p.kx.as_ref())?;
-                out.extend_from_slice(&enc.encode_submessage(s.whole, &[]));
-                changed = true;
+                out.get_or_insert_with(|| bytes[..at(s.whole)].to_vec())
+                    .extend_from_slice(&enc.encode_submessage(s.whole, &[]));
                 continue;
             }
             let local = Guid::new(self.prefix, if from_writer { writer } else { reader });
@@ -1864,25 +1871,25 @@ impl Security {
                         .filter(|(g, _)| dest == GuidPrefix::UNKNOWN || g.prefix == dest)
                         .map(|(_, k)| k)
                         .collect();
-                    out.extend_from_slice(&enc.encode_submessage(s.whole, &receivers));
-                    changed = true;
+                    out.get_or_insert_with(|| bytes[..at(s.whole)].to_vec())
+                        .extend_from_slice(&enc.encode_submessage(s.whole, &receivers));
                 }
-                None => out.extend_from_slice(s.whole),
+                None => {
+                    if let Some(o) = out.as_mut() {
+                        o.extend_from_slice(s.whole);
+                    }
+                }
             }
         }
+        let out: Cow<'a, [u8]> = match out {
+            Some(o) => Cow::Owned(o),
+            None => Cow::Borrowed(bytes),
+        };
         if bootstrap {
-            return Some(if changed {
-                Cow::Owned(out)
-            } else {
-                Cow::Borrowed(bytes)
-            });
+            return Some(out);
         }
         let Some(enc) = &self.participant else {
-            return Some(if changed {
-                Cow::Owned(out)
-            } else {
-                Cow::Borrowed(bytes)
-            });
+            return Some(out);
         };
         let receivers: Vec<&KeyMaterial> = st
             .peers
@@ -1915,11 +1922,15 @@ impl Security {
         };
         let rtps_protected = matches!(plain, Cow::Owned(_));
         let peer = st.peers.get(&src);
-        let mut out = plain[..RTPS_HEADER].to_vec();
-        let mut rest = &plain[RTPS_HEADER..];
-        let mut changed = rtps_protected;
+        // Copied only from the first submessage that changes, as in
+        // `encode`.
+        let mut out: Option<Vec<u8>> = None;
+        let p: &[u8] = &plain;
+        let at = |w: &[u8]| w.as_ptr() as usize - p.as_ptr() as usize;
+        let mut rest = &p[RTPS_HEADER..];
         while !rest.is_empty() {
             let Ok((s, r)) = read_submessage(rest) else {
+                out.get_or_insert_with(|| p[..at(rest)].to_vec());
                 break;
             };
             if s.id == submessage_id::SEC_PREFIX {
@@ -1935,10 +1946,10 @@ impl Security {
                         .flat_map(|(_, ds)| ds.iter())
                         .find(|d| d.matches(&header))
                 });
-                changed = true;
+                let o = out.get_or_insert_with(|| p[..at(s.whole)].to_vec());
                 match dec.and_then(|d| d.decode_submessage(rest).ok()) {
                     Some(d) => {
-                        out.extend_from_slice(&d.plain);
+                        o.extend_from_slice(&d.plain);
                         rest = &rest[d.rest_offset..];
                     }
                     None => {
@@ -1960,7 +1971,9 @@ impl Security {
             }
             rest = r;
             let Some((reader, writer, from_writer)) = endpoints_of(s.id, s.body) else {
-                out.extend_from_slice(s.whole);
+                if let Some(o) = out.as_mut() {
+                    o.extend_from_slice(s.whole);
+                }
                 continue;
             };
             let must = if is_volatile(reader, writer) {
@@ -1981,12 +1994,17 @@ impl Security {
                     .is_some_and(|e| e.submessage.is_some())
             };
             if must && src != self.prefix {
-                changed = true;
+                out.get_or_insert_with(|| p[..at(s.whole)].to_vec());
                 continue;
             }
-            out.extend_from_slice(s.whole);
+            if let Some(o) = out.as_mut() {
+                o.extend_from_slice(s.whole);
+            }
         }
-        Some(if changed { Cow::Owned(out) } else { plain })
+        Some(match out {
+            Some(o) => Cow::Owned(o),
+            None => plain,
+        })
     }
 }
 

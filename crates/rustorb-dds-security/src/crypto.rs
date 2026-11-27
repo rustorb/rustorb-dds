@@ -623,12 +623,13 @@ impl Encoder {
         let u = self.next(payload.len());
         let mut out = Vec::with_capacity(payload.len() + 64);
         u.header.write(&mut out);
-        let mut data = payload.to_vec();
-        let footer = self.seal(&u, &[], &mut data, &[]);
         if self.kind.encrypts() {
-            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         }
-        out.extend_from_slice(&data);
+        // Sealed where it lies in `out`: one copy of the payload.
+        let at = out.len();
+        out.extend_from_slice(payload);
+        let footer = self.seal(&u, &[], &mut out[at..], &[]);
         footer.write(&mut out);
         out
     }
@@ -644,15 +645,17 @@ impl Encoder {
         let mut h = Vec::with_capacity(20);
         u.header.write(&mut h);
         put_submessage(&mut out, SEC_PREFIX, 0, &h);
-        let mut data = submessage.to_vec();
-        let footer = self.seal(&u, &[], &mut data, receivers);
         if self.kind.encrypts() {
-            let mut body = (data.len() as u32).to_be_bytes().to_vec();
-            body.extend_from_slice(&data);
-            put_submessage(&mut out, SEC_BODY, 0, &body);
-        } else {
-            out.extend_from_slice(&data);
+            // SEC_BODY: its header, the CryptoContent's length, then the
+            // submessage, encrypted where it lies.
+            out.push(SEC_BODY);
+            out.push(1);
+            out.extend_from_slice(&((submessage.len() + 4) as u16).to_le_bytes());
+            out.extend_from_slice(&(submessage.len() as u32).to_be_bytes());
         }
+        let at = out.len();
+        out.extend_from_slice(submessage);
+        let footer = self.seal(&u, &[], &mut out[at..], receivers);
         let mut f = Vec::with_capacity(footer.len());
         footer.write(&mut f);
         put_submessage(&mut out, SEC_POSTFIX, 0, &f);
