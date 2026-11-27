@@ -94,6 +94,14 @@ pub struct ParticipantConfig {
     /// on this host through shared memory rather than UDP (feature `shm`;
     /// true by default). Others are reached by UDP either way.
     pub shared_memory: bool,
+    /// Whether SPDP announces a `defaultMulticastLocatorList` (the
+    /// multicast group on the user multicast port), so that remote
+    /// writers may send user data to this participant's readers by
+    /// multicast. False by default, as in Fast DDS: an implementation
+    /// that prefers multicast when it is offered (RustDDS) then sends
+    /// to one reader on this host through multicast loopback, in small
+    /// datagrams, at two to four times the round trip of unicast (#125).
+    pub user_multicast: bool,
     /// The directory of the files in which PERSISTENT writers keep their
     /// samples. `None`, the default, is the `RUSTORB_DDS_PERSISTENCE_DIR`
     /// environment variable when it is set, and otherwise
@@ -144,6 +152,7 @@ impl ParticipantConfig {
             drop_one_in: None,
             user_data: Vec::new(),
             shared_memory: true,
+            user_multicast: false,
             persistence_directory: None,
             #[cfg(feature = "security")]
             security: None,
@@ -2860,7 +2869,9 @@ impl DomainParticipant {
         data.metatraffic_unicast_locators = transport.discovery_unicast_locators();
         data.metatraffic_multicast_locators = transport.discovery_multicast_locators();
         data.default_unicast_locators = transport.user_unicast_locators();
-        data.default_multicast_locators = transport.user_multicast_locators();
+        if config.user_multicast {
+            data.default_multicast_locators = transport.user_multicast_locators();
+        }
         #[cfg(feature = "shm")]
         let shm = if config.shared_memory {
             // Without shared memory (no /dev/shm, say), UDP alone.

@@ -10,6 +10,13 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Changed
 
+- SPDP no longer announces a `defaultMulticastLocatorList` unless
+  `ParticipantConfig::user_multicast` is set (a new field, false by
+  default): remote writers send user data to this participant by
+  unicast. RustDDS sent to rustorb-dds readers by multicast whenever it
+  was offered, in 1.3 KiB datagrams through multicast loopback; the
+  reliable round trip of 64 KiB with RustDDS went from about 1,000–1,300
+  µs to 520 µs, as between two RustDDS participants (#125).
 - A reliable writer sends repairs at most `WriterConfig::max_repair_size`
   octets at a time (64 KiB by default) and the rest
   `WriterConfig::repair_interval` later (1 ms), oldest first; a change

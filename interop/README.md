@@ -236,7 +236,8 @@ Found on the way:
   TypeObjects in the type information only with `-Gxtypes-complete`
   (without, the dynamic cases never got a type). The programs must be
   built with the C++ standard of the OpenDDS libraries (another one made
-  them crash). Its writers send DATA to the user multicast locator, with
+  them crash). Its writers sent DATA to the user multicast locator
+  (rustorb-dds no longer announces one by default, #125), with
   the `octetsToNextHeader` of the last submessage 0, and count in the
   encapsulation options 1 to 3 octets of padding that the payload does
   not have; rustorb-dds dropped those samples (the string at the end came
