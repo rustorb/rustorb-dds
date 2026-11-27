@@ -349,6 +349,12 @@ class OpenDds(Peer):
             libs = [l for l in (out / "libs.txt").read_text().split() if not SYSTEM_LIBS.search(l)]
             copy = 'for l in "$@"; do cp -L "$l" "$0/"; done'
             subprocess.run(run + ["sh", "-c", copy, str(out / "lib")] + libs, check=True)
+            # OpenDDS loads its transport (rtps_udp) by the library's plain
+            # name, libOpenDDS_Rtps_Udp.so, as ACE_DLL does.
+            for f in (out / "lib").glob("*.so.*"):
+                plain = f.with_name(f.name.split(".so.")[0] + ".so")
+                if not plain.exists():
+                    plain.symlink_to(f.name)
 
     def program(self):
         return BUILD / "opendds" / "perf"
