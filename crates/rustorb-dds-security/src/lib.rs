@@ -14,6 +14,7 @@ pub mod access;
 pub mod auth;
 pub mod cdr;
 pub mod crypto;
+mod gcm;
 pub mod message;
 pub mod ocsp;
 pub mod pki;

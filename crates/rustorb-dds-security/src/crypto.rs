@@ -6,8 +6,7 @@
 //! message as it goes on the wire. Which key material to use for which
 //! remote endpoint is the caller's business.
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce, Tag};
+use crate::gcm::Gcm;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -326,43 +325,28 @@ fn session_key(
     k
 }
 
+/// An AES-GCM session key (AES-128 or AES-256).
 #[derive(Clone)]
-enum Cipher {
-    A128(Box<Aes128Gcm>),
-    A256(Box<Aes256Gcm>),
-}
+struct Cipher(Box<Gcm>);
 
 impl Cipher {
     fn new(key: &[u8]) -> Cipher {
-        if key.len() == 16 {
-            Cipher::A128(Box::new(Aes128Gcm::new_from_slice(key).expect("16 octets")))
-        } else {
-            Cipher::A256(Box::new(Aes256Gcm::new_from_slice(key).expect("32 octets")))
-        }
+        Cipher(Box::new(Gcm::new(key)))
     }
 
     fn seal(&self, iv: &[u8; 12], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-        let n = &Nonce::from(*iv);
-        let t = match self {
-            Cipher::A128(c) => c.encrypt_in_place_detached(n, aad, buf),
-            Cipher::A256(c) => c.encrypt_in_place_detached(n, aad, buf),
-        };
-        t.expect("lengths within limits").into()
+        self.0.seal(iv, aad, buf)
     }
 
     fn open(&self, iv: &[u8; 12], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> Result<(), Error> {
-        let n = &Nonce::from(*iv);
-        let t = &Tag::from(*tag);
-        match self {
-            Cipher::A128(c) => c.decrypt_in_place_detached(n, aad, buf, t),
-            Cipher::A256(c) => c.decrypt_in_place_detached(n, aad, buf, t),
-        }
-        .map_err(|_| Error::new("the authentication tag does not verify"))
+        self.0
+            .open(iv, aad, buf, tag)
+            .map_err(|_| Error::new("the authentication tag does not verify"))
     }
 
     /// AES-GMAC: GCM with nothing to encrypt and `data` authenticated.
     fn mac(&self, iv: &[u8; 12], data: &[u8]) -> [u8; 16] {
-        self.seal(iv, data, &mut [])
+        self.0.mac(iv, data)
     }
 }
 
@@ -623,12 +607,13 @@ impl Encoder {
         let u = self.next(payload.len());
         let mut out = Vec::with_capacity(payload.len() + 64);
         u.header.write(&mut out);
-        let mut data = payload.to_vec();
-        let footer = self.seal(&u, &[], &mut data, &[]);
         if self.kind.encrypts() {
-            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         }
-        out.extend_from_slice(&data);
+        // Sealed where it lies in `out`: one copy of the payload.
+        let at = out.len();
+        out.extend_from_slice(payload);
+        let footer = self.seal(&u, &[], &mut out[at..], &[]);
         footer.write(&mut out);
         out
     }
@@ -644,15 +629,17 @@ impl Encoder {
         let mut h = Vec::with_capacity(20);
         u.header.write(&mut h);
         put_submessage(&mut out, SEC_PREFIX, 0, &h);
-        let mut data = submessage.to_vec();
-        let footer = self.seal(&u, &[], &mut data, receivers);
         if self.kind.encrypts() {
-            let mut body = (data.len() as u32).to_be_bytes().to_vec();
-            body.extend_from_slice(&data);
-            put_submessage(&mut out, SEC_BODY, 0, &body);
-        } else {
-            out.extend_from_slice(&data);
+            // SEC_BODY: its header, the CryptoContent's length, then the
+            // submessage, encrypted where it lies.
+            out.push(SEC_BODY);
+            out.push(1);
+            out.extend_from_slice(&((submessage.len() + 4) as u16).to_le_bytes());
+            out.extend_from_slice(&(submessage.len() as u32).to_be_bytes());
         }
+        let at = out.len();
+        out.extend_from_slice(submessage);
+        let footer = self.seal(&u, &[], &mut out[at..], receivers);
         let mut f = Vec::with_capacity(footer.len());
         footer.write(&mut f);
         put_submessage(&mut out, SEC_POSTFIX, 0, &f);

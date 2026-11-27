@@ -158,6 +158,15 @@ bench/discovery.py --peers rustorb,cyclonedds,fastdds --mixed '' \
 - 小さな標本（32 B）の往復は、署名・暗号化で rustorb-dds が 77 → 95〜101 µs、Cyclone DDS が 71 → 108〜111 µs、Fast DDS が 95 → 336〜347 µs。
 - 64 KiB では rustorb-dds の署名・暗号化が 645〜763 µs で、Cyclone DDS（417〜441 µs）の約 1.6 倍。スループットも 64 KiB で rustorb 2.4〜2.7 Gbit/s、Cyclone 3.7〜4.0 Gbit/s。→ #119
 - 認証だけ（保護なし）でも、rustorb-dds は 4 KiB 以上で少し遅くなる（64 KiB のスループット 9.2 → 8.2 Gbit/s）。Cyclone DDS と Fast DDS は Security なしと変わらない。→ #119
+- #119 で直した（[bench/results/2026-11-27-container-security](../bench/results/2026-11-27-container-security)、同じコンテナ）。遅さの大半は GHASH（GCM と GMAC の認証計算）で、RustCrypto の polyval 0.6 は 1 ブロックずつ掛けて約 1.5 GB/s。data と metadata を両方保護すると、64 KiB の 1 往復で GHASH が 8 回走る。security crate に AES-GCM/GMAC を持ち、GHASH は PCLMULQDQ で 8 ブロックの積をまとめて 1 回だけ簡約するようにした（PCLMULQDQ がなければ RustCrypto の ghash。AES と CTR は RustCrypto）。64 KiB の GMAC が 43 → 7 µs、GCM が 53 → 25 µs。あわせて、保護しないサブメッセージしかないメッセージは写さないようにした。直したあと（往復の中央値、µs）:
+
+| size | rustorb sign | rustorb encrypt | Cyclone sign | Cyclone encrypt | Fast DDS sign | Fast DDS encrypt |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 B | 90 | 92 | 100 | 92 | 210 | 201 |
+| 4 KiB | 100 | 112 | 106 | 103 | 207 | 208 |
+| 64 KiB | 360（前 645〜698） | 551（前 763〜840） | 452 | 450 | 490 | 542 |
+
+  64 KiB のスループットは署名 6.5 Gbit/s、暗号化 4.5 Gbit/s（Cyclone 4.7 と 4.5）。暗号化の往復がまだ Cyclone より長いのは、AES の CTR（RustCrypto の aes と ctr、64 KiB に約 18 µs）が残るため。認証だけのときの往復は Security なしと同じになった（64 KiB 192 µs）が、64 KiB のスループットはまだ 10.4 → 9.1 Gbit/s。
 - discovery（handshake を含めて、すべてマッチするまで）: 測り始めたとき、rustorb-dds は 10 者で約 0.5 s かかっていた。相手の SPDP より先に届いた handshake の要求を捨てていて、送り手が 500 ms 後に送り直すまで待っていたため。いまは、その要求を相手を見つけるまで取っておいて、見つけたらすぐ答える（参加者 256 まで、相手ごとに最後の 1 つ）。直したあとは 10 者で 84〜95 ms、20 者で 283〜384 ms。Cyclone DDS は 2 者でも約 330 ms、10 者 530〜710 ms、20 者 1.5 s。Fast DDS は 10 者で約 1.1 s、20 者の署名・暗号化では 3 回とも 20 s のうちにすべてはマッチしなかった。
 - handshake の通信量は rustorb-dds と Cyclone DDS が同じくらい（20 者の暗号化で 5.6 MiB と 6.4 MiB）、Fast DDS は約 110 MiB（すべてはマッチしないまま送り直し続けた）。
 - 1 プロセスの最大 RSS は、Security で rustorb-dds が 6 → 8 MiB、Cyclone DDS が 8 → 13 MiB、Fast DDS が 16 → 22〜29 MiB。
