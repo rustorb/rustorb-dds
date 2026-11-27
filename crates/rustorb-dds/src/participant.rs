@@ -3400,11 +3400,25 @@ impl Drop for DomainParticipant {
         for w in g.writers.values_mut() {
             w.store = None;
         }
+        // The reliable readers acknowledge what came, without waiting for
+        // the writers' next HEARTBEAT: a writer that waits for
+        // acknowledgments (OpenDDS's, say) is not left waiting for this
+        // participant's readers until it notices they are gone.
+        let now = Instant::now();
+        let mut acks = Vec::new();
+        for r in g.readers.values_mut() {
+            if let Some(rtps) = r.rtps.as_mut() {
+                acks.extend(rtps.acknowledge_now(now));
+            }
+        }
         // Tell the others at once, rather than letting the lease run out
         // (8.5.3.1).
         let (bytes, to) = g.spdp.dispose();
         let to = to.to_vec();
         drop(g);
+        for o in acks {
+            let _ = self.shared.send(&o.bytes, &o.locators);
+        }
         let _ = self.shared.send(&bytes, &to);
         self.shared.data_arrived.notify_all();
         self.shared.acknowledged.notify_all();
