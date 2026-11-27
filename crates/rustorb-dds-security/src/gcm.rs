@@ -259,8 +259,8 @@ mod clmul {
                     reduce(a, b, c)
                 };
                 for part in parts {
-                    let mut chunks = part.chunks_exact(128);
-                    for c in &mut chunks {
+                    let (chunks, rest) = part.as_chunks::<128>();
+                    for c in chunks {
                         let p = c.as_ptr();
                         let x0 = _mm_xor_si128(y, load(p));
                         let (mut a, mut b, mut m) = product(x0, hs[7], ks[7]);
@@ -272,12 +272,10 @@ mod clmul {
                         }
                         y = reduce(a, b, m);
                     }
-                    let rest = chunks.remainder();
-                    let mut blocks = rest.chunks_exact(16);
-                    for c in &mut blocks {
+                    let (blocks, tail) = rest.as_chunks::<16>();
+                    for c in blocks {
                         y = one(y, load(c.as_ptr()));
                     }
-                    let tail = blocks.remainder();
                     if !tail.is_empty() {
                         let mut b = [0u8; 16];
                         b[..tail.len()].copy_from_slice(tail);
