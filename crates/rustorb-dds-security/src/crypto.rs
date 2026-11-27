@@ -6,8 +6,7 @@
 //! message as it goes on the wire. Which key material to use for which
 //! remote endpoint is the caller's business.
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce, Tag};
+use crate::gcm::Gcm;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -326,43 +325,28 @@ fn session_key(
     k
 }
 
+/// An AES-GCM session key (AES-128 or AES-256).
 #[derive(Clone)]
-enum Cipher {
-    A128(Box<Aes128Gcm>),
-    A256(Box<Aes256Gcm>),
-}
+struct Cipher(Box<Gcm>);
 
 impl Cipher {
     fn new(key: &[u8]) -> Cipher {
-        if key.len() == 16 {
-            Cipher::A128(Box::new(Aes128Gcm::new_from_slice(key).expect("16 octets")))
-        } else {
-            Cipher::A256(Box::new(Aes256Gcm::new_from_slice(key).expect("32 octets")))
-        }
+        Cipher(Box::new(Gcm::new(key)))
     }
 
     fn seal(&self, iv: &[u8; 12], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-        let n = &Nonce::from(*iv);
-        let t = match self {
-            Cipher::A128(c) => c.encrypt_in_place_detached(n, aad, buf),
-            Cipher::A256(c) => c.encrypt_in_place_detached(n, aad, buf),
-        };
-        t.expect("lengths within limits").into()
+        self.0.seal(iv, aad, buf)
     }
 
     fn open(&self, iv: &[u8; 12], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> Result<(), Error> {
-        let n = &Nonce::from(*iv);
-        let t = &Tag::from(*tag);
-        match self {
-            Cipher::A128(c) => c.decrypt_in_place_detached(n, aad, buf, t),
-            Cipher::A256(c) => c.decrypt_in_place_detached(n, aad, buf, t),
-        }
-        .map_err(|_| Error::new("the authentication tag does not verify"))
+        self.0
+            .open(iv, aad, buf, tag)
+            .map_err(|_| Error::new("the authentication tag does not verify"))
     }
 
     /// AES-GMAC: GCM with nothing to encrypt and `data` authenticated.
     fn mac(&self, iv: &[u8; 12], data: &[u8]) -> [u8; 16] {
-        self.seal(iv, data, &mut [])
+        self.0.mac(iv, data)
     }
 }
 

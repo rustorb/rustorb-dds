@@ -12,8 +12,10 @@ categories.workspace = true
 readme.workspace = true
 
 [dependencies]
-# RustCrypto (MIT OR Apache-2.0), chosen on 2026-11-10 (#59).
-aes-gcm = "0.10"
+# RustCrypto (MIT OR Apache-2.0), chosen on 2026-11-10 (#59). AES-GCM is
+# src/gcm.rs, on RustCrypto's aes and ghash (#119).
+ghash = "0.5"
+ctr = "0.9"
 hmac = "0.12"
 sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pem"] }
@@ -36,6 +38,10 @@ x509-ocsp = "0.2"
 sha1 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 roxmltree = "0.20"
+
+[dev-dependencies]
+# The reference src/gcm.rs is tested against.
+aes-gcm = "0.10"
 
 [lints]
 workspace = true
