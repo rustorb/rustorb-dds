@@ -283,14 +283,19 @@ jobs:
       - run: >
           python3 bench/run.py --peers rustorb,opendds --transports udp --interop
           --sizes 32,1024,16384,65536,1048576 --warmup 0.5 --duration 3 --repeat 1
-          --out target/bench/opendds
-      - run: python3 bench/report.py target/bench/opendds
+          --out target/bench/results-opendds
+      - run: python3 bench/report.py target/bench/results-opendds
+      - name: Show the first OpenDDS runs of the log
+        if: failure()
+        run: |
+          ldd target/bench/opendds/perf || true
+          grep -n -A12 'opendds/perf' target/bench/results-opendds/log.txt | head -80 || true
       - name: Keep the results and the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bench-opendds
-          path: target/bench/opendds
+          path: target/bench/results-opendds
           if-no-files-found: ignore
 
   # The same cases with OpenDDS (RTPS discovery and the RTPS_UDP
