@@ -10,6 +10,15 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Changed
 
+- A reliable writer sends repairs at most `WriterConfig::max_repair_size`
+  octets at a time (64 KiB by default) and the rest
+  `WriterConfig::repair_interval` later (1 ms), oldest first; a change
+  both in an ACKNACK and in a NACK_FRAG is sent again only in the
+  fragments the NACK_FRAG asks for. A RustDDS reader, whose socket
+  buffer is smaller than a burst of repairs of large samples, lost the
+  same part of every burst and stopped receiving: reliable 256 KiB
+  samples from rustorb-dds to RustDDS went from 0–4,700 to about 26,000
+  in 5 s, and 1 MiB to Cyclone DDS from about 3,000 to 5,000 (#125).
 - The datagrams received and not yet handled are at most
   `rustorb_rtps::udp::INCOMING_CAPACITY` (1024): when the participant's
   thread falls behind, the receive threads wait and the kernel drops what

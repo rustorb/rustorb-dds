@@ -245,7 +245,20 @@ pub struct WriterConfig {
     /// change sent a HEARTBEAT asks the readers that have not
     /// acknowledged it to answer.
     pub acknowledgment_delay: Duration,
+    /// The most payload, in octets, sent again at once (at least one
+    /// change or run of fragments); the rest of what the readers asked
+    /// for follows `repair_interval` later, and so on. A reader whose
+    /// socket buffer is smaller than a burst of repairs otherwise loses
+    /// the same part of each burst and never catches up.
+    pub max_repair_size: usize,
+    /// How long after `max_repair_size` octets of repairs to send more.
+    pub repair_interval: Duration,
 }
+
+/// The default [`WriterConfig::max_repair_size`]: well below the
+/// smallest default UDP receive buffer seen in a DDS implementation
+/// (Linux's 208 KiB, which RustDDS keeps).
+pub const DEFAULT_MAX_REPAIR_SIZE: usize = 64 * 1024;
 
 impl Default for WriterConfig {
     fn default() -> Self {
@@ -256,6 +269,8 @@ impl Default for WriterConfig {
             fragmentation: Fragmentation::default(),
             acknowledgment_batch: 1,
             acknowledgment_delay: Duration::ZERO,
+            max_repair_size: DEFAULT_MAX_REPAIR_SIZE,
+            repair_interval: Duration::from_millis(1),
         }
     }
 }
@@ -673,21 +688,55 @@ impl ReliableWriter {
                 likely_missed = true;
                 p.repair_at = None;
                 let mut missing = Vec::new();
+                // A change both in an ACKNACK and in a NACK_FRAG: the
+                // reader has the other fragments, so only those it asks
+                // for are sent. Sending all of them again gives it
+                // duplicates of fragments it may already have put
+                // together.
+                let mut fragments_asked = std::mem::take(&mut p.requested_fragments);
                 let requested = std::mem::take(&mut p.requested);
-                for sn in &requested {
-                    let for_it = self.directed.get(sn).is_none_or(|r| *r == g);
-                    match self.history.get(sn).filter(|_| *sn >= p.start && for_it) {
-                        Some(c) => b.push_change(g.entity_id, c, &frag, None),
-                        None => missing.push(*sn),
-                    }
-                }
-                for (sn, fragments) in std::mem::take(&mut p.requested_fragments) {
-                    if requested.contains(&sn) {
-                        continue;
-                    }
+                let mut asked: Vec<(SequenceNumber, Option<BTreeSet<u32>>)> = requested
+                    .iter()
+                    .filter(|sn| !fragments_asked.contains_key(sn))
+                    .map(|sn| (*sn, None))
+                    .collect();
+                asked.extend(
+                    std::mem::take(&mut fragments_asked)
+                        .into_iter()
+                        .map(|(sn, f)| (sn, Some(f))),
+                );
+                asked.sort_by_key(|(sn, _)| *sn);
+                // At most `max_repair_size` octets of payload, the oldest
+                // first, and the rest `repair_interval` later: the reader
+                // lost what it asks for, likely to a full socket buffer,
+                // and the same burst again would be lost the same way.
+                let mut budget = self.config.max_repair_size.max(1);
+                for (sn, fragments) in asked {
                     let for_it = self.directed.get(&sn).is_none_or(|r| *r == g);
                     match self.history.get(&sn).filter(|_| sn >= p.start && for_it) {
-                        Some(c) => b.push_change(g.entity_id, c, &frag, Some(&fragments)),
+                        // Left for the next round, `repair_interval` on.
+                        Some(_) if budget == 0 => {
+                            match fragments {
+                                Some(f) => {
+                                    p.requested_fragments.insert(sn, f);
+                                }
+                                None => {
+                                    p.requested.insert(sn);
+                                }
+                            }
+                            p.repair_at = Some(now + self.config.repair_interval);
+                        }
+                        Some(c) => {
+                            let size = c.payload.as_ref().map_or(0, |p| p.bytes.len());
+                            let cost = match &fragments {
+                                Some(f) if frag.needed(c) => {
+                                    (f.len() * frag.fragment_size.max(1) as usize).min(size)
+                                }
+                                _ => size,
+                            };
+                            b.push_change(g.entity_id, c, &frag, fragments.as_ref());
+                            budget = budget.saturating_sub(cost.max(1));
+                        }
                         None => missing.push(sn),
                     }
                 }
@@ -2050,6 +2099,49 @@ mod tests {
         acknacks(&mut w, &acks, t);
         let got = deliver(&mut r, &w.poll(t), &[], t);
         assert_eq!(got[0].payload, big(1, 2000));
+    }
+
+    #[test]
+    fn repairs_go_out_a_little_at_a_time() {
+        let t = Instant::now();
+        let config = WriterConfig {
+            max_repair_size: 3000,
+            repair_interval: Duration::from_millis(1),
+            ..frag_config()
+        };
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, config);
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        for i in 1..=3 {
+            w.add_change(None, big(i, 2000));
+        }
+        // All 9 DATA_FRAGs (3 for each change) are lost.
+        let out = w.poll(t);
+        assert!(deliver(&mut r, &out, &(0..9).collect::<Vec<_>>(), t).is_empty());
+        acknacks(&mut w, &r.poll(t), t);
+        let resent = |out: &[Outgoing]| -> Vec<i64> {
+            let mut sns: Vec<i64> = subs(out)
+                .iter()
+                .filter_map(|s| match s {
+                    Submessage::DataFrag(d) => Some(d.writer_sn.0),
+                    _ => None,
+                })
+                .collect();
+            sns.dedup();
+            sns
+        };
+        // 2004 octets of change 1 leave 996 of the 3000: change 2 too.
+        let out = w.poll(t);
+        assert_eq!(resent(&out), [1, 2]);
+        let got = deliver(&mut r, &out, &[], t);
+        assert_eq!(got.len(), 2);
+        // Change 3 waits for repair_interval.
+        assert!(resent(&w.poll(t + Duration::from_micros(500))).is_empty());
+        let out = w.poll(t + Duration::from_millis(1));
+        assert_eq!(resent(&out), [3]);
+        let got = deliver(&mut r, &out, &[], t);
+        assert_eq!(got[0].payload, big(3, 2000));
     }
 
     #[test]

@@ -125,7 +125,10 @@ def main():
             n = struct.unpack("<H" if le else ">H", u[at + 2:at + 4])[0]
             body = u[at + 4:at + 4 + n] if n else u[at + 4:]
             if trace and sid in (0x06, 0x07, 0x08, 0x12, 0x13, 0x15, 0x16) and len(body) >= 8:
-                show_trace(dom, sport, dport, vendor, prefix, sid, flags, body)
+                try:
+                    show_trace(dom, sport, dport, vendor, prefix, sid, flags, body)
+                except struct.error:  # cut short by the capture's snaplen
+                    pass
             elif sid == 0x15 and len(body) >= 12:
                 writer = body[8:12]
                 key = (dom, prefix, writer.hex())
