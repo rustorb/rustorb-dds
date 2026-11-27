@@ -324,6 +324,30 @@ bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/resu
 - best-effort のスループットは 64 KiB で rustorb 13.6 Gbit/s、Cyclone DDS 12.7 Gbit/s、RustDDS 3.8 Gbit/s。rustorb → RustDDS は 64 KiB 以上で 11〜14.6 Gbit/s 届くが、RustDDS の sub が受け取ったものをため続け、16 KiB 以上の 7 回が 3 GiB を超えて止められた（「Killed for memory」）。RustDDS → rustorb は 0.7〜1.1 Gbit/s。
 - 1 プロセスの最大 RSS は、RustDDS が best-effort の往復で 84 MiB、reliable の往復で 1.2 GiB、reliable の sub で 1.1 GiB。rustorb-dds と Cyclone DDS は 12〜15 MiB。往復の測定（16 の大きさで約 97 秒）の CPU 時間は、rustorb-dds が 48〜52 秒、Cyclone DDS が 48 秒、RustDDS が 59〜76 秒。
 
+### RustDDS、#125 のあと（コンテナ）
+
+上の 2 つの「→ 調べる」の原因と、直したあとの数値（[bench/results/2026-11-27-container-rustdds-2](../bench/results/2026-11-27-container-rustdds-2/report.md)、rustorb-dds a5a563b、同じ条件。Cyclone DDS は測っていない）。
+
+- 2 KiB を超えると遅かったのは、RustDDS が rustorb-dds の reader に、SPDP の `defaultMulticastLocatorList` があればいつもそこへ、1.3 KiB の datagram で multicast loopback を通して送っていたため。いまの rustorb-dds は既定でこれを広告しない（`ParticipantConfig::user_multicast`、Fast DDS と同じ）。
+- 止まっていたのは 2 つの原因から。
+  - 測定プログラムの RustDDS の sub は、標本を 1 つずつ（`take_next_sample`）取っていた。RustDDS 0.15 の take は持っている標本をすべてなめるので、たまると 1 秒に 256 標本しか取れなくなっていた（1,024 標本で止まって見えたもの）。いまは 256 標本を 1 回で取る。
+  - rustorb-dds の writer が、取りこぼされた大きな標本を窓ごとまとめて送り直していた。RustDDS の受信バッファ（Linux の既定の 208 KiB）からいつも同じように溢れ、追いつかなかった。いまは 64 KiB ずつ、古いものから 1 ms おきに送り直す（`WriterConfig::max_repair_size`、`repair_interval`）。NACK_FRAG でも頼まれた標本は、頼まれた断片だけを送る。
+
+| size | rustorb | RustDDS | rustorb ping ↔ RustDDS pong | RustDDS ping ↔ rustorb pong |
+|---:|---:|---:|---:|---:|
+| 32 B | 88 | 100 | 97 | 101 |
+| 16 KiB | 106 | 210 | 172 | 180 |
+| 64 KiB | 200 | 586 | 408 | 471 |
+| 1 MiB | 2,093 | 5,829 | 5,006 | 4,650 |
+
+（reliable の往復の中央値、µs。この回は前の回よりマシン全体が 1〜2 割遅い）
+
+- 往復は、どちら向きでも RustDDS どうしと同じか短くなった（前は 64 KiB で 2〜2.5 倍）。
+- rustorb → RustDDS の reliable のスループットは、64 KiB で 7.9 Gbit/s（前 9.2）、256 KiB で 9.5 Gbit/s（前 1.0）、1 MiB で 0.27 Gbit/s（前 0.002）。止まる回はなくなったが、1 MiB はまだ遅い（RustDDS が持つ組み立て途中の標本は 128 まで）。
+- RustDDS → rustorb の reliable は 64 KiB 以上で遅くなった（64 KiB で 0.5 Gbit/s → ほぼ 0、256 KiB で 0.37 → 0.05）。unicast で届くようになると、rustorb-dds の受信ソケットで溢れた分を RustDDS の writer が送り直すが、RustDDS 0.15 は送り直しを 10 ms ごとに 8 KiB までしか送らない（`REPAIR_INTERVAL_DEFAULT`、`REPAIR_BATCH_MAX_BYTES`）。RustDDS どうしでも 1 MiB は 5 Mbit/s。multicast のときは RustDDS が窓を待たずに送り続けていたので進んでいた。
+- best-effort の RustDDS の sub は、相変わらず速い pub からの標本をため続ける（16 KiB 以上で 3 GiB を超えて止められた）。
+- OpenDDS の writer も rustorb-dds の multicast の受け口へ送っていた。CI の `bench-opendds`（同じ runner、a5a563b のあとの 248b286）では、OpenDDS → rustorb の best-effort のスループットが 64 KiB で 5.4 → 9.1 Gbit/s、1 MiB で 8.1 → 15.6 Gbit/s になった。rustorb → OpenDDS の reliable の 1 MiB は 1.4 → 2.3 Gbit/s。reliable の往復（0.7〜2.5 ms、#124）は変わらない。
+
 ## 結果の表
 
 `bench/report.py` の出力。列は実装と転送。2 つの実装の組は、レイテンシでは「ping↔pong」、スループットでは「pub→sub」。「lost」はすべての往復が失われたもの、「–」は測っていないもの。

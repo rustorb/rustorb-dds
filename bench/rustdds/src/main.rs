@@ -27,8 +27,8 @@ use rustdds::no_key::{DataReader, DataWriter};
 use rustdds::policy::{History, Reliability, ResourceLimits};
 use rustdds::serialization::{CDRDeserializerAdapter, CDRSerializerAdapter};
 use rustdds::{
-    DataReaderStatus, DataWriterStatus, DomainParticipant, QosPolicyBuilder, StatusEvented,
-    TopicKind,
+    DataReaderStatus, DataWriterStatus, DomainParticipant, QosPolicyBuilder, ReadCondition,
+    StatusEvented, TopicKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -407,16 +407,15 @@ impl Perf {
         }
     }
 
-    /// Takes up to MAX_TAKE samples.
+    /// Takes up to MAX_TAKE samples, in one call: each take of RustDDS
+    /// 0.15 goes over all the samples the reader holds, so taking them
+    /// one at a time (take_next_sample) slows down as they pile up.
     fn take(&mut self, out: &mut Vec<Sample>) {
         out.clear();
         let r = self.reader.as_mut().expect("a reader");
-        while out.len() < MAX_TAKE {
-            match r.take_next_sample() {
-                Ok(Some(s)) => out.push(s.into_value()),
-                Ok(None) => break,
-                Err(e) => die("take", e),
-            }
+        match r.take(MAX_TAKE, ReadCondition::not_read()) {
+            Ok(v) => out.extend(v.into_iter().map(|s| s.into_value())),
+            Err(e) => die("take", e),
         }
     }
 
@@ -634,6 +633,7 @@ fn subscribe(o: &Options, p: &mut Perf) {
     let (mut samples, mut octets, mut in_second) = (0u64, 0u64, 0u64);
     let (mut first, mut last) = (None::<u64>, 0u64);
     let (mut min_s, mut max_s, mut seconds) = (u64::MAX, 0u64, 0u32);
+    let mut drained;
     loop {
         let t = Instant::now();
         if t >= end {
@@ -660,9 +660,15 @@ fn subscribe(o: &Options, p: &mut Perf) {
             }
             // Back to the outer loop for the end and the next second, also
             // while samples keep coming faster than they are taken.
-            if got.len() < MAX_TAKE || Instant::now() >= second_end.min(end) {
+            drained = got.len() < MAX_TAKE;
+            if drained || Instant::now() >= second_end.min(end) {
                 break;
             }
+        }
+        // Wait only once the reader is empty: the readiness event of
+        // what is still in it has already been consumed.
+        if !drained {
+            continue;
         }
         p.wait_data(
             end.saturating_duration_since(Instant::now())
