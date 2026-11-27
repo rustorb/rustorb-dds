@@ -265,6 +265,49 @@ bench/bindings.py --bindings rust,cpp,python --sizes 32,4096
 - 小さな標本では、上乗せは C++・Java・.NET で 10〜15 µs、Python と Ruby で 20〜35 µs。
 - Ruby は 64 KiB でまだ約 1 ms 上乗せがある。Ruby の型対応では octet の列が Integer の Array なので、受け取るたびに 65,536 要素の Array を作るため（送る側は String を渡せる）。
 
+## OpenDDS と RustDDS（#108）
+
+同じ手順のプログラムを OpenDDS 3.31 と RustDDS 0.15.1 にも作った。
+
+- OpenDDS: [bench/opendds/perf.cpp](../bench/opendds/perf.cpp)（DCPS の公開 API、RTPS discovery と RTPS_UDP、[rtps.ini](../bench/opendds/rtps.ini)）。OpenDDS の Docker イメージ（ghcr.io/opendds/opendds:DDS-3.31）の中でビルドし、リンクするライブラリをイメージから写して、イメージの外で動かす（CPU の固定、CPU 時間、RSS がほかの実装と同じように測れるように）。コンテナからはイメージを取れないので、CI のジョブ `bench-opendds` で、同じ runner の rustorb-dds と並べて測る。
+- RustDDS: [bench/rustdds](../bench/rustdds)（ワークスペースの外の別 crate、publish しない。RustDDS に依存するのはこのプログラムだけ）。payload は `serde_bytes::ByteBuf`（RustDDS の CDR がまとめて読み書きする）、reader は mio で待つ。RustDDS 0.15 では keyless な writer と reader の matched status が取れないので、status イベントから数える。
+
+```sh
+bench/run.py --peers rustorb,rustdds,cyclonedds --transports udp --interop --out bench/results/<名前>
+docker pull ghcr.io/opendds/opendds:DDS-3.31   # OpenDDS（CI の bench-opendds と同じ）
+bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/results/<名前>
+```
+
+測っている途中で見つかったこと:
+
+- rustorb-dds は、相手の reader（と writer）が広告する unicast locator のすべてに同じメッセージを送っていた。RustDDS は自分のアドレスに加えて 127.0.0.1 も広告するので、どのメッセージも 2 回届いていた。そのうえ RustDDS は、届け終わった標本の DATA_FRAG がもう一度来ると組み立て用のバッファを新しく作り、128 個たまると待っている標本のほうを捨てるので、64 KiB の標本が 128 個目で止まった。いまの rustorb-dds は、相手が同じホストにいれば（そのアドレスの 1 つが自分のもの）1 つだけ（loopback があればそれ）に送り、ほかのホストの loopback には送らない（`rustorb_rtps::udp::select_unicast`）。
+- RustDDS 0.15 の reader は、RESOURCE_LIMITS をつけると標本を 1 つも渡さない。ほかの実装の best-effort の sub は KEEP_ALL で 1000 標本までだが、RustDDS だけ KEEP_LAST(1000) にした（溢れたときに捨てるのが新しい標本ではなく古い標本になる）。
+- RustDDS の best-effort の sub は、速い pub に追いつかないあいだ、受け取ったものをため続ける（rustorb-dds の pub から 64 KiB で 5 秒に約 3 GiB）。CI の runner がこれで落ちたので、`bench/run.py` は RSS が `--max-rss-mib`（既定 3 GiB）を超えた側を止め、その回を「Killed for memory」として数値なしで記録する。
+- OpenDDS の reliable の writer は、未確認応答 100 標本の窓が埋まると、既定の heartbeat 周期（1 秒）ごとにしか進まない。reliable のスループットが大きさによらず約 100 標本/秒（1 MiB で 814 Mbit/s、32 B で 0.03 Mbit/s）なのはこのためで、OpenDDS の設定を変えれば変わる（ここでは既定のまま測った）。
+
+### OpenDDS（CI）
+
+数値は [bench/results/2026-11-27-ci-opendds](../bench/results/2026-11-27-ci-opendds/report.md)（GitHub の ubuntu-24.04 runner、4 CPU、rustorb-dds f01bc33。0.5 秒の warm-up のあと 3 秒、各 1 回）。コンテナの数値とは並べないこと。
+
+| size | rustorb | OpenDDS | rustorb ping ↔ OpenDDS pong | OpenDDS ping ↔ rustorb pong |
+|---:|---:|---:|---:|---:|
+| 32 B | 67 | 297 | 728 | 695 |
+| 16 KiB | 85 | 337 | 2,431 | 2,520 |
+| 64 KiB | 155 | 598 | 1,743 | 1,776 |
+| 1 MiB | 1,371 | 3,172 | 5,029 | 5,124 |
+
+（reliable の往復の中央値、µs）
+
+- OpenDDS どうしの往復は rustorb-dds どうしの約 4 倍（32 B で 297 µs と 67 µs）。best-effort でも 267 µs と 47 µs。
+- rustorb-dds と OpenDDS の組の reliable の往復は、どちら向きでも 0.7〜2.5 ms で、OpenDDS どうしより長い。best-effort の組は 140 µs（OpenDDS どうしより短い）なので、reliable の HEARTBEAT・ACKNACK のやりとりの待ちと思われる。→ 調べる
+- OpenDDS の 1 MiB は、best-effort で往復がすべて失われ、reliable の 99 パーセンタイルが 824 ms。
+- スループット（best-effort）は 64 KiB で rustorb 14.3 Gbit/s、OpenDDS 5.0 Gbit/s、OpenDDS → rustorb 5.4 Gbit/s。rustorb → OpenDDS は 4.2 Gbit/s で取りこぼしが多い（OpenDDS の受け手が追いつかない）。
+- 1 プロセスの最大 RSS は、OpenDDS が 37〜43 MiB（reliable の往復では 218 MiB）、rustorb-dds が 5〜12 MiB（best-effort の受け手は 34 MiB）。
+
+### RustDDS（コンテナ）
+
+（測定中）
+
 ## 結果の表
 
 `bench/report.py` の出力。列は実装と転送。2 つの実装の組は、レイテンシでは「ping↔pong」、スループットでは「pub→sub」。「lost」はすべての往復が失われたもの、「–」は測っていないもの。
