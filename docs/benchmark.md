@@ -299,14 +299,30 @@ bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/resu
 （reliable の往復の中央値、µs）
 
 - OpenDDS どうしの往復は rustorb-dds どうしの約 4 倍（32 B で 297 µs と 67 µs）。best-effort でも 267 µs と 47 µs。
-- rustorb-dds と OpenDDS の組の reliable の往復は、どちら向きでも 0.7〜2.5 ms で、OpenDDS どうしより長い。best-effort の組は 140 µs（OpenDDS どうしより短い）なので、reliable の HEARTBEAT・ACKNACK のやりとりの待ちと思われる。→ 調べる
+- rustorb-dds と OpenDDS の組の reliable の往復は、どちら向きでも 0.7〜2.5 ms で、OpenDDS どうしより長い。best-effort の組は 140 µs（OpenDDS どうしより短い）なので、reliable の HEARTBEAT・ACKNACK のやりとりの待ちと思われる（#124）。
 - OpenDDS の 1 MiB は、best-effort で往復がすべて失われ、reliable の 99 パーセンタイルが 824 ms。
 - スループット（best-effort）は 64 KiB で rustorb 14.3 Gbit/s、OpenDDS 5.0 Gbit/s、OpenDDS → rustorb 5.4 Gbit/s。rustorb → OpenDDS は 4.2 Gbit/s で取りこぼしが多い（OpenDDS の受け手が追いつかない）。
 - 1 プロセスの最大 RSS は、OpenDDS が 37〜43 MiB（reliable の往復では 218 MiB）、rustorb-dds が 5〜12 MiB（best-effort の受け手は 34 MiB）。
 
 ### RustDDS（コンテナ）
 
-（測定中）
+数値は [bench/results/2026-11-27-container-rustdds](../bench/results/2026-11-27-container-rustdds/report.md)（このコンテナ、rustorb-dds 391bd97、1 秒の warm-up のあと 5 秒、3 回の中央値）。Cyclone DDS 0.10.4 も同じ回に並べた。
+
+| size | rustorb | Cyclone DDS | RustDDS | rustorb ping ↔ RustDDS pong | RustDDS ping ↔ rustorb pong |
+|---:|---:|---:|---:|---:|---:|
+| 32 B | 74 | 61 | 83 | 94 | 87 |
+| 16 KiB | 88 | 77 | 166 | 362 | 385 |
+| 64 KiB | 183 | 130 | 521 | 984 | 1,282 |
+| 1 MiB | 1,756 | 1,769 | 5,212 | 15,426 | 20,362 |
+
+（reliable の往復の中央値、µs）
+
+- 1 KiB までは RustDDS どうしも rustorb-dds との組も 83〜98 µs で、rustorb-dds どうし（70〜77 µs）に近い。大きくなるほど RustDDS は遅く、64 KiB で rustorb-dds の約 3 倍、1 MiB で約 3 倍。
+- rustorb-dds と RustDDS の組は、2 KiB を超えるとどちら向きでも RustDDS どうしより遅い（64 KiB で 2〜2.5 倍、1 MiB で 3〜4 倍）。best-effort でも同じなので、reliable のやりとりではなく、DATA_FRAG の分け方と組み立ての相性と思われる（#125）。
+- reliable のスループットは RustDDS どうしで 32 B 0.1 Mbit/s、64 KiB 2.8 Gbit/s（rustorb-dds 9.5 Gbit/s、Cyclone DDS 12.3 Gbit/s）。RustDDS の pub は rustorb-dds の sub に対しても 0.25〜0.85 Gbit/s しか出ない。
+- rustorb-dds の pub から RustDDS の sub への reliable は、回によって途中で止まる（3 回のうち 1〜2 回が 1,024 標本前後や 0 標本で止まり、1 MiB の中央値は 1.7 Mbit/s）。reliable なのに RustDDS の sub は「失われた」標本を数える（RustDDS どうしでも）（#125）。
+- best-effort のスループットは 64 KiB で rustorb 13.6 Gbit/s、Cyclone DDS 12.7 Gbit/s、RustDDS 3.8 Gbit/s。rustorb → RustDDS は 64 KiB 以上で 11〜14.6 Gbit/s 届くが、RustDDS の sub が受け取ったものをため続け、16 KiB 以上の 7 回が 3 GiB を超えて止められた（「Killed for memory」）。RustDDS → rustorb は 0.7〜1.1 Gbit/s。
+- 1 プロセスの最大 RSS は、RustDDS が best-effort の往復で 84 MiB、reliable の往復で 1.2 GiB、reliable の sub で 1.1 GiB。rustorb-dds と Cyclone DDS は 12〜15 MiB。往復の測定（16 の大きさで約 97 秒）の CPU 時間は、rustorb-dds が 48〜52 秒、Cyclone DDS が 48 秒、RustDDS が 59〜76 秒。
 
 ## 結果の表
 
