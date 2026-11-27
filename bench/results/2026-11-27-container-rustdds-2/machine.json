@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-27T08:56:06+00:00",
+  "host": "vm",
+  "platform": "Linux-6.18.44-fc-v880-x86_64-with-glibc2.39",
+  "python": "3.13.18",
+  "cpus": 4,
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "container": true,
+  "rustorb_dds_commit": "a5a563b",
+  "peers": {
+    "rustorb": "0.3.0",
+    "rustdds": "0.15.1"
+  },
+  "args": {
+    "peers": "rustorb,rustdds",
+    "kinds": "latency,throughput",
+    "transports": "udp",
+    "reliability": "reliable,best-effort",
+    "sizes": null,
+    "warmup": 1.0,
+    "duration": 5.0,
+    "repeat": 3,
+    "domain": 42,
+    "interop": true,
+    "only": null,
+    "security": "",
+    "max_rss_mib": 3072,
+    "no_pin": false
+  }
+}
