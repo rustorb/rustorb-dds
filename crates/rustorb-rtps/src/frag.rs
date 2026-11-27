@@ -126,7 +126,7 @@ impl Fragmentation {
                     fragment_size: self.fragment_size,
                     sample_size: payload.bytes.len() as u32,
                     inline_qos: if n == 1 { c.inline_qos.clone() } else { None },
-                    serialized_payload: payload.bytes[start..end].to_vec(),
+                    serialized_payload: payload.bytes.slice(start..end),
                 });
                 n += k;
             }
@@ -324,7 +324,7 @@ impl Reassembler {
             inline_qos: p.inline_qos,
             payload: Some(SerializedPayload {
                 kind: p.kind,
-                bytes: p.data,
+                bytes: p.data.into(),
             }),
             timestamp: p.timestamp,
         })

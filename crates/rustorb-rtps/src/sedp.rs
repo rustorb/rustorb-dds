@@ -1160,7 +1160,7 @@ impl Sedp {
         qos.push(Parameter::new(pid::KEY_HASH, data.guid.to_bytes()));
         let payload = SerializedPayload {
             kind: PayloadKind::Data,
-            bytes: data.to_payload(Endianness::NATIVE),
+            bytes: data.to_payload(Endianness::NATIVE).into(),
         };
         let old = match kind {
             Kind::Writer => self.local_writers.remove(&data.guid),
@@ -1222,7 +1222,7 @@ impl Sedp {
             Some(qos),
             Some(SerializedPayload {
                 kind: PayloadKind::Key,
-                bytes: encode_pl_payload(&key, e),
+                bytes: encode_pl_payload(&key, e).into(),
             }),
         );
         let mut events = Vec::new();

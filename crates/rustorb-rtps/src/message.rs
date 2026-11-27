@@ -111,8 +111,17 @@ impl Message {
                 pos: Header::SIZE,
                 index: 0,
                 done: false,
+                base: None,
             },
         ))
+    }
+
+    /// Like [`Message::parse`], with the payloads of DATA and DATA_FRAG
+    /// as slices of `bytes` instead of copies.
+    pub fn parse_shared(bytes: &crate::Octets) -> Result<(Header, Submessages<'_>), DecodeError> {
+        let (header, mut subs) = Message::parse(bytes)?;
+        subs.base = Some(bytes);
+        Ok((header, subs))
     }
 
     /// Writes the message with every submessage in byte order
@@ -178,6 +187,7 @@ impl Message {
 #[derive(Debug)]
 pub struct Submessages<'a> {
     bytes: &'a [u8],
+    base: Option<&'a crate::Octets>,
     pos: usize,
     index: usize,
     done: bool,
@@ -222,7 +232,7 @@ impl Submessages<'_> {
             });
         }
         self.index += 1;
-        Submessage::decode_body(id, flags, body)
+        Submessage::decode_body(id, flags, body, self.base)
     }
 }
 

@@ -201,7 +201,7 @@ pub struct SampleInfo {
 /// host loaned in shared memory, read in place (feature `shm`).
 #[derive(Clone, Debug)]
 pub(crate) enum Payload {
-    Owned(Vec<u8>),
+    Owned(rustorb_rtps::Octets),
     #[cfg(feature = "shm")]
     Loaned(rustorb_rtps::shm::PoolLoan),
 }
@@ -238,7 +238,7 @@ impl Eq for Payload {}
 
 impl From<Vec<u8>> for Payload {
     fn from(v: Vec<u8>) -> Self {
-        Payload::Owned(v)
+        Payload::Owned(v.into())
     }
 }
 

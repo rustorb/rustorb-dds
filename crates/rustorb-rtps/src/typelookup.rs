@@ -199,7 +199,7 @@ impl TypeLookup {
                 None,
                 Some(SerializedPayload {
                     kind: PayloadKind::Data,
-                    bytes,
+                    bytes: bytes.into(),
                 }),
             );
             debug_assert_eq!(sn.0, id.sequence_number);
@@ -421,7 +421,7 @@ impl TypeLookup {
                 None,
                 Some(SerializedPayload {
                     kind: PayloadKind::Data,
-                    bytes,
+                    bytes: bytes.into(),
                 }),
             );
         }

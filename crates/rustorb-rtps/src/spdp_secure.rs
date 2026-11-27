@@ -138,7 +138,7 @@ impl SpdpSecure {
             Some(qos),
             Some(SerializedPayload {
                 kind: PayloadKind::Data,
-                bytes: data.to_payload(Endianness::NATIVE),
+                bytes: data.to_payload(Endianness::NATIVE).into(),
             }),
         );
         if let Some(old) = self.last.replace(sn) {
@@ -165,7 +165,7 @@ impl SpdpSecure {
             Some(qos),
             Some(SerializedPayload {
                 kind: PayloadKind::Key,
-                bytes: encode_pl_payload(&key, e),
+                bytes: encode_pl_payload(&key, e).into(),
             }),
         );
         if let Some(old) = self.last.replace(sn) {

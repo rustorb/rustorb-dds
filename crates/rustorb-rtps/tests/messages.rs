@@ -73,7 +73,7 @@ fn decode_hand_written_big_endian() {
                 inline_qos: None,
                 serialized_payload: Some(SerializedPayload {
                     kind: PayloadKind::Data,
-                    bytes: SHAPE_PAYLOAD.to_vec(),
+                    bytes: SHAPE_PAYLOAD.to_vec().into(),
                 }),
                 non_standard_payload: false,
             }),
@@ -238,7 +238,7 @@ fn every_kind() -> Vec<Submessage> {
             fragment_size: 8,
             sample_size: 30,
             inline_qos: Some(qos.clone()),
-            serialized_payload: vec![0x5a; 16],
+            serialized_payload: vec![0x5a; 16].into(),
         }),
         Submessage::Data(Data {
             reader_id: READER,
@@ -247,7 +247,7 @@ fn every_kind() -> Vec<Submessage> {
             inline_qos: Some(qos),
             serialized_payload: Some(SerializedPayload {
                 kind: PayloadKind::Key,
-                bytes: vec![0, 1, 0, 0, 9, 9, 9, 9],
+                bytes: vec![0, 1, 0, 0, 9, 9, 9, 9].into(),
             }),
             non_standard_payload: false,
         }),
@@ -271,7 +271,7 @@ fn every_kind() -> Vec<Submessage> {
             inline_qos: None,
             serialized_payload: Some(SerializedPayload {
                 kind: PayloadKind::Data,
-                bytes: SHAPE_PAYLOAD.to_vec(),
+                bytes: SHAPE_PAYLOAD.to_vec().into(),
             }),
             non_standard_payload: false,
         }),
@@ -554,7 +554,7 @@ fn large_last_submessage() {
         inline_qos: None,
         serialized_payload: Some(SerializedPayload {
             kind: PayloadKind::Data,
-            bytes: vec![7; 70_000],
+            bytes: vec![7; 70_000].into(),
         }),
         non_standard_payload: false,
     }));
@@ -577,7 +577,7 @@ fn data_frag_drops_alignment_padding() {
         fragment_size: 10,
         sample_size: 25,
         inline_qos: None,
-        serialized_payload: vec![1, 2, 3, 4, 5],
+        serialized_payload: vec![1, 2, 3, 4, 5].into(),
     };
     msg.submessages = vec![
         Submessage::DataFrag(frag.clone()),
