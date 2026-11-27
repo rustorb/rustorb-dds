@@ -65,6 +65,15 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
   bindings, which pass samples as `DynamicData`, round-trip 64 KiB of
   octets in about 0.2 ms instead of 6 to 8 ms; Python converts `bytes`
   in one step too (#120).
+- DDS Security is faster for large samples (#119). AES-GCM and AES-GMAC
+  are now `rustorb-dds-security`'s own (src/gcm.rs, on RustCrypto's
+  `aes`, `ctr` and, without PCLMULQDQ, `ghash`): GHASH multiplies eight
+  blocks before each reduction on x86-64, 64 KiB in about 7 µs instead
+  of 43. A message is copied only from its first protected submessage,
+  and payloads and submessages are sealed where they lie. In the
+  container, the 64 KiB round trip with data and metadata signed went
+  from about 650 to 360 µs (Cyclone DDS 450), encrypted from about 800 to
+  550 µs (Cyclone DDS 450). `aes-gcm` is now only a dev-dependency.
 - Deleting a participant makes its reliable readers acknowledge what
   came at once, rather than only in answer to the writers' next
   HEARTBEAT: an OpenDDS writer waiting for acknowledgments was left
