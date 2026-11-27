@@ -268,6 +268,13 @@ def main():
             if any(v for g in lost.values() for v in g.values()):
                 print(f"\nSamples lost, {rel}:\n")
                 print(table(lost, lambda v: "–" if v is None else f"{v:.0f}"))
+    over = sorted({(r["case"], r["over_rss_side"], r["over_rss_mib"]) for r in rows if r.get("over_rss_mib")})
+    if over:
+        print("\n### Killed for memory\n")
+        print("These runs were stopped when a side's resident set grew past the limit; they have no numbers.\n")
+        for case, side, mib in over:
+            who = "the measuring side" if side == "measure" else "the other side"
+            print(f"- `{case}`: {who}, over {mib} MiB")
     for kind in ("latency", "throughput"):
         t = resources(rows, kind)
         if t:

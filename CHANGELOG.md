@@ -124,9 +124,21 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 - Language binding measurements (#107): `bench/bindings.py` and a ping
   in C++, Java, .NET, Python and Ruby (`bench/bindings/`) against the
   Rust `rustorb-dds-perf pong`; the results are in docs/benchmark.md.
+- OpenDDS and RustDDS measurements (#108): the same program for OpenDDS
+  3.31 (`bench/opendds`, built in the OpenDDS image, measured by the CI
+  job `bench-opendds`) and RustDDS 0.15.1 (`bench/rustdds`, a crate of
+  its own outside the workspace); `bench/run.py --max-rss-mib` stops a
+  side whose resident set grows past the limit (3 GiB by default) and
+  reports the run as killed for memory.
 
 ### Fixed
 
+- A message to a remote reader or writer goes to one of its UDP unicast
+  locators, not to all of them: to a loopback locator when the remote
+  participant is on the same host, and never to another host's loopback
+  (`rustorb_rtps::udp::select_unicast`). RustDDS advertises 127.0.0.1 as
+  well as its own address, got every message twice, and stopped
+  reassembling 64 KiB samples after 128 of them (#108).
 - A listener that holds an entity of its own participant (a reader's
   listener that writes back with a writer, say) is dropped with no lock
   held: deleting the reader or writer, or replacing the listener, no

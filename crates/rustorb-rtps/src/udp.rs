@@ -469,6 +469,11 @@ impl UdpTransport {
             .collect()
     }
 
+    /// The IPv4 addresses this transport's unicast locators carry.
+    pub fn unicast_addresses(&self) -> &[Ipv4Addr] {
+        &self.unicast_addresses
+    }
+
     /// Sends one message to a locator. Multicast destinations are sent on
     /// every configured interface.
     ///
@@ -689,8 +694,101 @@ fn default_address(toward: Ipv4Addr) -> Ipv4Addr {
     }
 }
 
+/// The unicast locators of a remote endpoint to send its messages to, of
+/// all it gives, so that each message reaches it once (rustorb-dds#108:
+/// RustDDS gives 127.0.0.1 besides its interface addresses, and a copy
+/// sent to each wastes the bandwidth and confused its reassembly).
+///
+/// `local` are this participant's own unicast addresses. Locators that
+/// are not UDPv4 are kept as they are. Of the UDPv4 ones:
+///
+/// * when one of them is an address in `local`, the endpoint is on this
+///   host: its first loopback locator, or else that one;
+/// * when this participant is on loopback only, the loopback ones;
+/// * else those that are not loopback (a loopback address of another
+///   host is this host), or all when there are none.
+pub fn select_unicast(remote: &[Locator], local: &[Ipv4Addr]) -> Vec<Locator> {
+    let v4 = |l: &Locator| match (l.kind, l.to_socket_addr()) {
+        (Locator::KIND_UDPV4, Some(SocketAddr::V4(a))) => Some(*a.ip()),
+        _ => None,
+    };
+    let (udp, mut out): (Vec<Locator>, Vec<Locator>) = remote.iter().partition(|l| v4(l).is_some());
+    if udp.len() <= 1 {
+        return remote.to_vec();
+    }
+    let loopback = |l: &&Locator| v4(l).is_some_and(|a| a.is_loopback());
+    let chosen: Vec<Locator> = if let Some(same) = udp
+        .iter()
+        .find(|l| v4(l).is_some_and(|a| !a.is_loopback() && local.contains(&a)))
+    {
+        vec![*udp.iter().find(loopback).unwrap_or(same)]
+    } else if !local.is_empty() && local.iter().all(|a| a.is_loopback()) {
+        let lo: Vec<Locator> = udp.iter().filter(loopback).copied().collect();
+        if lo.is_empty() { udp.clone() } else { lo }
+    } else {
+        let other: Vec<Locator> = udp.iter().filter(|l| !loopback(l)).copied().collect();
+        if other.is_empty() { udp.clone() } else { other }
+    };
+    // In the order they were given.
+    out.extend(chosen);
+    let mut ordered: Vec<Locator> = remote.iter().filter(|l| out.contains(l)).copied().collect();
+    ordered.dedup();
+    ordered
+}
+
 #[cfg(test)]
 mod tests {
+    fn v4(s: &str) -> Locator {
+        Locator::udpv4(s.parse().unwrap())
+    }
+
+    #[test]
+    fn a_peer_on_this_host_is_sent_to_once_on_loopback() {
+        let local = [Ipv4Addr::new(192, 0, 2, 2)];
+        let remote = [v4("192.0.2.2:7411"), v4("127.0.0.1:7411")];
+        assert_eq!(select_unicast(&remote, &local), vec![v4("127.0.0.1:7411")]);
+        // Without a loopback locator: the one of this host's address.
+        let remote = [v4("10.0.0.1:7411"), v4("192.0.2.2:7411")];
+        assert_eq!(select_unicast(&remote, &local), vec![v4("192.0.2.2:7411")]);
+    }
+
+    #[test]
+    fn a_peer_on_another_host_is_not_sent_to_on_loopback() {
+        let local = [Ipv4Addr::new(192, 0, 2, 2)];
+        let remote = [
+            v4("127.0.0.1:7411"),
+            v4("192.0.2.9:7411"),
+            v4("10.0.0.9:7411"),
+        ];
+        assert_eq!(
+            select_unicast(&remote, &local),
+            vec![v4("192.0.2.9:7411"), v4("10.0.0.9:7411")]
+        );
+        let remote = [v4("127.0.0.1:7411"), v4("127.0.0.2:7411")];
+        assert_eq!(select_unicast(&remote, &local), remote.to_vec());
+    }
+
+    #[test]
+    fn a_loopback_only_participant_sends_on_loopback() {
+        let local = [Ipv4Addr::LOCALHOST];
+        let remote = [v4("192.0.2.9:7411"), v4("127.0.0.1:7411")];
+        assert_eq!(select_unicast(&remote, &local), vec![v4("127.0.0.1:7411")]);
+    }
+
+    #[test]
+    fn other_locators_and_a_single_one_are_kept() {
+        let local = [Ipv4Addr::new(192, 0, 2, 2)];
+        let mut shm = v4("0.0.0.0:1");
+        shm.kind = 0x0100_0000;
+        let remote = [v4("192.0.2.9:7411")];
+        assert_eq!(select_unicast(&remote, &local), remote.to_vec());
+        let remote = [shm, v4("192.0.2.2:7411"), v4("127.0.0.1:7411")];
+        assert_eq!(
+            select_unicast(&remote, &local),
+            vec![shm, v4("127.0.0.1:7411")]
+        );
+    }
+
     use super::*;
 
     #[test]

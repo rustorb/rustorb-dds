@@ -22,6 +22,7 @@ use rustorb_rtps::spdp_secure::SpdpSecure;
 use rustorb_rtps::typelookup::{TypeLookup, TypeLookupReplied};
 use rustorb_rtps::udp::{
     Channel, Datagram, Incoming as UdpIncoming, UdpConfig, UdpTransport, UserHandler,
+    select_unicast,
 };
 use rustorb_rtps::wlp::{self, Wlp};
 use rustorb_rtps::{
@@ -1265,6 +1266,9 @@ pub(crate) struct Inner {
     writer_config: WriterConfig,
     reader_config: ReaderConfig,
     next_entity: u32,
+    /// The transport's own unicast addresses, to choose which of a remote
+    /// endpoint's unicast locators to send to (`select_unicast`).
+    local_addresses: Vec<Ipv4Addr>,
     pub(crate) writers: HashMap<Guid, WriterState>,
     pub(crate) readers: HashMap<Guid, ReaderState>,
     deleted: bool,
@@ -2536,7 +2540,10 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                         w.rtps.add_matched_reader(
                             remote,
                             MatchedReader {
-                                unicast: d.unicast_locators.clone(),
+                                unicast: select_unicast(
+                                    &d.unicast_locators,
+                                    &inner.local_addresses,
+                                ),
                                 multicast: d.multicast_locators.clone(),
                                 reliable: d.reliability.kind == ReliabilityKind::Reliable,
                                 // A TRANSIENT_LOCAL writer sends what it
@@ -2569,7 +2576,7 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                     {
                         rtps.add_writer(
                             remote,
-                            d.unicast_locators.clone(),
+                            select_unicast(&d.unicast_locators, &inner.local_addresses),
                             d.multicast_locators.clone(),
                             now,
                         );
@@ -2909,6 +2916,7 @@ impl DomainParticipant {
             writer_config: config.writer,
             reader_config: config.reader,
             next_entity: 1,
+            local_addresses: transport.unicast_addresses().to_vec(),
             writers: HashMap::new(),
             readers: HashMap::new(),
             deleted: false,

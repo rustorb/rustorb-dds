@@ -1,0 +1,19 @@
+# The measurements of rustorb-dds-perf for RustDDS (rustorb-dds#108):
+# a program of its own, not part of the workspace and not published, so
+# that RustDDS is a dependency of this program only. bench/peers.py builds
+# it with `cargo build --release --locked`.
+[package]
+name = "rustdds-perf"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+rustdds = { version = "=0.15.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+env_logger = "0.11"
+

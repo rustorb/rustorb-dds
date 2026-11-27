@@ -55,8 +55,11 @@ def cpu_sets(pin):
 class Proc:
     """A process of a case, with its rusage once it ends."""
 
-    def __init__(self, argv, env, cpus, log):
+    def __init__(self, argv, env, cpus, log, max_kib=None):
         self.argv = argv
+        self.max_kib = max_kib
+        # Killed for a resident set over max_kib.
+        self.over = False
         full_env = dict(os.environ)
         full_env.update(env or {})
 
@@ -84,6 +87,11 @@ class Proc:
         peak = peers.peak_rss_kib(self.p.pid)
         if peak is not None:
             self.peak_kib = peak
+            if self.max_kib and peak > self.max_kib and not self.over:
+                # Before it takes the memory of the machine (a best-effort
+                # sub that keeps what it cannot take in time).
+                self.over = True
+                self.kill()
 
     def wait(self, timeout, also=()):
         """Waits for the end, reading its memory and that of `also` (the
@@ -228,11 +236,27 @@ def run_case(case, args, log, cpus):
         other = b.secure(other, sec)
     log.write(f"\n=== {name}\n")
     # The other side first: a pong (or pub) waits for its ping (or sub).
-    o = Proc(other.argv, other.env, cpus[1], log)
+    max_kib = args.max_rss_mib * 1024 if args.max_rss_mib else None
+    o = Proc(other.argv, other.env, cpus[1], log, max_kib)
     time.sleep(0.2)
-    m = Proc(measure.argv, measure.env, cpus[0], log)
+    m = Proc(measure.argv, measure.env, cpus[0], log, max_kib)
     m_status = m.wait(limit, also=[o])
+    if m.over and o.p.poll() is None:
+        o.kill()
     o_status = o.wait(30)
+    if m.over or o.over:
+        # A result of its own: the side that grew past the limit, and the
+        # memory of both, but no numbers.
+        side = "measure" if m.over else "other"
+        log.write(f"[bench] {side} killed: resident set over {args.max_rss_mib} MiB\n")
+        r = dict(case=name, kind=kind, impl=a.name, peer=b.name, transport=transport,
+                 reliability=reliability, size=sizes[0] if kind == "throughput" else None,
+                 over_rss_mib=args.max_rss_mib, over_rss_side=side)
+        if security:
+            r["security"] = security
+        r.update(m.resources("measure"))
+        r.update(o.resources("other"))
+        return True, [r], (m_status, o_status, f"{side} over {args.max_rss_mib} MiB")
     results = []
     if m_status in a.ok_status:
         for r in a.parse(kind, m.out, sizes):
@@ -296,6 +320,9 @@ def main():
     ap.add_argument("--security", default="",
                     help="DDS Security settings, comma-separated: none,auth,sign,encrypt "
                          "(UDP only; each case with each)")
+    ap.add_argument("--max-rss-mib", type=int, default=3072,
+                    help="kill a side whose resident set grows past this and record that "
+                         "instead of numbers (0: no limit)")
     ap.add_argument("--no-pin", action="store_true", help="do not pin the sides to CPUs")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--list", action="store_true")
@@ -353,7 +380,7 @@ def main():
                     res.write(json.dumps(r) + "\n")
                 res.flush()
                 log.flush()
-                state = "ok" if ok else f"FAILED {statuses}"
+                state = ("ok" if len(statuses) == 2 else f"ok: {statuses[2]}") if ok else f"FAILED {statuses}"
                 print(f"[{i}/{len(todo)}] {case[0]} #{rep + 1}: {state} ({time.monotonic() - t0:.0f} s)")
                 if not ok:
                     failed.append(f"{case[0]} #{rep + 1}")
