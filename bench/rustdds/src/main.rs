@@ -658,7 +658,9 @@ fn subscribe(o: &Options, p: &mut Perf) {
                     last = last.max(s.seq);
                 }
             }
-            if got.len() < MAX_TAKE {
+            // Back to the outer loop for the end and the next second, also
+            // while samples keep coming faster than they are taken.
+            if got.len() < MAX_TAKE || Instant::now() >= second_end.min(end) {
                 break;
             }
         }
