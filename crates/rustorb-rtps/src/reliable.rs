@@ -571,6 +571,24 @@ impl ReliableWriter {
         readers.peek().is_some() && readers.all(|(_, r)| r.acked >= sn)
     }
 
+    /// The octets of the changes in the history that some matched
+    /// reliable reader has not acknowledged.
+    pub fn unacknowledged_octets(&self) -> usize {
+        let Some(acked) = self
+            .readers
+            .values()
+            .filter(|r| r.reliable)
+            .map(|r| r.acked)
+            .min()
+        else {
+            return 0;
+        };
+        self.history
+            .range(SequenceNumber(acked.0 + 1)..)
+            .map(|(_, c)| c.payload.as_ref().map_or(0, |p| p.bytes.len()))
+            .sum()
+    }
+
     /// Whether every matched reliable reader has acknowledged every
     /// change written so far (what `wait_for_acknowledgments` waits for).
     pub fn is_all_acked(&self) -> bool {
@@ -2099,6 +2117,25 @@ mod tests {
         acknacks(&mut w, &acks, t);
         let got = deliver(&mut r, &w.poll(t), &[], t);
         assert_eq!(got[0].payload, big(1, 2000));
+    }
+
+    #[test]
+    fn unacknowledged_octets_count_what_a_reader_lacks() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, frag_config());
+        let mut r = ReliableReader::new(rguid(2), VendorId::UNKNOWN, ReaderConfig::default());
+        r.add_writer(wguid(), loc(1), vec![], t);
+        assert_eq!(w.unacknowledged_octets(), 0);
+        w.add_reader(rguid(2), loc(2), vec![]);
+        for i in 1..=3 {
+            w.add_change(None, big(i, 2000));
+        }
+        let one = 2000 + 4;
+        assert_eq!(w.unacknowledged_octets(), 3 * one);
+        let out = w.poll(t);
+        assert_eq!(deliver(&mut r, &out, &[], t).len(), 3);
+        acknacks(&mut w, &r.poll(t), t);
+        assert_eq!(w.unacknowledged_octets(), 0);
     }
 
     #[test]

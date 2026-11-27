@@ -378,6 +378,22 @@ reliable のスループット（Mbit/s、5 秒）:
 
 小さな標本（#111）の reliable の往復は、32 B で rustorb-dds 88〜89 µs、Cyclone DDS 72〜81 µs（この回）。1 往復あたりのシステムコールは、ping 側で sendto・recvfrom 各 1、futex 2 と Cyclone DDS（sendmsg・recvmsg 各 1、futex 3）とほぼ同じで、多いのは受信時の FIONREAD（ioctl）1 回だけ。ユーザ空間の CPU 時間は 1 往復あたり約 19 µs（Cyclone DDS 約 11 µs）で、多くの関数に薄く分かれていて、目立つ箇所はない。
 
+
+### 流量制御（2026-11-28）
+
+reliable のスループットを決めていたのは、受け手の UDP の受信バッファからの溢れだった。pub は KEEP_ALL で未確認応答 100 標本まで送れるので、64 KiB で 6.4 MiB、256 KiB で 25 MiB を一度に送り、5 秒のあいだに 1〜7 万 datagram が捨てられて（`/proc/net/snmp` の RcvbufErrors）送り直されていた。Cyclone DDS は未確認応答の octet で writer を止める（`WhcHigh`）。rustorb-dds も、reliable の KEEP_ALL writer に未確認応答が 2 MiB を超えてあれば、write が ACKNACK を求めて待つようにした（`max_blocking_time` まで。過ぎれば書く）。
+
+| size | 前 | 後 | Cyclone DDS |
+|---:|---:|---:|---:|
+| 16 KiB | 11,500–13,200 | 11,700 | 5,900–6,100 |
+| 64 KiB | 5,800–8,700 | 11,800–12,600 | 13,000–13,300 |
+| 256 KiB | 7,100–15,400 | 11,400–11,500 | 11,800–13,800 |
+| 1 MiB | 11,700–15,200 | 15,200–17,800 | 10,300–11,500 |
+
+（reliable、UDP、Mbit/s。後の回の溢れは 0。1 KiB 以下は変わらない）
+
+1 往復あたりの CPU 時間（ping と pong の user + sys の合計）は、64 KiB で rustorb-dds 約 235〜250 µs、Cyclone DDS 約 170 µs、32 B で 80 µs と 65 µs。64 KiB の差は、datagram が 6 個（Cyclone DDS は 5 個）であることと、malloc（受けた datagram ごとに 1 つ）、組み立てと復号の copy。ハードウェアのカウンタがないので、数 % の差は測りきれない。
+
 ## 結果の表
 
 `bench/report.py` の出力。列は実装と転送。2 つの実装の組は、レイテンシでは「ping↔pong」、スループットでは「pub→sub」。「lost」はすべての往復が失われたもの、「–」は測っていないもの。

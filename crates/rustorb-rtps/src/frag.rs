@@ -201,7 +201,8 @@ impl Partial {
             } else {
                 PayloadKind::Data
             },
-            data: vec![0; d.sample_size as usize],
+            // Filled as the fragments come, zeros only for gaps.
+            data: Vec::with_capacity(d.sample_size as usize),
             received: vec![false; total as usize],
             missing: total,
             inline_qos: None,
@@ -231,7 +232,14 @@ impl Partial {
                 break;
             };
             if !*have {
-                self.data[offset..offset + len].copy_from_slice(bytes);
+                // Fragments are whole, so `data` ends at a fragment's start
+                // or at the end of the sample.
+                if offset >= self.data.len() {
+                    self.data.resize(offset, 0);
+                    self.data.extend_from_slice(bytes);
+                } else {
+                    self.data[offset..offset + len].copy_from_slice(bytes);
+                }
                 *have = true;
                 self.missing -= 1;
             }

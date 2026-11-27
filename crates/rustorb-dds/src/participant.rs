@@ -706,6 +706,12 @@ fn drop_missing_padding(bytes: &mut Octets) {
 #[cfg(feature = "shm")]
 const LOANS_KEPT: usize = 8;
 
+/// The octets a reliable KEEP_ALL writer may have sent that its readers
+/// have yet to acknowledge before `write` waits for them (at most
+/// `max_blocking_time`, and then writes anyway): more come in faster
+/// than a reader's socket holds, and what it drops is sent again (#112).
+const MAX_UNACKNOWLEDGED: usize = 2 * 1024 * 1024;
+
 /// The most slots of a writer's pool.
 #[cfg(feature = "shm")]
 const MAX_POOL_SLOTS: usize = 256;
@@ -958,6 +964,15 @@ impl WriterState {
             || limits
                 .max_samples_per_instance
                 .is_some_and(|m| self.instance_changes(h) >= m.max(1))
+    }
+
+    /// Whether a reliable KEEP_ALL writer has more octets unacknowledged
+    /// than [`MAX_UNACKNOWLEDGED`]: `write` then waits a while for
+    /// acknowledgments, but writes after `max_blocking_time` anyway.
+    fn is_congested(&self) -> bool {
+        self.qos.reliability.kind == ReliabilityKind::Reliable
+            && self.qos.history == History::KeepAll
+            && self.rtps.unacknowledged_octets() >= MAX_UNACKNOWLEDGED
     }
 
     fn transient_local(&self) -> bool {
@@ -2244,10 +2259,11 @@ impl Shared {
                 let Some(w) = g.writers.get_mut(&writer) else {
                     return Err(Error::AlreadyDeleted);
                 };
-                if !w.is_full(&h) {
+                let full = w.is_full(&h);
+                let now = Instant::now();
+                if !full && (now >= deadline || !w.is_congested()) {
                     break;
                 }
-                let now = Instant::now();
                 if now >= deadline {
                     return Err(Error::Timeout);
                 }
