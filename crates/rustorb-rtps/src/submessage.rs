@@ -5,6 +5,7 @@
 //! is encoded. Flags marked `X` (unused) in the specification are ignored
 //! when reading and written as zero (9.4.5.1.2).
 
+use crate::Octets;
 use crate::error::{DecodeError, EncodeError};
 use crate::parameter::ParameterList;
 use crate::types::{
@@ -298,7 +299,7 @@ pub struct SerializedPayload {
     /// When read, this runs to the end of the submessage and so may
     /// include the padding that aligns the next submessage. When written,
     /// it is padded with zeros to a multiple of four.
-    pub bytes: Vec<u8>,
+    pub bytes: Octets,
 }
 
 /// DATA: a change to a data object, sent by a writer (8.3.8.2).
@@ -344,7 +345,7 @@ pub struct DataFrag {
     /// In-line QoS (flag Q).
     pub inline_qos: Option<ParameterList>,
     /// The fragment octets.
-    pub serialized_payload: Vec<u8>,
+    pub serialized_payload: Octets,
 }
 
 /// A submessage with an id this crate does not handle, kept as octets.
@@ -392,8 +393,13 @@ impl Submessage {
 
     /// Reads the contents of a submessage whose header gave `id` and
     /// `flags`. `body` is everything after the header up to the next one.
-    pub(crate) fn decode_body(id: u8, flags: u8, body: &[u8]) -> Result<Submessage, DecodeError> {
-        let mut r = Reader::new(body, crate::wire::Endianness::from_flags(flags));
+    pub(crate) fn decode_body(
+        id: u8,
+        flags: u8,
+        body: &[u8],
+        base: Option<&crate::Octets>,
+    ) -> Result<Submessage, DecodeError> {
+        let mut r = Reader::with_base(body, crate::wire::Endianness::from_flags(flags), base);
         let result = Self::read_body(id, flags, &mut r);
         result.map_err(|e| match e {
             DecodeError::UnexpectedEnd => invalid(id, TOO_SMALL),
@@ -921,7 +927,10 @@ impl Data {
         };
         let serialized_payload = kind.map(|kind| SerializedPayload {
             kind,
-            bytes: r.rest().to_vec(),
+            bytes: {
+                let rest = r.rest();
+                r.share(rest)
+            },
         });
         Ok(Data {
             reader_id,
@@ -1017,7 +1026,7 @@ impl DataFrag {
             fragment_size: size,
             sample_size,
             inline_qos,
-            serialized_payload: payload.to_vec(),
+            serialized_payload: r.share(payload),
         })
     }
 

@@ -47,6 +47,9 @@ pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     endianness: Endianness,
+    /// The shared buffer `buf` lies in, if any: what [`Reader::share`]
+    /// takes slices of.
+    base: Option<&'a crate::Octets>,
 }
 
 impl<'a> Reader<'a> {
@@ -55,7 +58,28 @@ impl<'a> Reader<'a> {
             buf,
             pos: 0,
             endianness,
+            base: None,
         }
+    }
+
+    /// A reader of `buf`, which lies in `base` (if given).
+    pub(crate) fn with_base(
+        buf: &'a [u8],
+        endianness: Endianness,
+        base: Option<&'a crate::Octets>,
+    ) -> Self {
+        Reader {
+            base,
+            ..Reader::new(buf, endianness)
+        }
+    }
+
+    /// `s`, read from this reader, as [`crate::Octets`]: a slice of the
+    /// shared buffer when there is one, else a copy.
+    pub(crate) fn share(&self, s: &[u8]) -> crate::Octets {
+        self.base
+            .and_then(|b| b.slice_ref(s))
+            .unwrap_or_else(|| crate::Octets::from(s))
     }
 
     pub(crate) fn endianness(&self) -> Endianness {

@@ -2,7 +2,8 @@
 //! submessages of a message and keeps the receiver state that tells
 //! entity submessages where they come from and who they are for.
 
-use crate::message::{Header, Message};
+use crate::Octets;
+use crate::message::{Header, Message, Submessages};
 use crate::submessage::Submessage;
 use crate::types::{GuidPrefix, Time};
 
@@ -29,6 +30,21 @@ pub struct Received {
 /// means the header itself is invalid.
 pub fn receive(bytes: &[u8], local: GuidPrefix) -> Option<(Header, Vec<Received>)> {
     let (header, submessages) = Message::parse(bytes).ok()?;
+    Some(walk(header, submessages, local))
+}
+
+/// Like [`receive`], with the payloads of DATA and DATA_FRAG as slices of
+/// `bytes` instead of copies.
+pub fn receive_shared(bytes: &Octets, local: GuidPrefix) -> Option<(Header, Vec<Received>)> {
+    let (header, submessages) = Message::parse_shared(bytes).ok()?;
+    Some(walk(header, submessages, local))
+}
+
+fn walk(
+    header: Header,
+    submessages: Submessages<'_>,
+    local: GuidPrefix,
+) -> (Header, Vec<Received>) {
     let mut source = header.guid_prefix;
     let mut dest_ok = true;
     let mut timestamp = None;
@@ -61,7 +77,7 @@ pub fn receive(bytes: &[u8], local: GuidPrefix) -> Option<(Header, Vec<Received>
             }
         }
     }
-    Some((header, out))
+    (header, out)
 }
 
 #[cfg(test)]

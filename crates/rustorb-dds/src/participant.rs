@@ -9,10 +9,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use rustorb_rtps::Octets;
 use rustorb_rtps::frag::{Keep, Reassembler, ReassemblyLimits};
 use rustorb_rtps::pl::pid;
 use rustorb_rtps::qos::{DurabilityKind, LivelinessKind, ReliabilityKind};
-use rustorb_rtps::receiver::receive;
+use rustorb_rtps::receiver::receive_shared;
 use rustorb_rtps::reliable::{
     Change, MatchedReader, ReaderConfig, ReliableReader, ReliableWriter, WriterConfig,
 };
@@ -630,7 +631,7 @@ impl ReaderState {
         let mut payload = c.payload;
         #[cfg(feature = "security")]
         if let (Some(sec), Some(p)) = (&self.payload_security, payload.as_mut()) {
-            p.bytes = sec.decode_payload(&c.writer, &p.bytes)?;
+            p.bytes = sec.decode_payload(&c.writer, &p.bytes)?.into();
         }
         if let Some(p) = payload.as_mut() {
             drop_missing_padding(&mut p.bytes);
@@ -691,9 +692,11 @@ impl ReaderState {
 /// have the octets it counts. OpenDDS 3.31 counts the octets that pad its
 /// data to a multiple of 4, but leaves them out of a DATA that ends the
 /// message; read as counted, the data would lose its last octets.
-fn drop_missing_padding(bytes: &mut [u8]) {
+fn drop_missing_padding(bytes: &mut Octets) {
     if bytes.len() > 4 && bytes[3] & 3 != 0 && !(bytes.len() - 4).is_multiple_of(4) {
-        bytes[3] &= !3;
+        let mut v = std::mem::take(bytes).into_vec();
+        v[3] &= !3;
+        *bytes = v.into();
     }
 }
 
@@ -1148,16 +1151,21 @@ impl WriterState {
                 {
                     lent = Some(l.clone());
                 }
-                let bytes = || {
+                let bytes = || -> Octets {
                     #[cfg(feature = "security")]
                     if let Some(e) = &self.payload_encoder {
-                        return e.encode_payload(&v);
+                        return e.encode_payload(&v).into();
                     }
-                    v.to_vec()
+                    match &v {
+                        // Shared with the local readers, not copied.
+                        instance::Payload::Owned(o) => o.clone(),
+                        #[cfg(feature = "shm")]
+                        instance::Payload::Loaned(l) => l.bytes().into(),
+                    }
                 };
                 #[cfg(feature = "shm")]
                 let bytes = match &lent {
-                    Some(l) => l.reference(),
+                    Some(l) => l.reference().into(),
                     None => bytes(),
                 };
                 #[cfg(not(feature = "shm"))]
@@ -1195,7 +1203,7 @@ impl WriterState {
                 (
                     key.map(|bytes| SerializedPayload {
                         kind: PayloadKind::Key,
-                        bytes,
+                        bytes: bytes.into(),
                     }),
                     instance::Change::Lifecycle {
                         disposed: dispose,
@@ -2349,6 +2357,36 @@ impl Shared {
     /// `size` octets, made on first use: `None` without shared memory, or
     /// with DDS Security on (whose samples stay out of files that other
     /// processes can map).
+    /// A slot of `pool` for a reliable `writer` whose slots are all
+    /// held: it waits up to `max_blocking_time` for its readers to
+    /// acknowledge and drop samples, as a KEEP_ALL `write` waits for room
+    /// in its history, rather than fall back to the heap at once (#112).
+    #[cfg(feature = "shm")]
+    pub(crate) fn wait_for_slot(
+        &self,
+        writer: &Guid,
+        pool: &Arc<rustorb_rtps::shm::Pool>,
+    ) -> Option<rustorb_rtps::shm::PoolSlot> {
+        let g = self.lock().ok()?;
+        let w = g.writers.get(writer)?;
+        if w.qos.reliability.kind != ReliabilityKind::Reliable {
+            return None;
+        }
+        let deadline = Instant::now() + w.qos.reliability.max_blocking_time;
+        drop(self.request_acknowledgment(g, writer));
+        loop {
+            // Readers in other processes free slots with no word to this
+            // one: look again shortly.
+            std::thread::sleep(Duration::from_micros(20));
+            if let Some(s) = pool.acquire() {
+                return Some(s);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     #[cfg(feature = "shm")]
     pub(crate) fn writer_pool(
         &self,
@@ -3600,7 +3638,7 @@ fn step(shared: &Shared, datagrams: Vec<Datagram>, discovery: bool) {
                     if shared.should_drop() {
                         continue;
                     }
-                    acked |= user_traffic(shared.prefix, inner, &d.data, now);
+                    acked |= user_traffic(shared.prefix, inner, d.data.into(), now);
                 }
             }
         }
@@ -3717,9 +3755,9 @@ fn participant_ready(inner: &mut Inner, p: &ParticipantData, now: Instant) {
 /// Handles a user-traffic message: DATA, DATA_FRAG, GAP, HEARTBEAT and
 /// HEARTBEAT_FRAG for the local readers, ACKNACK and NACK_FRAG for the
 /// local writers. Returns whether some writer got an ACKNACK.
-fn user_traffic(local: GuidPrefix, inner: &mut Inner, bytes: &[u8], now: Instant) -> bool {
+fn user_traffic(local: GuidPrefix, inner: &mut Inner, bytes: Octets, now: Instant) -> bool {
     let mut acked = false;
-    let Some((_, received)) = receive(bytes, local) else {
+    let Some((_, received)) = receive_shared(&bytes, local) else {
         return false;
     };
     for r in received {
@@ -3836,11 +3874,13 @@ mod padding_tests {
         // OpenDDS: "Hello, world!" (22 octets of data), 2 counted, none sent.
         let mut p = vec![0, 1, 0, 2, 1, 0, 0, 0, 14, 0, 0, 0];
         p.extend_from_slice(b"Hello, world!\0");
+        let mut p = p.into();
         drop_missing_padding(&mut p);
         assert_eq!(p[3], 0);
         // The same with the 2 octets sent: kept as it is.
         let mut q = vec![0, 1, 0, 2, 1, 0, 0, 0, 14, 0, 0, 0];
         q.extend_from_slice(b"Hello, world!\0\0\0");
+        let mut q = q.into();
         drop_missing_padding(&mut q);
         assert_eq!(q[3], 2);
     }

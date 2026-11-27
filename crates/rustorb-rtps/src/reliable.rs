@@ -1355,7 +1355,7 @@ mod tests {
     fn payload(n: u8) -> Option<SerializedPayload> {
         Some(SerializedPayload {
             kind: PayloadKind::Data,
-            bytes: vec![0, 1, 0, 0, n, 0, 0, 0],
+            bytes: vec![0, 1, 0, 0, n, 0, 0, 0].into(),
         })
     }
 
@@ -1800,7 +1800,7 @@ mod tests {
             None,
             Some(SerializedPayload {
                 kind: PayloadKind::Data,
-                bytes: vec![0; 100],
+                bytes: vec![0; 100].into(),
             }),
         );
         assert_eq!(finals(&w.poll(t + Duration::from_millis(21))), [false]);
@@ -1979,7 +1979,7 @@ mod tests {
         bytes.extend((0..size).map(|i| (i as u8).wrapping_mul(n)));
         Some(SerializedPayload {
             kind: PayloadKind::Data,
-            bytes,
+            bytes: bytes.into(),
         })
     }
 

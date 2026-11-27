@@ -39,7 +39,7 @@
 //!     inline_qos: None,
 //!     serialized_payload: Some(SerializedPayload {
 //!         kind: PayloadKind::Data,
-//!         bytes: vec![0x00, 0x01, 0x00, 0x00, 1, 0, 0, 0],
+//!         bytes: vec![0x00, 0x01, 0x00, 0x00, 1, 0, 0, 0].into(),
 //!     }),
 //!     non_standard_payload: false,
 //! }));
@@ -52,6 +52,7 @@
 mod error;
 pub mod frag;
 mod message;
+mod octets;
 mod parameter;
 pub mod pl;
 pub mod qos;
@@ -71,6 +72,7 @@ pub mod wlp;
 
 pub use error::{DecodeError, EncodeError};
 pub use message::{Header, Message, PROTOCOL_RTPS, Submessages};
+pub use octets::Octets;
 pub use parameter::{Parameter, ParameterId, ParameterList, SecurityParameters};
 pub use submessage::{
     AckNack, Checksum, Data, DataFrag, Gap, HeaderExtension, Heartbeat, HeartbeatFrag,

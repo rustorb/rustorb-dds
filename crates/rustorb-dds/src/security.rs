@@ -1202,7 +1202,7 @@ impl Security {
                 None,
                 Some(SerializedPayload {
                     kind: PayloadKind::Data,
-                    bytes: m.to_payload(),
+                    bytes: m.to_payload().into(),
                 }),
             );
         }
@@ -2054,7 +2054,7 @@ fn stateless_datagram(
         inline_qos: None,
         serialized_payload: Some(SerializedPayload {
             kind: PayloadKind::Data,
-            bytes: m.to_payload(),
+            bytes: m.to_payload().into(),
         }),
         non_standard_payload: false,
     }));

@@ -336,7 +336,7 @@ impl Spdp {
             inline_qos: None,
             serialized_payload: Some(SerializedPayload {
                 kind: PayloadKind::Data,
-                bytes: self.local.to_payload(endianness),
+                bytes: self.local.to_payload(endianness).into(),
             }),
             non_standard_payload: false,
         }));
@@ -375,7 +375,7 @@ impl Spdp {
             inline_qos: Some(qos),
             serialized_payload: Some(SerializedPayload {
                 kind: PayloadKind::Key,
-                bytes: encode_pl_payload(&key, e),
+                bytes: encode_pl_payload(&key, e).into(),
             }),
             non_standard_payload: false,
         }));

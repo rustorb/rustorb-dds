@@ -269,7 +269,7 @@ impl Wlp {
             Some(qos),
             Some(SerializedPayload {
                 kind: PayloadKind::Data,
-                bytes: m.to_payload(Endianness::NATIVE),
+                bytes: m.to_payload(Endianness::NATIVE).into(),
             }),
         );
         if let Some(old) = self.last.insert(kind, sn) {
