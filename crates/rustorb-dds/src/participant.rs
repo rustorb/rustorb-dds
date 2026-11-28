@@ -2210,13 +2210,20 @@ impl Shared {
     pub(crate) fn remove_reader(&self, guid: &Guid) {
         // Dropped with no lock held: its listener may hold an entity of
         // this participant, whose drop takes the lock (#117).
-        let removed;
+        let mut removed;
+        let mut acks = Vec::new();
         {
             let mut g = self.lock_any();
             let inner = &mut *g;
             removed = inner.readers.remove(guid);
-            if removed.is_none() {
+            let Some(r) = removed.as_mut() else {
                 return;
+            };
+            // A reliable reader acknowledges what came before it goes, as
+            // when its participant is deleted: a writer that waits for
+            // acknowledgments is not left waiting for it.
+            if let Some(rtps) = r.rtps.as_mut() {
+                acks = rtps.acknowledge_now(Instant::now());
             }
             #[cfg(feature = "security")]
             if let Some(sec) = &inner.security {
@@ -2230,6 +2237,9 @@ impl Shared {
             if !inner.deleted {
                 inner.sedp.remove_reader(guid);
             }
+        }
+        for o in acks {
+            let _ = self.send(&o.bytes, &o.locators);
         }
         self.acknowledged.notify_all();
         self.flush();
