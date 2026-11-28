@@ -289,27 +289,6 @@ jobs:
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong
-      - name: Trace a reliable rustorb ping with an OpenDDS pong, 64 KiB (#124)
-        env:
-          SIZES: 65536
-        run: bench/trace_opendds.sh rustorb-ping-opendds-pong-64k
-      - name: Trace a reliable rustorb ping with an OpenDDS pong, 16 KiB then 64 KiB as bench/run.py (#124)
-        env:
-          SIZES: 16384,65536
-          WARMUP: 1
-          DURATION: 5
-        run: bench/trace_opendds.sh rustorb-ping-opendds-pong-16k-64k
-      - name: "#124 experiment: 64 KiB for 12 s"
-        env:
-          SIZES: 65536
-          DURATION: 12
-        run: bench/trace_opendds.sh exp-64k-long
-      - name: "#124 experiment: 64 KiB for 8 s, OpenDDS log"
-        env:
-          SIZES: 65536
-          DURATION: 8
-          OPENDDS_LOG: 1
-        run: bench/trace_opendds.sh exp-64k-log -DCPSTransportDebugLevel 6
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |

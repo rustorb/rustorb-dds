@@ -304,6 +304,26 @@ bench/run.py --peers rustorb,opendds --transports udp --interop --out bench/resu
 - スループット（best-effort）は 64 KiB で rustorb 14.3 Gbit/s、OpenDDS 5.0 Gbit/s、OpenDDS → rustorb 5.4 Gbit/s。rustorb → OpenDDS は 4.2 Gbit/s で取りこぼしが多い（OpenDDS の受け手が追いつかない）。
 - 1 プロセスの最大 RSS は、OpenDDS が 37〜43 MiB（reliable の往復では 218 MiB）、rustorb-dds が 5〜12 MiB（best-effort の受け手は 34 MiB）。
 
+#### HEARTBEAT を減らしたあと（#124）
+
+OpenDDS の reader は、HEARTBEAT への ACKNACK を最大 10 ms（RTPS_UDP の `send_delay`）ためてから送り、HEARTBEAT をひとつずつデータと同じ道筋で処理する。rustorb-dds の writer は、確認応答のない標本が 16 を超えると標本ごとに返事を求めていたので、OpenDDS が相手だとほぼ毎標本 HEARTBEAT（返事を求めるもの）を送り、そのうえ返事を求めない HEARTBEAT も毎標本に付けていた。writer は返事を求めるときだけ HEARTBEAT を送り、まだ答えていない reader には 16 標本あとにしか求め直さないようにした。
+
+CI の `bench-opendds`（2cca4be、上と同じ条件、各 1 回）での reliable の往復の中央値（µs）:
+
+| size | rustorb | OpenDDS | rustorb ping ↔ OpenDDS pong | OpenDDS ping ↔ rustorb pong |
+|---:|---:|---:|---:|---:|
+| 32 B | 90 → 67 | 525 → 299 | 699 → 155 | 850 → 156 |
+| 1 KiB | 91 → 57 | 527 → 304 | 1,834 → 162 | 1,809 → 154 |
+| 16 KiB | 104 → 83 | 558 → 333 | 2,269 → 185 | 2,256 → 171 |
+| 64 KiB | 225 → 128 | 1,029 → 582 | 1,770 → 3,074 | 1,741 → 3,091 |
+| 1 MiB | 1,664 → 1,227 | 9,100 → 3,566 | 6,584 → 5,700 | 6,155 → 5,946 |
+
+（矢印の左は変更前の回、903ce35。runner が遅い回で、OpenDDS どうしも 1.7 倍かかっている。比べるなら OpenDDS どうしとの比で、32 B の rustorb ↔ OpenDDS は OpenDDS どうしの 1.3 倍から 0.5 倍になった）
+
+- 16 KiB までは OpenDDS どうしより速くなった。reliable のスループット rustorb → OpenDDS も 1 KiB で 11.6 → 41 Mbit/s、16 KiB で 187 → 650 Mbit/s。99 パーセンタイルは 1.5〜4 ms のままで、OpenDDS が ACKNACK を 10 ms ためることによる。同じ回で OpenDDS を `send_delay=0` にすると、32 B の 90 パーセンタイルが 0.97 ms から 0.20 ms になった。
+- 64 KiB 以上は悪くなったように見えるが、OpenDDS 側の処理時間が時間とともに伸びるためで、HEARTBEAT の数とは関係がない。rustorb ping と OpenDDS pong で 64 KiB だけを 12 秒続けると、OpenDDS が rustorb の標本を受けてから返すまでの時間（パケットの記録から）は 1 秒目の約 300 µs から 12 秒目の約 1,700 µs へほぼ直線的に伸び、rustorb の側は 45 µs のまま。`bench/run.py` は 32 B から順に同じプロセスで測るので、前の大きさで交わした標本が多いほど 64 KiB の値が大きくなり、小さい大きさが速くなったぶん 64 KiB の値も大きくなった。64 KiB を単独で 3 秒測ると中央値は 660 µs。OpenDDS の再組み立て中の断片は常に 0〜1 個で、rustorb の reader が 16 標本ごとに自分から ACKNACK を返しても変わらなかった。原因はまだ分からない。
+- 調べるための道具: [bench/trace_opendds.sh](../bench/trace_opendds.sh)（CI の `bench-opendds` で、rustorb ping と OpenDDS pong の通信を tcpdump で記録し、[bench/trace_summary.py](../bench/trace_summary.py) で、送り手ごとのサブメッセージの数、折り返し時間の中央値と秒ごとの中央値、遅い折り返しの前後を出す。`SIZES`、`WARMUP`、`DURATION`、`OPENDDS_INI_EXTRA`、`OPENDDS_LOG=1` で条件を変えられる）。
+
 ### RustDDS（コンテナ）
 
 数値は [bench/results/2026-11-27-container-rustdds](../bench/results/2026-11-27-container-rustdds/report.md)（このコンテナ、rustorb-dds 391bd97、1 秒の warm-up のあと 5 秒、3 回の中央値）。Cyclone DDS 0.10.4 も同じ回に並べた。
