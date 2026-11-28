@@ -294,23 +294,18 @@ jobs:
           SIZES: 65536
           DURATION: 12
         run: bench/trace_opendds.sh exp-64k-base
-      - name: "#124 experiment: OpenDDS ping, 64 KiB for 12 s"
+      - name: "#124 experiment: HEARTBEAT first = match start, 64 KiB for 12 s"
         env:
           SIZES: 65536
           DURATION: 12
-          PING: opendds
-        run: bench/trace_opendds.sh exp-64k-opendds-ping
-      - name: "#124 experiment: OpenDDS ping, 64 KiB for 3 s"
+          RUSTORB_EXP_HB_FIRST_START: 1
+        run: bench/trace_opendds.sh exp-64k-hbfirst
+      - name: "#124 experiment: HEARTBEAT first = match start, 1 KiB for 12 s"
         env:
-          SIZES: 65536
-          DURATION: 3
-          PING: opendds
-        run: bench/trace_opendds.sh exp-64k-opendds-ping-3s
-      - name: "#124 experiment: rustorb ping, 64 KiB for 3 s"
-        env:
-          SIZES: 65536
-          DURATION: 3
-        run: bench/trace_opendds.sh exp-64k-3s
+          SIZES: 1024
+          DURATION: 12
+          RUSTORB_EXP_HB_FIRST_START: 1
+        run: bench/trace_opendds.sh exp-1k-hbfirst
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |

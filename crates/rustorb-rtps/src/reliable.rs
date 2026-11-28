@@ -829,7 +829,12 @@ impl ReliableWriter {
                     liveliness_flag: false,
                     reader_id: g.entity_id,
                     writer_id,
-                    first_sn: first_sn.max(p.start),
+                    // TEMPORARY experiment for #124.
+                    first_sn: if std::env::var_os("RUSTORB_EXP_HB_FIRST_START").is_some() {
+                        p.start
+                    } else {
+                        first_sn.max(p.start)
+                    },
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
