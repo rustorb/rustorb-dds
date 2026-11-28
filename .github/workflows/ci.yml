@@ -304,6 +304,19 @@ jobs:
           SIZES: 65536
           DURATION: 12
         run: bench/trace_opendds.sh exp-64k-long
+      - name: "#124 experiment: 64 KiB for 12 s, reader acknowledges every 16"
+        env:
+          SIZES: 65536
+          DURATION: 12
+          RUSTORB_EXP_READER_ACK: 16
+        run: bench/trace_opendds.sh exp-64k-long-ack16
+      - name: "#124 experiment: 16 KiB then 64 KiB, reader acknowledges every 16"
+        env:
+          SIZES: 16384,65536
+          WARMUP: 1
+          DURATION: 5
+          RUSTORB_EXP_READER_ACK: 16
+        run: bench/trace_opendds.sh exp-16k-64k-ack16
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
