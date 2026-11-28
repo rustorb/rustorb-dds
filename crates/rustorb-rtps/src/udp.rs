@@ -528,16 +528,21 @@ fn receive_loop(socket: &UdpSocket, channel: Channel, stop: &AtomicBool, sink: &
         };
         match got {
             Ok((data, source)) => {
+                let large = data.len() >= INLINE_SIZE;
                 let d = Datagram {
                     channel,
                     source,
                     data,
                 };
                 // Alone when no other waits behind it: a burst goes to
-                // the participant's thread while this one receives.
+                // the participant's thread while this one receives. A
+                // large datagram (fragments of a large sample) is handled
+                // here even in a burst: its handling is mostly the copy
+                // into the sample, and handing it over costs a thread
+                // wake-up (#112).
                 let waiting = pending(socket);
                 next = if EXACT_PENDING { waiting } else { 0 };
-                if !sink.deliver(d, waiting == 0) {
+                if !sink.deliver(d, waiting == 0 || large) {
                     return;
                 }
             }
@@ -569,6 +574,10 @@ fn receive_sized(socket: &UdpSocket, size: usize) -> io::Result<(Vec<u8>, Socket
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
     Ok((data, source))
 }
+
+/// The size from which a user datagram is handled on the receive thread
+/// even when others wait behind it.
+const INLINE_SIZE: usize = 8192;
 
 /// Whether [`pending`] tells the size of the first datagram waiting, as
 /// Linux does for a UDP socket, rather than of all of them.
