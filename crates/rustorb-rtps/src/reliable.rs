@@ -798,7 +798,11 @@ impl ReliableWriter {
                     || ask_all
                     || likely_missed
                     || u64::try_from(self.last_sn.0 - p.acked.0).unwrap_or(u64::MAX) >= batch);
-            let want_hb = p.heartbeat_due || sent_something || ((periodic || ask_all) && unacked);
+            // TEMPORARY experiment for #124: no HEARTBEAT after data that asks nothing.
+            let quiet = std::env::var_os("RUSTORB_EXP_QUIET_HB").is_some();
+            let want_hb = p.heartbeat_due
+                || (sent_something && (ask || !quiet))
+                || ((periodic || ask_all) && unacked);
             p.heartbeat_due = false;
             if sent_something && unacked && !ask {
                 sent_without_asking = true;
