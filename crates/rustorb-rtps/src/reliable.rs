@@ -187,10 +187,6 @@ impl Batcher {
 
 /// GAP submessages saying that the sequence numbers in `sns` (sorted) are
 /// not available: one GAP per run of consecutive numbers.
-fn c_builtin(g: &Guid) -> bool {
-    g.entity_id.entity_kind & 0xc0 == 0xc0
-}
-
 fn gaps(reader_id: EntityId, writer_id: EntityId, sns: &[SequenceNumber]) -> Vec<Submessage> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -1196,18 +1192,6 @@ impl ReliableReader {
         p.available_max = p.available_max.max(sn);
         p.drain(&mut out);
         p.tidy();
-        // TEMPORARY experiment for #124: acknowledge every N changes
-        // without waiting for a HEARTBEAT.
-        static EVERY: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-        let every = *EVERY.get_or_init(|| {
-            std::env::var("RUSTORB_EXP_ACK_EVERY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0)
-        });
-        if every > 0 && sn.0 % every == 0 && p.ack_at.is_none() && !c_builtin(&self.guid) {
-            p.ack_at = Some(std::time::Instant::now());
-        }
         out
     }
 
