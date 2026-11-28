@@ -321,8 +321,21 @@ CI の `bench-opendds`（2cca4be、上と同じ条件、各 1 回）での relia
 （矢印の左は変更前の回、903ce35。runner が遅い回で、OpenDDS どうしも 1.7 倍かかっている。比べるなら OpenDDS どうしとの比で、32 B の rustorb ↔ OpenDDS は OpenDDS どうしの 1.3 倍から 0.5 倍になった）
 
 - 16 KiB までは OpenDDS どうしより速くなった。reliable のスループット rustorb → OpenDDS も 1 KiB で 11.6 → 41 Mbit/s、16 KiB で 187 → 650 Mbit/s。99 パーセンタイルは 1.5〜4 ms のままで、OpenDDS が ACKNACK を 10 ms ためることによる。同じ回で OpenDDS を `send_delay=0` にすると、32 B の 90 パーセンタイルが 0.97 ms から 0.20 ms になった。
-- 64 KiB 以上は悪くなったように見えるが、OpenDDS 側の処理時間が時間とともに伸びるためで、HEARTBEAT の数とは関係がない。rustorb ping と OpenDDS pong で 64 KiB だけを 12 秒続けると、OpenDDS が rustorb の標本を受けてから返すまでの時間（パケットの記録から）は 1 秒目の約 300 µs から 12 秒目の約 1,700 µs へほぼ直線的に伸び、rustorb の側は 45 µs のまま。`bench/run.py` は 32 B から順に同じプロセスで測るので、前の大きさで交わした標本が多いほど 64 KiB の値が大きくなり、小さい大きさが速くなったぶん 64 KiB の値も大きくなった。64 KiB を単独で 3 秒測ると中央値は 660 µs。OpenDDS の再組み立て中の断片は常に 0〜1 個で、rustorb の reader が 16 標本ごとに自分から ACKNACK を返しても変わらなかった。原因はまだ分からない。
+- 64 KiB 以上は悪くなったように見えるが、OpenDDS 側の処理時間が時間とともに伸びるためで、HEARTBEAT の数とは関係がない。rustorb ping と OpenDDS pong で 64 KiB だけを 12 秒続けると、OpenDDS が rustorb の標本を受けてから返すまでの時間（パケットの記録から）は 1 秒目の約 300 µs から 12 秒目の約 1,700 µs へほぼ直線的に伸び、rustorb の側は 45 µs のまま。`bench/run.py` は 32 B から順に同じプロセスで測るので、前の大きさで交わした標本が多いほど 64 KiB の値が大きくなり、小さい大きさが速くなったぶん 64 KiB の値も大きくなった。64 KiB を単独で 3 秒測ると中央値は 660 µs。原因は下の「HEARTBEAT の first を据え置いたあと」。
 - 調べるための道具: [bench/trace_opendds.sh](../bench/trace_opendds.sh)（CI の `bench-opendds` で、rustorb ping と OpenDDS pong の通信を tcpdump で記録し、[bench/trace_summary.py](../bench/trace_summary.py) で、送り手ごとのサブメッセージの数、折り返し時間の中央値と秒ごとの中央値、遅い折り返しの前後を出す。`SIZES`、`WARMUP`、`DURATION`、`OPENDDS_INI_EXTRA`、`OPENDDS_LOG=1` で条件を変えられる）。
+
+#### HEARTBEAT の first を据え置いたあと（#124）
+
+OpenDDS 3.31 の reader は HEARTBEAT を受けるたびに、その firstSN より前の番号をひとつずつ再組み立てから消そうとする（`RtpsUdpReceiveStrategy::remove_fragments`、1 番号あたり約 0.15 µs）。rustorb-dds の writer は確認応答された標本を消すので firstSN はほぼ最新の番号で、HEARTBEAT 1 個の処理が書いた標本の数に比例して重くなる。64 KiB は毎標本、1 KiB は 4 標本に 1 回ほど返事を求める HEARTBEAT を送るため、64 KiB は中央値が、1 KiB は 90 パーセンタイルが時間とともに伸びていた。OpenDDS どうしは HEARTBEAT が少ないので目立たない（64 KiB の中央値は 3 秒でも 12 秒でも約 620 µs）。断片の大きさ（1 KiB〜16 KiB）、1 パケットの大きさ、rustorb の reader の ACKNACK の頻度、OpenDDS の `heartbeat_period` を変えても伸び方は変わらず、OpenDDS pong のメモリも増え続けはしなかった。
+
+OpenDDS の reader（vendor id `0x0103`）への HEARTBEAT は、reader が残っている最初の標本より前をすべて確認応答していれば、firstSN を reader の範囲の始め（1、または VOLATILE の一致より後の最初の番号）に据え置くようにした（`ReliableWriter::steady_heartbeat_first`）。確認応答した標本を reader が求め直すことはないので、reader に伝わることは変わらない。CI の `bench-opendds` で rustorb ping と OpenDDS pong を 12 秒続けたときの reliable の往復（µs、同じ回で変更前と後）:
+
+| size | p50 | p90 | p99 |
+|---:|---:|---:|---:|
+| 1 KiB | 346 → 333 | 1,477 → 360 | 2,780 → 406 |
+| 64 KiB | 1,205 → 636 | 1,702 → 705 | 1,918 → 894 |
+
+（遅い回の runner で、32 B の中央値が 334 µs。OpenDDS が返すまでの時間の秒ごとの中央値は、64 KiB で 438 → 1,554 µs と伸びていたのが 400〜450 µs のまま、1 KiB で約 260 µs のまま）
 
 ### RustDDS（コンテナ）
 

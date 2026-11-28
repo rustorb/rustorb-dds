@@ -286,26 +286,12 @@ jobs:
           --out target/bench/results-opendds
       - run: python3 bench/report.py target/bench/results-opendds
       - name: Trace a reliable rustorb ping with an OpenDDS pong (#124)
+        env:
+          SIZES: 32,1024,65536
+          DURATION: 6
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong
-      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-base"
-        env:
-          SIZES: 65536
-          DURATION: 12
-        run: bench/trace_opendds.sh exp-64k-base
-      - name: "#124 experiment: HEARTBEAT first = match start, 64 KiB for 12 s"
-        env:
-          SIZES: 65536
-          DURATION: 12
-          RUSTORB_EXP_HB_FIRST_START: 1
-        run: bench/trace_opendds.sh exp-64k-hbfirst
-      - name: "#124 experiment: HEARTBEAT first = match start, 1 KiB for 12 s"
-        env:
-          SIZES: 1024
-          DURATION: 12
-          RUSTORB_EXP_HB_FIRST_START: 1
-        run: bench/trace_opendds.sh exp-1k-hbfirst
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |

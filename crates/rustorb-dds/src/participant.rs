@@ -2625,6 +2625,15 @@ fn apply_sedp_events(inner: &mut Inner, events: Vec<SedpEvent>, now: Instant) {
                                     && d.durability >= DurabilityKind::TransientLocal,
                             },
                         );
+                        // OpenDDS handles a HEARTBEAT in time that grows
+                        // with its first sequence number (#124).
+                        if inner
+                            .spdp
+                            .participant(&remote.prefix)
+                            .is_some_and(|p| p.vendor_id == OPENDDS)
+                        {
+                            w.rtps.steady_heartbeat_first(&remote);
+                        }
                     }
                 } else if let Some(r) = inner.readers.get_mut(&local) {
                     let mut k = StatusMask::NONE;

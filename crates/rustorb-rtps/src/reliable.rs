@@ -318,6 +318,22 @@ struct ReaderProxy {
     /// are not acknowledged, not with each change while the reader takes
     /// its time to answer.
     asked: SequenceNumber,
+    /// The HEARTBEATs to this reader give the start of its range as the
+    /// first sequence number once it acknowledged all before the first
+    /// one kept (see [`ReliableWriter::steady_heartbeat_first`]).
+    steady_first: bool,
+}
+
+impl ReaderProxy {
+    /// The first sequence number of a HEARTBEAT to this reader, when
+    /// `first` is the first change kept.
+    fn heartbeat_first(&self, first: SequenceNumber) -> SequenceNumber {
+        if self.steady_first && self.acked.0 + 1 >= first.0 {
+            self.start
+        } else {
+            first.max(self.start)
+        }
+    }
 }
 
 /// A reliable writer: the history and the reader proxies of a stateful
@@ -533,9 +549,24 @@ impl ReliableWriter {
             // here (some implementations, OpenDDS among them, only take
             // data from a writer once they have its HEARTBEAT).
             heartbeat_due: m.reliable,
+            steady_first: false,
         });
         p.unicast = m.unicast;
         p.multicast = m.multicast;
+    }
+
+    /// Has the HEARTBEATs to `reader` keep their first sequence number at
+    /// the start of its range (1, or the first written after a VOLATILE
+    /// match) once it acknowledged every change before the first one
+    /// kept, rather than give the first change kept. Changes it
+    /// acknowledged are never asked for again, so it learns nothing else
+    /// from them. For OpenDDS readers (3.31 at least), which take time
+    /// proportional to the first sequence number to handle each
+    /// HEARTBEAT (rustorb-dds#124).
+    pub fn steady_heartbeat_first(&mut self, reader: &Guid) {
+        if let Some(p) = self.readers.get_mut(reader) {
+            p.steady_first = true;
+        }
     }
 
     /// Unmatches a reader (`matched_reader_remove`).
@@ -829,12 +860,7 @@ impl ReliableWriter {
                     liveliness_flag: false,
                     reader_id: g.entity_id,
                     writer_id,
-                    // TEMPORARY experiment for #124.
-                    first_sn: if std::env::var_os("RUSTORB_EXP_HB_FIRST_START").is_some() {
-                        p.start
-                    } else {
-                        first_sn.max(p.start)
-                    },
+                    first_sn: p.heartbeat_first(first_sn),
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
@@ -876,7 +902,7 @@ impl ReliableWriter {
                     liveliness_flag: true,
                     reader_id: g.entity_id,
                     writer_id,
-                    first_sn: first_sn.max(p.start),
+                    first_sn: p.heartbeat_first(first_sn),
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
@@ -1457,6 +1483,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn steady_heartbeat_first_once_acknowledged() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_reader(rguid(3), loc(3), vec![]);
+        w.steady_heartbeat_first(&rguid(2));
+        for n in 1..=3 {
+            w.add_change(None, payload(n));
+        }
+        let ack = |w: &mut ReliableWriter, r: u8, n: i64| {
+            let a = AckNack {
+                reader_id: rguid(r).entity_id,
+                writer_id: wguid().entity_id,
+                reader_sn_state: SequenceNumberSet::new(SequenceNumber(n), 0).unwrap(),
+                count: Count(n as i32),
+                final_flag: true,
+            };
+            w.handle_acknack(rguid(r), &a, t);
+        };
+        let firsts = |w: &mut ReliableWriter| -> Vec<(EntityId, i64)> {
+            w.request_acknowledgment();
+            subs(&w.poll(t))
+                .iter()
+                .filter_map(|s| match s {
+                    Submessage::Heartbeat(h) => Some((h.reader_id, h.first_sn.0)),
+                    _ => None,
+                })
+                .collect()
+        };
+        w.poll(t);
+        // 1 and 2 acknowledged by both, 3 by reader 2 only: 1 and 2 go.
+        ack(&mut w, 2, 4);
+        ack(&mut w, 3, 3);
+        w.remove_acknowledged();
+        w.add_change(None, payload(4));
+        let r2 = rguid(2).entity_id;
+        let r3 = rguid(3).entity_id;
+        assert_eq!(firsts(&mut w), [(r2, 1), (r3, 3)]);
+        // A reader that has not acknowledged all before the first change
+        // kept is told the first change kept (KEEP_LAST: 3 and 4 go
+        // before reader 2 acknowledged 4).
+        w.add_change(None, payload(5));
+        w.remove_oldest();
+        w.remove_oldest();
+        assert_eq!(firsts(&mut w), [(r2, 5), (r3, 5)]);
+        ack(&mut w, 2, 6);
+        w.add_change(None, payload(6));
+        assert_eq!(firsts(&mut w), [(r2, 1), (r3, 5)]);
     }
 
     #[test]

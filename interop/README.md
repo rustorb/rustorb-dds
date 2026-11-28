@@ -248,7 +248,18 @@ Found on the way:
   (vendor id `0x0103`) is matched; Fast DDS still gets the key hash
   alone (see Keyed below). For the `-large` cases its default socket
   buffer lost most of the 12 KiB datagrams of fragments; it asks for
-  them with NACK_FRAG after each HEARTBEAT.
+  them with NACK_FRAG after each HEARTBEAT. Its reader handles each
+  HEARTBEAT in time proportional to the HEARTBEAT's first sequence
+  number (`RtpsUdpReceiveStrategy::remove_fragments` visits every number
+  below it, about 0.15 µs each): with a writer that keeps only what is
+  not acknowledged, the cost grows with the number of samples written,
+  to milliseconds after some ten thousand (rustorb-dds#124). The
+  HEARTBEATs of rustorb-dds to an OpenDDS reader keep their first
+  sequence number at the start of the reader's range once it has
+  acknowledged all before the first change kept
+  (`ReliableWriter::steady_heartbeat_first`). A reader deleted before its
+  participant used to leave OpenDDS's `wait_for_acknowledgments` waiting;
+  it now acknowledges what came first, as a deleted participant does.
 
 - DDS Security (rustorb-dds#59): Cyclone DDS 0.10.4 starts no handshake
   with a participant that does not announce the secure SPDP endpoints
