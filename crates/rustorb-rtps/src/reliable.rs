@@ -1198,7 +1198,10 @@ impl ReliableReader {
         // TEMPORARY experiment for #124: acknowledge every N changes unasked.
         static EVERY: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
         let every = *EVERY.get_or_init(|| {
-            std::env::var("RUSTORB_EXP_READER_ACK").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+            std::env::var("RUSTORB_EXP_READER_ACK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
         });
         p.since_ack += 1;
         if every > 0 && p.since_ack >= every && p.ack_at.is_none() {
