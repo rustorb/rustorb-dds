@@ -313,6 +313,11 @@ struct ReaderProxy {
     last_acknack: Option<Count>,
     /// The reader asked for a HEARTBEAT (ACKNACK without the final flag).
     heartbeat_due: bool,
+    /// The last change of the HEARTBEAT that last asked this reader to
+    /// answer: the next asks once `acknowledgment_batch` more changes
+    /// are not acknowledged, not with each change while the reader takes
+    /// its time to answer.
+    asked: SequenceNumber,
 }
 
 /// A reliable writer: the history and the reader proxies of a stateful
@@ -516,6 +521,7 @@ impl ReliableWriter {
             start,
             highest_sent: before,
             acked: before,
+            asked: before,
             requested: BTreeSet::new(),
             requested_fragments: BTreeMap::new(),
             last_nackfrag: None,
@@ -797,11 +803,20 @@ impl ReliableWriter {
                     || periodic
                     || ask_all
                     || likely_missed
-                    || u64::try_from(self.last_sn.0 - p.acked.0).unwrap_or(u64::MAX) >= batch);
-            let want_hb = p.heartbeat_due || sent_something || ((periodic || ask_all) && unacked);
+                    || u64::try_from(self.last_sn.0 - p.acked.0.max(p.asked.0))
+                        .unwrap_or(u64::MAX)
+                        >= batch);
+            // No HEARTBEAT after changes that ask nothing: the reader
+            // learns of a loss from the next change, or from the HEARTBEAT
+            // that asks. Some readers (OpenDDS) take each HEARTBEAT on the
+            // path of the data, and the round trip doubles (#124).
+            let want_hb = p.heartbeat_due || ask || ((periodic || ask_all) && unacked);
             p.heartbeat_due = false;
             if sent_something && unacked && !ask {
                 sent_without_asking = true;
+            }
+            if ask {
+                p.asked = self.last_sn;
             }
             if want_hb {
                 // A HEARTBEAT after data asks the reader to answer, so it
@@ -1768,15 +1783,20 @@ mod tests {
                 })
                 .collect()
         };
+        // Changes that ask nothing go without a HEARTBEAT.
         w.add_change(None, payload(1));
-        assert_eq!(finals(&w.poll(t)), [true]);
+        assert_eq!(finals(&w.poll(t)), []);
         w.add_change(None, payload(2));
-        assert_eq!(finals(&w.poll(t)), [true]);
+        assert_eq!(finals(&w.poll(t)), []);
         // Three not acknowledged: asks.
         w.add_change(None, payload(3));
         assert_eq!(finals(&w.poll(t)), [false]);
-        // Still three or more: asks again.
+        // Asked already: again only three changes on (#124).
         w.add_change(None, payload(4));
+        assert_eq!(finals(&w.poll(t)), []);
+        w.add_change(None, payload(5));
+        assert_eq!(finals(&w.poll(t)), []);
+        w.add_change(None, payload(6));
         assert_eq!(finals(&w.poll(t)), [false]);
         let ack = |w: &mut ReliableWriter, n: i64| {
             let a = AckNack {
@@ -1788,9 +1808,9 @@ mod tests {
             };
             w.handle_acknack(rguid(2), &a, t);
         };
-        ack(&mut w, 5);
-        w.add_change(None, payload(5));
-        assert_eq!(finals(&w.poll(t)), [true]);
+        ack(&mut w, 7);
+        w.add_change(None, payload(7));
+        assert_eq!(finals(&w.poll(t)), []);
         // A pause of acknowledgment_delay: asks, without data.
         assert_eq!(w.next_deadline(), Some(t + Duration::from_millis(5)));
         assert!(w.poll(t + Duration::from_millis(4)).is_empty());
@@ -1802,12 +1822,12 @@ mod tests {
                 .all(|s| matches!(s, Submessage::Heartbeat(_)))
         );
         // Asked to ask: at once.
-        w.add_change(None, payload(6));
-        assert_eq!(finals(&w.poll(t + Duration::from_millis(6))), [true]);
+        w.add_change(None, payload(8));
+        assert_eq!(finals(&w.poll(t + Duration::from_millis(6))), []);
         w.request_acknowledgment();
         assert_eq!(finals(&w.poll(t + Duration::from_millis(6))), [false]);
         // Once all is acknowledged, nothing more.
-        ack(&mut w, 7);
+        ack(&mut w, 9);
         assert!(w.poll(t + Duration::from_millis(20)).is_empty());
         // A change in fragments: asks at once.
         w.config.fragmentation = Fragmentation {
