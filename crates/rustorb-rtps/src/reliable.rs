@@ -827,7 +827,8 @@ impl ReliableWriter {
             }
             b.finish(&dest, &mut out);
         }
-        if sent_without_asking {
+        // TEMPORARY experiment for #124: no HEARTBEAT that asks after a pause.
+        if sent_without_asking && std::env::var_os("RUSTORB_EXP_NO_LONE_ASK").is_none() {
             // Reset by each change sent: asked once the writer pauses.
             self.ask_at = Some(now + self.config.acknowledgment_delay);
         }

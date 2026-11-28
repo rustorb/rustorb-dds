@@ -288,37 +288,30 @@ jobs:
       - name: Trace a reliable rustorb ping with an OpenDDS pong (#124)
         run: |
           sudo apt-get install -y -qq tcpdump
-          out=target/bench/results-opendds
-          a="--domain 60 --reliability reliable --transport udp --warmup 0 --duration 3 --json --sizes 32,1024"
-          LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf pong $a \
-            -DCPSConfigFile bench/opendds/rtps.ini > /dev/null 2>&1 &
-          sudo tcpdump -i any -U -w $out/rustorb-ping-opendds-pong.pcap udp > /dev/null 2>&1 &
-          sleep 2
-          target/release/rustorb-dds-perf ping $a || true
-          sleep 1
-          sudo pkill tcpdump || true
-          wait || true
-          sudo chmod a+r $out/rustorb-ping-opendds-pong.pcap
-          python3 interop/rtps_dump.py $out/rustorb-ping-opendds-pong.pcap 60 --trace --time \
-            | python3 bench/trace_summary.py
-      - name: Trace a reliable rustorb ping with an OpenDDS pong (#124, no HEARTBEAT trailer)
+          bench/trace_opendds.sh rustorb-ping-opendds-pong
+      - name: "#124 experiment: no HEARTBEAT trailer"
         env:
           RUSTORB_EXP_QUIET_HB: 1
-        run: |
-          sudo apt-get install -y -qq tcpdump
-          out=target/bench/results-opendds
-          a="--domain 60 --reliability reliable --transport udp --warmup 0 --duration 3 --json --sizes 32,1024"
-          LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf pong $a \
-            -DCPSConfigFile bench/opendds/rtps.ini > /dev/null 2>&1 &
-          sudo tcpdump -i any -U -w $out/rustorb-ping-opendds-pong-quiet.pcap udp > /dev/null 2>&1 &
-          sleep 2
-          target/release/rustorb-dds-perf ping $a || true
-          sleep 1
-          sudo pkill tcpdump || true
-          wait || true
-          sudo chmod a+r $out/rustorb-ping-opendds-pong-quiet.pcap
-          python3 interop/rtps_dump.py $out/rustorb-ping-opendds-pong-quiet.pcap 60 --trace --time \
-            | python3 bench/trace_summary.py
+        run: bench/trace_opendds.sh quiet
+      - name: "#124 experiment: no HEARTBEAT trailer, OpenDDS log"
+        env:
+          RUSTORB_EXP_QUIET_HB: 1
+          OPENDDS_LOG: 1
+        run: bench/trace_opendds.sh quiet-log -DCPSTransportDebugLevel 6
+      - name: "#124 experiment: no HEARTBEAT trailer, no lone HEARTBEAT"
+        env:
+          RUSTORB_EXP_QUIET_HB: 1
+          RUSTORB_EXP_NO_LONE_ASK: 1
+        run: bench/trace_opendds.sh quiet-nolone
+      - name: "#124 experiment: no HEARTBEAT trailer, OpenDDS send_delay=0"
+        env:
+          RUSTORB_EXP_QUIET_HB: 1
+          OPENDDS_INI_EXTRA: send_delay=0
+        run: bench/trace_opendds.sh quiet-senddelay0
+      - name: "#124 experiment: as is, OpenDDS send_delay=0"
+        env:
+          OPENDDS_INI_EXTRA: send_delay=0
+        run: bench/trace_opendds.sh senddelay0
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
