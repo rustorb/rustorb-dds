@@ -286,6 +286,9 @@ jobs:
           --out target/bench/results-opendds
       - run: python3 bench/report.py target/bench/results-opendds
       - name: Trace a reliable rustorb ping with an OpenDDS pong (#124)
+        env:
+          SIZES: 32,1024,65536
+          DURATION: 6
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong

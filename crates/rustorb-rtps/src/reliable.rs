@@ -318,6 +318,21 @@ struct ReaderProxy {
     /// are not acknowledged, not with each change while the reader takes
     /// its time to answer.
     asked: SequenceNumber,
+    /// The HEARTBEATs to this reader give the start of its range as the
+    /// first sequence number (see [`ReliableWriter::steady_heartbeat_first`]).
+    steady_first: bool,
+}
+
+impl ReaderProxy {
+    /// The first sequence number of a HEARTBEAT to this reader, when
+    /// `first` is the first change kept.
+    fn heartbeat_first(&self, first: SequenceNumber) -> SequenceNumber {
+        if self.steady_first {
+            self.start
+        } else {
+            first.max(self.start)
+        }
+    }
 }
 
 /// A reliable writer: the history and the reader proxies of a stateful
@@ -533,9 +548,23 @@ impl ReliableWriter {
             // here (some implementations, OpenDDS among them, only take
             // data from a writer once they have its HEARTBEAT).
             heartbeat_due: m.reliable,
+            steady_first: false,
         });
         p.unicast = m.unicast;
         p.multicast = m.multicast;
+    }
+
+    /// Has the HEARTBEATs to `reader` keep their first sequence number at
+    /// the start of its range (1, or the first written after a VOLATILE
+    /// match) rather than give the first change kept. A change no longer
+    /// kept that the reader then asks for is answered with a GAP, so it
+    /// learns of it one round trip later. For OpenDDS readers (3.31 at
+    /// least), which take time proportional to the first sequence number
+    /// to handle each HEARTBEAT (rustorb-dds#124).
+    pub fn steady_heartbeat_first(&mut self, reader: &Guid) {
+        if let Some(p) = self.readers.get_mut(reader) {
+            p.steady_first = true;
+        }
     }
 
     /// Unmatches a reader (`matched_reader_remove`).
@@ -829,7 +858,7 @@ impl ReliableWriter {
                     liveliness_flag: false,
                     reader_id: g.entity_id,
                     writer_id,
-                    first_sn: first_sn.max(p.start),
+                    first_sn: p.heartbeat_first(first_sn),
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
@@ -871,7 +900,7 @@ impl ReliableWriter {
                     liveliness_flag: true,
                     reader_id: g.entity_id,
                     writer_id,
-                    first_sn: first_sn.max(p.start),
+                    first_sn: p.heartbeat_first(first_sn),
                     last_sn: self.last_sn,
                     count: Count(self.heartbeat_count),
                     group_info: None,
@@ -1452,6 +1481,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn steady_heartbeat_first() {
+        let t = Instant::now();
+        let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
+        w.add_reader(rguid(2), loc(2), vec![]);
+        w.add_reader(rguid(3), loc(3), vec![]);
+        w.steady_heartbeat_first(&rguid(2));
+        for n in 1..=3 {
+            w.add_change(None, payload(n));
+        }
+        w.poll(t);
+        let r2 = rguid(2).entity_id;
+        let r3 = rguid(3).entity_id;
+        let firsts = |w: &mut ReliableWriter| -> Vec<(EntityId, i64)> {
+            w.request_acknowledgment();
+            subs(&w.poll(t))
+                .iter()
+                .filter_map(|s| match s {
+                    Submessage::Heartbeat(h) => Some((h.reader_id, h.first_sn.0)),
+                    _ => None,
+                })
+                .collect()
+        };
+        // KEEP_LAST: 1 and 2 go before either reader acknowledged them.
+        w.remove_oldest();
+        w.remove_oldest();
+        assert_eq!(firsts(&mut w), [(r2, 1), (r3, 3)]);
+        // Reader 2 asks for 1 to 3: 1 and 2 come as a GAP.
+        let a = AckNack {
+            reader_id: r2,
+            writer_id: wguid().entity_id,
+            reader_sn_state: {
+                let mut set = SequenceNumberSet::new(SequenceNumber(1), 3).unwrap();
+                for n in 1..=3 {
+                    set.insert(SequenceNumber(n));
+                }
+                set
+            },
+            count: Count(1),
+            final_flag: false,
+        };
+        w.handle_acknack(rguid(2), &a, t);
+        let out = w.poll(t + Duration::from_millis(10));
+        assert!(subs(&out).iter().any(|s| matches!(s, Submessage::Gap(g)
+            if g.reader_id == r2 && g.gap_start == SequenceNumber(1))));
     }
 
     #[test]

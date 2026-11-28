@@ -11,6 +11,8 @@
 # OPENDDS_INI_EXTRA: lines added to [transport/rtps] of rtps.ini.
 # OPENDDS_LOG=1: keep OpenDDS's own log (NAME-opendds.log) and count
 # what its reader says about each DATA (with -DCPSTransportDebugLevel 6).
+# PING=opendds: ping with OpenDDS's perf instead of rustorb-dds-perf.
+# The pong's resident memory is printed each second.
 set -u
 name=$1
 shift
@@ -24,14 +26,24 @@ a="--domain 60 --reliability reliable --transport udp --warmup ${WARMUP:-0} --du
 LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf pong $a \
   -DCPSConfigFile "$ini" "$@" > "$out/$name-opendds.log" 2>&1 &
 pong=$!
+( while kill -0 $pong 2> /dev/null; do
+    grep VmRSS /proc/$pong/status 2> /dev/null | tr -s ' ' | cut -d' ' -f2
+    sleep 1
+  done ) > "$out/$name-rss.txt" &
 sudo tcpdump -i any -U -w "$out/$name.pcap" udp > /dev/null 2>&1 &
 sleep 2
-target/release/rustorb-dds-perf ping $a || true
+if [ "${PING:-}" = opendds ]; then
+  LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf ping $a \
+    -DCPSConfigFile "$ini" || true
+else
+  target/release/rustorb-dds-perf ping $a || true
+fi
 sleep 1
 sudo pkill tcpdump || true
 kill $pong 2> /dev/null || true
 wait || true
 sudo chmod a+r "$out/$name.pcap"
+echo "pong VmRSS (KiB) by second: $(tr '\n' ' ' < "$out/$name-rss.txt")"
 python3 interop/rtps_dump.py "$out/$name.pcap" 60 --trace --time | python3 bench/trace_summary.py
 if [ "${OPENDDS_LOG:-}" = 1 ]; then
   log=$out/$name-opendds.log
