@@ -147,6 +147,18 @@ impl ParticipantConfig {
                 // and once it pauses, rather than sample by sample (#111).
                 acknowledgment_batch: 16,
                 acknowledgment_delay: Duration::from_millis(1),
+                // TEMPORARY experiment for #124: fragment and message sizes.
+                max_message_size: std::env::var("RUSTORB_EXP_MAX_MSG")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(16 * 1024),
+                fragmentation: rustorb_rtps::frag::Fragmentation {
+                    fragment_size: std::env::var("RUSTORB_EXP_FRAG_SIZE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(4096),
+                    ..Default::default()
+                },
                 ..WriterConfig::default()
             },
             reader: ReaderConfig::default(),

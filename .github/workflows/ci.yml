@@ -289,6 +289,36 @@ jobs:
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-base"
+        env:
+          SIZES: 65536
+          DURATION: 12
+        run: bench/trace_opendds.sh exp-64k-base
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag1k"
+        env:
+          SIZES: 65536
+          DURATION: 12
+          RUSTORB_EXP_FRAG_SIZE: 1024
+        run: bench/trace_opendds.sh exp-64k-frag1k
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag1k-msg64k"
+        env:
+          SIZES: 65536
+          DURATION: 12
+          RUSTORB_EXP_FRAG_SIZE: 1024
+          RUSTORB_EXP_MAX_MSG: 65000
+        run: bench/trace_opendds.sh exp-64k-frag1k-msg64k
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-msg64k"
+        env:
+          SIZES: 65536
+          DURATION: 12
+          RUSTORB_EXP_MAX_MSG: 65000
+        run: bench/trace_opendds.sh exp-64k-msg64k
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag16k"
+        env:
+          SIZES: 65536
+          DURATION: 12
+          RUSTORB_EXP_FRAG_SIZE: 16000
+        run: bench/trace_opendds.sh exp-64k-frag16k
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
