@@ -294,31 +294,29 @@ jobs:
           SIZES: 65536
           DURATION: 12
         run: bench/trace_opendds.sh exp-64k-base
-      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag1k"
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-ack16"
         env:
           SIZES: 65536
           DURATION: 12
-          RUSTORB_EXP_FRAG_SIZE: 1024
-        run: bench/trace_opendds.sh exp-64k-frag1k
-      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag1k-msg64k"
+          RUSTORB_EXP_ACK_EVERY: 16
+        run: bench/trace_opendds.sh exp-64k-ack16
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-ack1"
         env:
           SIZES: 65536
           DURATION: 12
-          RUSTORB_EXP_FRAG_SIZE: 1024
-          RUSTORB_EXP_MAX_MSG: 65000
-        run: bench/trace_opendds.sh exp-64k-frag1k-msg64k
-      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-msg64k"
+          RUSTORB_EXP_ACK_EVERY: 1
+        run: bench/trace_opendds.sh exp-64k-ack1
+      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-hb100"
         env:
           SIZES: 65536
           DURATION: 12
-          RUSTORB_EXP_MAX_MSG: 65000
-        run: bench/trace_opendds.sh exp-64k-msg64k
-      - name: "#124 experiment: 64 KiB for 12 s, exp-64k-frag16k"
+          OPENDDS_INI_EXTRA: heartbeat_period=100
+        run: bench/trace_opendds.sh exp-64k-hb100
+      - name: "#124 experiment: 1 KiB for 12 s, exp-1k-base"
         env:
-          SIZES: 65536
+          SIZES: 1024
           DURATION: 12
-          RUSTORB_EXP_FRAG_SIZE: 16000
-        run: bench/trace_opendds.sh exp-64k-frag16k
+        run: bench/trace_opendds.sh exp-1k-base
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
