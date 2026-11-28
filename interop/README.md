@@ -255,9 +255,9 @@ Found on the way:
   not acknowledged, the cost grows with the number of samples written,
   to milliseconds after some ten thousand (rustorb-dds#124). The
   HEARTBEATs of rustorb-dds to an OpenDDS reader keep their first
-  sequence number at the start of the reader's range once it has
-  acknowledged all before the first change kept
-  (`ReliableWriter::steady_heartbeat_first`). A reader deleted before its
+  sequence number at the start of the reader's range
+  (`ReliableWriter::steady_heartbeat_first`); a change no longer kept
+  that it asks for is answered with a GAP. A reader deleted before its
   participant used to leave OpenDDS's `wait_for_acknowledgments` waiting;
   it now acknowledges what came first, as a deleted participant does.
 

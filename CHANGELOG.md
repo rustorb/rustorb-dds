@@ -11,8 +11,8 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 ### Changed
 
 - The HEARTBEATs to an OpenDDS reader keep their first sequence number
-  at the start of the reader's range once it has acknowledged every
-  change before the first one kept (`ReliableWriter::steady_heartbeat_first`).
+  at the start of the reader's range (`ReliableWriter::steady_heartbeat_first`);
+  a change no longer kept that it asks for is answered with a GAP.
   OpenDDS 3.31 handles a HEARTBEAT in time proportional to its first
   sequence number, so the reliable round trip of 64 KiB with an OpenDDS
   pong grew from about 400 µs to 1,700 µs in 12 s, and 10% of those of

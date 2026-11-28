@@ -328,7 +328,7 @@ CI の `bench-opendds`（2cca4be、上と同じ条件、各 1 回）での relia
 
 OpenDDS 3.31 の reader は HEARTBEAT を受けるたびに、その firstSN より前の番号をひとつずつ再組み立てから消そうとする（`RtpsUdpReceiveStrategy::remove_fragments`、1 番号あたり約 0.15 µs）。rustorb-dds の writer は確認応答された標本を消すので firstSN はほぼ最新の番号で、HEARTBEAT 1 個の処理が書いた標本の数に比例して重くなる。64 KiB は毎標本、1 KiB は 4 標本に 1 回ほど返事を求める HEARTBEAT を送るため、64 KiB は中央値が、1 KiB は 90 パーセンタイルが時間とともに伸びていた。OpenDDS どうしは HEARTBEAT が少ないので目立たない（64 KiB の中央値は 3 秒でも 12 秒でも約 620 µs）。断片の大きさ（1 KiB〜16 KiB）、1 パケットの大きさ、rustorb の reader の ACKNACK の頻度、OpenDDS の `heartbeat_period` を変えても伸び方は変わらず、OpenDDS pong のメモリも増え続けはしなかった。
 
-OpenDDS の reader（vendor id `0x0103`）への HEARTBEAT は、reader が残っている最初の標本より前をすべて確認応答していれば、firstSN を reader の範囲の始め（1、または VOLATILE の一致より後の最初の番号）に据え置くようにした（`ReliableWriter::steady_heartbeat_first`）。確認応答した標本を reader が求め直すことはないので、reader に伝わることは変わらない。CI の `bench-opendds` で rustorb ping と OpenDDS pong を 12 秒続けたときの reliable の往復（µs、同じ回で変更前と後）:
+OpenDDS の reader（vendor id `0x0103`）への HEARTBEAT は、firstSN を reader の範囲の始め（1、または VOLATILE の一致より後の最初の番号）に据え置くようにした（`ReliableWriter::steady_heartbeat_first`）。もう残っていない標本を reader が求めたら GAP で答えるので、それが分かるのが 1 往復遅れるだけで済む。（reader が確認応答済みのときだけ据え置く形も試したが、KEEP_LAST の writer は確認応答を待たずに古い標本を消し、OpenDDS は ACKNACK を 10 ms ためるので、ほとんど据え置かれず効かなかった）CI の `bench-opendds` で rustorb ping と OpenDDS pong を 12 秒続けたときの reliable の往復（µs、同じ回で変更前と後）:
 
 | size | p50 | p90 | p99 |
 |---:|---:|---:|---:|

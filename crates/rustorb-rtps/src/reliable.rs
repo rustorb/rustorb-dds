@@ -319,8 +319,7 @@ struct ReaderProxy {
     /// its time to answer.
     asked: SequenceNumber,
     /// The HEARTBEATs to this reader give the start of its range as the
-    /// first sequence number once it acknowledged all before the first
-    /// one kept (see [`ReliableWriter::steady_heartbeat_first`]).
+    /// first sequence number (see [`ReliableWriter::steady_heartbeat_first`]).
     steady_first: bool,
 }
 
@@ -328,7 +327,7 @@ impl ReaderProxy {
     /// The first sequence number of a HEARTBEAT to this reader, when
     /// `first` is the first change kept.
     fn heartbeat_first(&self, first: SequenceNumber) -> SequenceNumber {
-        if self.steady_first && self.acked.0 + 1 >= first.0 {
+        if self.steady_first {
             self.start
         } else {
             first.max(self.start)
@@ -557,12 +556,11 @@ impl ReliableWriter {
 
     /// Has the HEARTBEATs to `reader` keep their first sequence number at
     /// the start of its range (1, or the first written after a VOLATILE
-    /// match) once it acknowledged every change before the first one
-    /// kept, rather than give the first change kept. Changes it
-    /// acknowledged are never asked for again, so it learns nothing else
-    /// from them. For OpenDDS readers (3.31 at least), which take time
-    /// proportional to the first sequence number to handle each
-    /// HEARTBEAT (rustorb-dds#124).
+    /// match) rather than give the first change kept. A change no longer
+    /// kept that the reader then asks for is answered with a GAP, so it
+    /// learns of it one round trip later. For OpenDDS readers (3.31 at
+    /// least), which take time proportional to the first sequence number
+    /// to handle each HEARTBEAT (rustorb-dds#124).
     pub fn steady_heartbeat_first(&mut self, reader: &Guid) {
         if let Some(p) = self.readers.get_mut(reader) {
             p.steady_first = true;
@@ -1486,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn steady_heartbeat_first_once_acknowledged() {
+    fn steady_heartbeat_first() {
         let t = Instant::now();
         let mut w = ReliableWriter::new(wguid(), VendorId::UNKNOWN, WriterConfig::default());
         w.add_reader(rguid(2), loc(2), vec![]);
@@ -1495,16 +1493,9 @@ mod tests {
         for n in 1..=3 {
             w.add_change(None, payload(n));
         }
-        let ack = |w: &mut ReliableWriter, r: u8, n: i64| {
-            let a = AckNack {
-                reader_id: rguid(r).entity_id,
-                writer_id: wguid().entity_id,
-                reader_sn_state: SequenceNumberSet::new(SequenceNumber(n), 0).unwrap(),
-                count: Count(n as i32),
-                final_flag: true,
-            };
-            w.handle_acknack(rguid(r), &a, t);
-        };
+        w.poll(t);
+        let r2 = rguid(2).entity_id;
+        let r3 = rguid(3).entity_id;
         let firsts = |w: &mut ReliableWriter| -> Vec<(EntityId, i64)> {
             w.request_acknowledgment();
             subs(&w.poll(t))
@@ -1515,25 +1506,28 @@ mod tests {
                 })
                 .collect()
         };
-        w.poll(t);
-        // 1 and 2 acknowledged by both, 3 by reader 2 only: 1 and 2 go.
-        ack(&mut w, 2, 4);
-        ack(&mut w, 3, 3);
-        w.remove_acknowledged();
-        w.add_change(None, payload(4));
-        let r2 = rguid(2).entity_id;
-        let r3 = rguid(3).entity_id;
+        // KEEP_LAST: 1 and 2 go before either reader acknowledged them.
+        w.remove_oldest();
+        w.remove_oldest();
         assert_eq!(firsts(&mut w), [(r2, 1), (r3, 3)]);
-        // A reader that has not acknowledged all before the first change
-        // kept is told the first change kept (KEEP_LAST: 3 and 4 go
-        // before reader 2 acknowledged 4).
-        w.add_change(None, payload(5));
-        w.remove_oldest();
-        w.remove_oldest();
-        assert_eq!(firsts(&mut w), [(r2, 5), (r3, 5)]);
-        ack(&mut w, 2, 6);
-        w.add_change(None, payload(6));
-        assert_eq!(firsts(&mut w), [(r2, 1), (r3, 5)]);
+        // Reader 2 asks for 1 to 3: 1 and 2 come as a GAP.
+        let a = AckNack {
+            reader_id: r2,
+            writer_id: wguid().entity_id,
+            reader_sn_state: {
+                let mut set = SequenceNumberSet::new(SequenceNumber(1), 3).unwrap();
+                for n in 1..=3 {
+                    set.insert(SequenceNumber(n));
+                }
+                set
+            },
+            count: Count(1),
+            final_flag: false,
+        };
+        w.handle_acknack(rguid(2), &a, t);
+        let out = w.poll(t + Duration::from_millis(10));
+        assert!(subs(&out).iter().any(|s| matches!(s, Submessage::Gap(g)
+            if g.reader_id == r2 && g.gap_start == SequenceNumber(1))));
     }
 
     #[test]

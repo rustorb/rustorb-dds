@@ -109,7 +109,7 @@ RxO（requested/offered）の比較は RELIABILITY、DURABILITY、DEADLINE、LIV
 | SPDP（8.5.3） | ✅ | マルチキャスト。ユニキャストだけの初期ピア一覧はない |
 | SEDP（8.5.4） | ✅ | |
 | Writer Liveliness Protocol（8.4.13） | ✅ | |
-| best-effort と reliable の writer・reader（stateful） | ✅ | HEARTBEAT、ACKNACK、GAP。OpenDDS の reader への HEARTBEAT は、reader が確認応答済みなら firstSN を reader の範囲の始めに据え置く（OpenDDS が firstSN に比例して遅くなるため、#124、interop/README.md） |
+| best-effort と reliable の writer・reader（stateful） | ✅ | HEARTBEAT、ACKNACK、GAP。OpenDDS の reader への HEARTBEAT は firstSN を reader の範囲の始めに据え置き、もうない標本を求められたら GAP で答える（OpenDDS が firstSN に比例して遅くなるため、#124、interop/README.md） |
 | DATA_FRAG、HEARTBEAT_FRAG、NACK_FRAG（8.4.14.1） | ✅ | |
 | keyed のトピック、key hash（`PID_KEY_HASH`）、`PID_STATUS_INFO` | ✅ | |
 | `PID_CONTENT_FILTER_PROPERTY`、`PID_RELATED_SAMPLE_IDENTITY`、`PID_TYPE_INFORMATION`、`PID_DATA_REPRESENTATION` など | ✅ | |
