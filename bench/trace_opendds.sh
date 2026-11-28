@@ -40,5 +40,8 @@ if [ "${OPENDDS_LOG:-}" = 1 ]; then
            "ALREADY received" "unknown writer" "deliver sequence" "Count indicates duplicate"; do
     echo "  $k: $(grep -c "$k" "$log")"
   done
+  echo "fragments held by OpenDDS's reassembly, first and last lines:"
+  grep -E "with [0-9]+ fragments|leaving [0-9]+ fragments" "$log" | head -3 | cut -c1-250 || true
+  grep -E "with [0-9]+ fragments|leaving [0-9]+ fragments" "$log" | tail -3 | cut -c1-250 || true
   grep -B 3 -A 3 "EXPECTING more data\|WITHHOLD\|expecting heartbeat" "$log" | cut -c1-300 | tail -60 || true
 fi

@@ -967,8 +967,6 @@ struct WriterProxy {
     available_max: SequenceNumber,
     last_heartbeat: Option<Count>,
     ack_at: Option<Instant>,
-    /// TEMPORARY experiment for #124: changes since the last ACKNACK.
-    since_ack: u32,
     /// Changes of which some fragments are in.
     fragments: Reassembler,
     /// What HEARTBEAT_FRAGs said is available, by sequence number, not
@@ -1121,7 +1119,6 @@ impl ReliableReader {
             available_max: SequenceNumber(0),
             last_heartbeat: None,
             ack_at: Some(now),
-            since_ack: 0,
             fragments: Reassembler::new(self.config.reassembly, Keep::Lowest),
             heartbeat_frags: BTreeMap::new(),
             last_heartbeat_frag: None,
@@ -1195,18 +1192,6 @@ impl ReliableReader {
         p.available_max = p.available_max.max(sn);
         p.drain(&mut out);
         p.tidy();
-        // TEMPORARY experiment for #124: acknowledge every N changes unasked.
-        static EVERY: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        let every = *EVERY.get_or_init(|| {
-            std::env::var("RUSTORB_EXP_READER_ACK")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0)
-        });
-        p.since_ack += 1;
-        if every > 0 && p.since_ack >= every && p.ack_at.is_none() {
-            p.ack_at = Some(Instant::now());
-        }
         out
     }
 
@@ -1286,7 +1271,6 @@ impl ReliableReader {
                 continue;
             }
             p.ack_at = None;
-            p.since_ack = 0;
             let missing = p.missing();
             let base = p.next_expected;
             let num_bits = missing.last().map_or(0, |m| (m.0 - base.0 + 1) as u32);
