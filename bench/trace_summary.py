@@ -38,3 +38,8 @@ for v, xs in turn.items():
         print(f"--- vendor {v} turnaround {dt} us")
         for _, _, _, l in events[max(0, i - 12):i + 2]:
             print(l)
+# A stretch of ordinary traffic, late in the capture (the last size).
+start = int(len(events) * 0.85)
+print("--- a stretch at 85% of the capture")
+for _, _, _, l in events[start:start + 40]:
+    print(l)
