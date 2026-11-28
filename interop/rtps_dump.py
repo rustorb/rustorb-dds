@@ -7,7 +7,8 @@ then each DATA of a user writer (not a builtin one) in hex.
 
 --all shows the builtin writers' DATA too. --trace shows instead one line
 for each DATA, HEARTBEAT, ACKNACK and GAP between user endpoints, and
-the text of each SEDP announcement.
+the text of each SEDP announcement; with --time, each line starts with
+the microseconds since the first packet.
 """
 import re
 import struct
@@ -22,7 +23,9 @@ def packets(path):
     link = struct.unpack(e + "I", d[20:24])[0]
     at = 24
     while at + 16 <= len(d):
-        _, _, incl, _ = struct.unpack(e + "IIII", d[at:at + 16])
+        sec, frac, incl, _ = struct.unpack(e + "IIII", d[at:at + 16])
+        # Microseconds, or nanoseconds in a nanosecond capture.
+        ts = sec + frac / (1e9 if magic in (0xA1B23C4D, 0x4D3CB2A1) else 1e6)
         p = d[at + 16:at + 16 + incl]
         at += 16 + incl
         if link == 1:  # Ethernet
@@ -39,7 +42,7 @@ def packets(path):
         if p[9] != 17:
             continue
         sport, dport = struct.unpack(">HH", p[ihl:ihl + 4])
-        yield sport, dport, p[ihl + 8:]
+        yield ts, sport, dport, p[ihl + 8:]
 
 
 def domain_of(port):
@@ -50,6 +53,10 @@ def domain_of(port):
 def sn(b, e):
     high, low = struct.unpack(e + "iI", b[:8])
     return (high << 32) + low
+
+
+# The time stamp printed before a trace line (--time).
+STAMP = [""]
 
 
 def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
@@ -93,7 +100,7 @@ def show_trace(dom, sport, dport, vendor, prefix, sid, flags, body):
         detail = f"first {sn(rest, e)} last {sn(rest[8:], e)}"
     else:
         detail = f"start {sn(rest, e)} base {sn(rest[8:], e)}"
-    print(f"domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} {what}"
+    print(f"{STAMP[0]}domain {dom} {sport}->{dport} vendor {vendor} prefix {prefix} {what}"
           f" flags {flags:#04x} writer {writer.hex()} reader {reader.hex()} {detail}")
 
 
@@ -102,14 +109,21 @@ def main():
     limit = 20
     builtin = "--all" in args
     trace = "--trace" in args
-    args = [a for a in args if a not in ("--all", "--trace")]
+    times = "--time" in args
+    args = [a for a in args if a not in ("--all", "--trace", "--time")]
     if "--max" in args:
         i = args.index("--max")
         limit = int(args[i + 1])
         del args[i:i + 2]
     path, domains = args[0], {int(a) for a in args[1:]}
     shown = {}
-    for sport, dport, u in packets(path):
+    first = None
+    for ts, sport, dport, u in packets(path):
+        if first is None:
+            first = ts
+        if times:
+            STAMP[0] = f"{(ts - first) * 1e6:10.0f}us "
+
         dom = domain_of(dport)
         if dom not in domains:
             # Replies to ports outside the domain's range (OpenDDS

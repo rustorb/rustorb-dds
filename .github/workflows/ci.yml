@@ -285,6 +285,22 @@ jobs:
           --sizes 32,1024,16384,65536,1048576 --warmup 0.5 --duration 3 --repeat 1
           --out target/bench/results-opendds
       - run: python3 bench/report.py target/bench/results-opendds
+      - name: Trace a reliable rustorb ping with an OpenDDS pong (#124)
+        run: |
+          sudo apt-get install -y -qq tcpdump
+          out=target/bench/results-opendds
+          a="--domain 60 --reliability reliable --transport udp --warmup 0 --duration 2 --json --sizes 1024 --count 50"
+          LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf pong $a \
+            -DCPSConfigFile bench/opendds/rtps.ini > /dev/null 2>&1 &
+          sudo tcpdump -i any -U -w $out/rustorb-ping-opendds-pong.pcap udp > /dev/null 2>&1 &
+          sleep 2
+          target/release/rustorb-dds-perf ping $a || true
+          sleep 1
+          sudo pkill tcpdump || true
+          wait || true
+          sudo chmod a+r $out/rustorb-ping-opendds-pong.pcap
+          python3 interop/rtps_dump.py $out/rustorb-ping-opendds-pong.pcap 60 --trace --time \
+            | grep -v SEDP | head -300
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
