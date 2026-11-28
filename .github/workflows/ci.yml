@@ -289,6 +289,10 @@ jobs:
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong
+      - name: Trace a reliable rustorb ping with an OpenDDS pong, 64 KiB (#124)
+        env:
+          SIZES: 65536
+        run: bench/trace_opendds.sh rustorb-ping-opendds-pong-64k
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |

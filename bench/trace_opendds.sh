@@ -6,6 +6,7 @@
 #
 #   bench/trace_opendds.sh NAME [OPENDDS-ARGS...]
 #
+# SIZES: the sizes to ping (32,1024 when unset).
 # OPENDDS_INI_EXTRA: lines added to [transport/rtps] of rtps.ini.
 # OPENDDS_LOG=1: keep OpenDDS's own log (NAME-opendds.log) and count
 # what its reader says about each DATA (with -DCPSTransportDebugLevel 6).
@@ -18,7 +19,7 @@ if [ -n "${OPENDDS_INI_EXTRA:-}" ]; then
   ini=$out/$name.ini
   { cat bench/opendds/rtps.ini; printf '%s\n' "$OPENDDS_INI_EXTRA"; } > "$ini"
 fi
-a="--domain 60 --reliability reliable --transport udp --warmup 0 --duration 3 --json --sizes 32,1024"
+a="--domain 60 --reliability reliable --transport udp --warmup 0 --duration 3 --json --sizes ${SIZES:-32,1024}"
 LD_LIBRARY_PATH=$PWD/target/bench/opendds/lib target/bench/opendds/perf pong $a \
   -DCPSConfigFile "$ini" "$@" > "$out/$name-opendds.log" 2>&1 &
 pong=$!
