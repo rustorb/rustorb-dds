@@ -293,6 +293,12 @@ jobs:
         env:
           SIZES: 65536
         run: bench/trace_opendds.sh rustorb-ping-opendds-pong-64k
+      - name: Trace a reliable rustorb ping with an OpenDDS pong, 16 KiB then 64 KiB as bench/run.py (#124)
+        env:
+          SIZES: 16384,65536
+          WARMUP: 1
+          DURATION: 5
+        run: bench/trace_opendds.sh rustorb-ping-opendds-pong-16k-64k
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
