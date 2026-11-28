@@ -33,6 +33,13 @@ for v, xs in turn.items():
     d = sorted(x for x, _ in xs)
     print(f"vendor {v} turnaround: n {len(d)} median {statistics.median(d)} us"
           f" p90 {d[int(len(d) * 0.9)]} us max {d[-1]} us")
+# The median turnaround of each second of the capture: does it drift?
+for v, xs in turn.items():
+    by_second = defaultdict(list)
+    for dt, i in xs:
+        by_second[events[i][0] // 1_000_000].append(dt)
+    print(f"vendor {v} median turnaround by second: " + " ".join(
+        f"{s}:{statistics.median(d):.0f}" for s, d in sorted(by_second.items())))
 for v, xs in turn.items():
     for dt, i in sorted(xs)[-3:]:
         print(f"--- vendor {v} turnaround {dt} us")

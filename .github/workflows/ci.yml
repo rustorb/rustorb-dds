@@ -299,19 +299,11 @@ jobs:
           WARMUP: 1
           DURATION: 5
         run: bench/trace_opendds.sh rustorb-ping-opendds-pong-16k-64k
-      - name: "#124 experiment: 32 B then 64 KiB"
+      - name: "#124 experiment: 64 KiB for 12 s"
         env:
-          SIZES: 32,65536
-          WARMUP: 1
-          DURATION: 5
-        run: bench/trace_opendds.sh exp-32-64k
-      - name: "#124 experiment: 16 KiB then 64 KiB, OpenDDS send_delay=0"
-        env:
-          SIZES: 16384,65536
-          WARMUP: 1
-          DURATION: 5
-          OPENDDS_INI_EXTRA: send_delay=0
-        run: bench/trace_opendds.sh exp-16k-64k-sd0
+          SIZES: 65536
+          DURATION: 12
+        run: bench/trace_opendds.sh exp-64k-long
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |
