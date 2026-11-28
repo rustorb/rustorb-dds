@@ -289,29 +289,6 @@ jobs:
         run: |
           sudo apt-get install -y -qq tcpdump
           bench/trace_opendds.sh rustorb-ping-opendds-pong
-      - name: "#124 experiment: no HEARTBEAT trailer"
-        env:
-          RUSTORB_EXP_QUIET_HB: 1
-        run: bench/trace_opendds.sh quiet
-      - name: "#124 experiment: no HEARTBEAT trailer, OpenDDS log"
-        env:
-          RUSTORB_EXP_QUIET_HB: 1
-          OPENDDS_LOG: 1
-        run: bench/trace_opendds.sh quiet-log -DCPSTransportDebugLevel 6
-      - name: "#124 experiment: no HEARTBEAT trailer, no lone HEARTBEAT"
-        env:
-          RUSTORB_EXP_QUIET_HB: 1
-          RUSTORB_EXP_NO_LONE_ASK: 1
-        run: bench/trace_opendds.sh quiet-nolone
-      - name: "#124 experiment: no HEARTBEAT trailer, OpenDDS send_delay=0"
-        env:
-          RUSTORB_EXP_QUIET_HB: 1
-          OPENDDS_INI_EXTRA: send_delay=0
-        run: bench/trace_opendds.sh quiet-senddelay0
-      - name: "#124 experiment: as is, OpenDDS send_delay=0"
-        env:
-          OPENDDS_INI_EXTRA: send_delay=0
-        run: bench/trace_opendds.sh senddelay0
       - name: Show the first OpenDDS runs of the log
         if: failure()
         run: |

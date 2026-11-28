@@ -10,6 +10,17 @@ version and one tag, `v<version>`; the Python package 0.1.0 alone was tagged
 
 ### Changed
 
+- A reliable writer sends a HEARTBEAT only when it asks its readers to
+  answer, not after every change, and asks a reader that has not answered
+  yet again only `acknowledgment_batch` changes later, not with each
+  change. OpenDDS answers a HEARTBEAT up to 10 ms later (its
+  `send_delay`) and handles each one on the path of the data, so the
+  writer used to ask with nearly every change and the reliable round
+  trip with an OpenDDS pong was 699 µs at 32 B and 1,834 µs at 1 KiB
+  (#124).
+- The receive thread handles a user datagram of 8 KiB or more at once
+  even when others wait behind it: the reliable round trip of 64 KiB
+  went from about 206 to 172 µs with 20% less CPU (#112).
 - A reliable KEEP_ALL writer with more than 2 MiB its readers have not
   acknowledged waits for acknowledgments before it writes, up to
   `max_blocking_time`, and then writes anyway. A fast writer used to
