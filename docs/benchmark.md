@@ -337,6 +337,8 @@ OpenDDS の reader（vendor id `0x0103`）への HEARTBEAT は、firstSN を rea
 
 （遅い回の runner で、32 B の中央値が 334 µs。OpenDDS が返すまでの時間の秒ごとの中央値は、64 KiB で 438 → 1,554 µs と伸びていたのが 400〜450 µs のまま、1 KiB で約 260 µs のまま）
 
+この PR の最後の CI（b7de47b、CI の trace の手順で 32 B、1 KiB、64 KiB を同じプロセスで各 6 秒、速い回の runner）では、rustorb ping と OpenDDS pong の往復の p50 / p90 / p99 が 32 B で 136 / 195 / 248 µs、1 KiB で 149 / 200 / 261 µs、64 KiB で 336 / 384 / 514 µs。前の大きさで交わした標本が多くても 64 KiB は伸びず、32 B と 1 KiB の 90 パーセンタイルも 1〜2 ms から 0.2 ms になった。
+
 ### RustDDS（コンテナ）
 
 数値は [bench/results/2026-11-27-container-rustdds](../bench/results/2026-11-27-container-rustdds/report.md)（このコンテナ、rustorb-dds 391bd97、1 秒の warm-up のあと 5 秒、3 回の中央値）。Cyclone DDS 0.10.4 も同じ回に並べた。
